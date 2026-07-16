@@ -1,0 +1,5 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "google-antigravity-codex",
+  "description": "Codex and Antigravity CLI skills plus MCP tools for official agy sessions, explicit token-export reuse, chat, writing, releases, models, and diagnostics."
+}

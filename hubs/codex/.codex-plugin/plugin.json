@@ -1,0 +1,13 @@
+{
+  "name": "agent-hub",
+  "version": "0.1.0",
+  "description": "Personal cross-agent substrate for Codex: shared memory (basic-memory), multi-model access (provider leaf plugins + orchestrate-codex), and git-artifact handoff.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "agent-hub",
+    "category": "orchestration"
+  },
+  "author": "naen",
+  "license": "MIT"
+}

@@ -1,0 +1,29 @@
+{
+  "contextFileName": "AGENTS.md",
+  "mcpServers": {
+    "memory": {
+      "command": "uvx",
+      "args": [
+        "basic-memory",
+        "mcp"
+      ],
+      "env": {
+        "BASIC_MEMORY_CONFIG_DIR": "/Users/naen/Git/agent-hub-mono/memory/.basic-memory",
+        "BASIC_MEMORY_HOME": "/Users/naen/Git/agent-hub-mono/memory/data",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      }
+    },
+    "orchestrate": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/orchestrate-codex-mcp"
+    },
+    "claude_codex": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/claude-codex-mcp"
+    },
+    "grok_codex": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/grok-codex-mcp"
+    },
+    "antigravity": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/google-antigravity-mcp"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "agent-hub",
+  "displayName": "agent-hub",
+  "version": "0.1.0",
+  "description": "Personal cross-agent substrate for Claude Code: shared memory (basic-memory), multi-model access (provider leaf plugins + orchestrate-codex), and git-artifact handoff.",
+  "author": { "name": "naen" },
+  "license": "MIT",
+  "keywords": ["orchestration", "handoff", "mcp", "multi-model"]
+}

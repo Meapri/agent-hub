@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "claude-codex": {
+      "command": "python3",
+      "args": ["${extensionPath}/scripts/claude_codex_mcp.py"],
+      "cwd": "${extensionPath}",
+      "env": {
+        "CLAUDE_CODEX_RUNNING_UNDER_CODEX_MCP": "1"
+      },
+      "disabledTools": []
+    }
+  }
+}

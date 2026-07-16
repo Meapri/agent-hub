@@ -1,0 +1,34 @@
+{
+  "name": "claude-codex",
+  "version": "0.2.0",
+  "description": "Codex skills and MCP tools for Claude Codex: API-key auth, chat, models, diagnostics.",
+  "author": {
+    "name": "Park Chanwoo",
+    "url": "https://github.com/Meapri"
+  },
+  "homepage": "https://github.com/Meapri/claude-codex",
+  "repository": "https://github.com/Meapri/claude-codex",
+  "license": "MIT",
+  "keywords": ["codex", "mcp", "anthropic", "chat"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Claude Codex",
+    "shortDescription": "Claude Codex leaf provider for Codex.",
+    "longDescription": "Claude Codex provides Codex skills and an MCP stdio server for consent-gated chat, model listing, and diagnostics. Designed as a direct-callable leaf for multi-provider orchestration.",
+    "developerName": "Park Chanwoo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Consent-gated chat",
+      "Model listing",
+      "Provider status",
+      "Doctor checks",
+      "MCP"
+    ],
+    "defaultPrompt": [
+      "Check Claude Codex provider status.",
+      "List available models.",
+      "Chat with anthropic after consent."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

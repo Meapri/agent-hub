@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "uvx",
+      "args": [
+        "basic-memory",
+        "mcp"
+      ],
+      "env": {
+        "BASIC_MEMORY_CONFIG_DIR": "/Users/naen/Git/agent-hub-mono/memory/.basic-memory",
+        "BASIC_MEMORY_HOME": "/Users/naen/Git/agent-hub-mono/memory/data",
+        "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
+      },
+      "type": "stdio"
+    },
+    "orchestrate": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/orchestrate-codex-mcp",
+      "type": "stdio"
+    },
+    "claude_codex": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/claude-codex-mcp",
+      "type": "stdio"
+    },
+    "grok_codex": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/grok-codex-mcp",
+      "type": "stdio"
+    },
+    "antigravity": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/google-antigravity-mcp",
+      "type": "stdio"
+    }
+  }
+}

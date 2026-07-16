@@ -1,0 +1,55 @@
+{
+  "name": "google-antigravity-codex",
+  "version": "0.9.8",
+  "description": "Codex skills and MCP tools for Google Antigravity: direct OAuth login, agy CLI sessions, and Code Assist tools.",
+  "author": {
+    "name": "Park Chanwoo",
+    "url": "https://github.com/Meapri"
+  },
+  "homepage": "https://github.com/Meapri/google-antigravity-codex",
+  "repository": "https://github.com/Meapri/google-antigravity-codex",
+  "license": "MIT",
+  "keywords": [
+    "google",
+    "antigravity",
+    "codex",
+    "mcp",
+    "security",
+    "release-tools",
+    "diagnostics"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Google Antigravity Codex",
+    "shortDescription": "Native Antigravity sessions for Codex.",
+    "longDescription": "Google Antigravity Codex provides Codex skills and an MCP stdio server with direct Google Antigravity OAuth login (PKCE), the official agy CLI session, and optional token-export reuse. It includes chat, writing, releases, models, diagnostics, and capability-gated grounding and image tools. Provider calls require explicit user consent.",
+    "developerName": "Park Chanwoo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Native agy CLI 1.1.x plugin",
+      "Guarded optional CLI diagnostics",
+      "Antigravity CLI doctor",
+      "Coding assistance",
+      "Code review",
+      "Direct Google Antigravity OAuth login (PKCE)",
+      "Consent-gated agy session provider",
+      "Explicit agy token-export compatibility provider",
+      "Capability-gated Google grounded search",
+      "Writing",
+      "Release drafting",
+      "Capability-gated image generation",
+      "Model listing",
+      "Model routing",
+      "Doctor checks",
+      "Security boundaries",
+      "Quota status",
+      "MCP"
+    ],
+    "defaultPrompt": [
+      "Run an Antigravity plugin doctor check.",
+      "List available Antigravity models and route this task.",
+      "Use Antigravity to help with this coding or writing task after consent."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

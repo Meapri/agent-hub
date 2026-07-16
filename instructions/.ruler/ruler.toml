@@ -1,0 +1,65 @@
+# Verified against @intellectronica/ruler 0.3.44 on 2026-07-15.
+default_agents = ["claude", "codex", "gemini-cli", "cursor"]
+nested = false
+
+[mcp]
+enabled = true
+merge_strategy = "merge"
+
+# Generated guidance is intentionally committed so fresh clones and worktrees
+# receive instructions before Ruler is installed.
+[gitignore]
+enabled = false
+local = false
+
+[backup]
+enabled = false
+
+# Phase 1 only distributes rules. Skills remain out of scope for now.
+[skills]
+enabled = false
+
+[agents.claude]
+enabled = true
+output_path = "CLAUDE.md"
+
+[agents.codex]
+enabled = true
+output_path = "AGENTS.md"
+output_path_config = ".codex/config.toml"
+
+[agents.gemini-cli]
+enabled = true
+output_path = "AGENTS.md"
+
+[agents.cursor]
+enabled = true
+output_path = "AGENTS.md"
+
+# Phase 3 (EXECUTION-PLAN R4): shared local-memory server, wired into every agent.
+# Notes live in the git-tracked repo dir; a dedicated CONFIG_DIR isolates state from
+# any global ~/.basic-memory. Semantic search is disabled (FTS-only) so note content
+# never leaves the machine (BUILD-SPEC Do-Not-Repeat #7). Paths are machine-specific —
+# see memory/README.md for portability.
+[mcp_servers.memory]
+command = "uvx"
+args = ["basic-memory", "mcp"]
+
+[mcp_servers.memory.env]
+BASIC_MEMORY_CONFIG_DIR = "/Users/naen/Git/agent-hub-mono/memory/.basic-memory"
+BASIC_MEMORY_HOME = "/Users/naen/Git/agent-hub-mono/memory/data"
+BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED = "false"
+
+# Model-access stack (vendored under src/, installed via `pip install -e .`).
+# Console scripts live in the project venv; paths are machine-specific (see README).
+[mcp_servers.orchestrate]
+command = "/Users/naen/Git/agent-hub-mono/.venv/bin/orchestrate-codex-mcp"
+
+[mcp_servers.claude_codex]
+command = "/Users/naen/Git/agent-hub-mono/.venv/bin/claude-codex-mcp"
+
+[mcp_servers.grok_codex]
+command = "/Users/naen/Git/agent-hub-mono/.venv/bin/grok-codex-mcp"
+
+[mcp_servers.antigravity]
+command = "/Users/naen/Git/agent-hub-mono/.venv/bin/google-antigravity-mcp"

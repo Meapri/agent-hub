@@ -1,0 +1,250 @@
+"""Minimal MCP stdio server for Grok Codex."""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any, Callable, Dict, List
+
+from . import __version__, auth, chat, models, oauth_login, response, security
+
+SERVER_NAME = "grok-codex"
+SERVER_VERSION = __version__
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
+DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+DISCOVERY_TTL_MS = 300_000
+MODERN_META_PROTOCOL = "io.modelcontextprotocol/protocolVersion"
+
+
+class RpcError(ValueError):
+    def __init__(self, code: int, message: str, *, data: Dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
+def _empty_schema() -> Dict[str, Any]:
+    return {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+CHAT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "prompt": {"type": "string"},
+        "system": {"type": "string"},
+        "model": {"type": "string"},
+        "max_tokens": {"type": "integer", "minimum": 1, "default": 4096},
+        "temperature": {"type": "number"},
+        "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 600, "default": 120},
+        "messages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["role", "content"],
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+LIST_MODELS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "probe": {"type": "boolean", "default": False},
+    },
+    "additionalProperties": False,
+}
+
+
+def tool_definitions() -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": "grok_codex_consent_status",
+            "description": "Read explicit-consent state. Cannot grant consent.",
+            "inputSchema": _empty_schema(),
+        },
+        {
+            "name": "grok_codex_provider_status",
+            "description": "Check credentials and readiness without exposing secrets.",
+            "inputSchema": _empty_schema(),
+        },
+        {
+            "name": "grok_codex_chat",
+            "description": "Chat with Grok. Prefers SuperGrok OAuth; falls back to XAI_API_KEY.",
+            "inputSchema": CHAT_SCHEMA,
+        },
+        {
+            "name": "grok_codex_list_models",
+            "description": "List curated (and optionally live) models.",
+            "inputSchema": LIST_MODELS_SCHEMA,
+        },
+
+        {
+            "name": "grok_codex_login_status",
+            "description": "SuperGrok / xAI OAuth login status (no secrets).",
+            "inputSchema": _empty_schema(),
+        },
+        {
+            "name": "grok_codex_login_start",
+            "description": "Start xAI device-code OAuth (SuperGrok / Premium+). Returns verification URL.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"open_browser": {"type": "boolean", "default": True}},
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "grok_codex_login_complete",
+            "description": "Poll until device authorization completes; saves tokens.",
+            "inputSchema": _empty_schema(),
+        },
+        {
+            "name": "grok_codex_logout",
+            "description": "Delete local SuperGrok OAuth tokens (does not revoke on xAI).",
+            "inputSchema": _empty_schema(),
+        },
+        {
+            "name": "grok_codex_doctor",
+            "description": "Quick local diagnosis: consent, credentials, default model.",
+            "inputSchema": _empty_schema(),
+        },
+    ]
+
+
+def _provider_status(_args: Dict[str, Any]) -> Dict[str, Any]:
+    status = auth.status()
+    return {
+        "text": status.get("text") or json.dumps(status, indent=2),
+        **status,
+        **response.standard_fields(
+            success=bool(status.get("configured")),
+            provider="xai",
+            backend="xai-chat-completions",
+        ),
+    }
+
+
+def _doctor(_args: Dict[str, Any]) -> Dict[str, Any]:
+    consent = security.consent_status()
+    auth_state = auth.status()
+    ok = bool(consent.get("user_consent") and auth_state.get("configured"))
+    payload = {
+        "ok": ok,
+        "consent": consent,
+        "auth": auth_state,
+        "default_model": models.DEFAULT_MODEL,
+        "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
+    }
+    return {
+        "text": json.dumps(payload, indent=2),
+        **payload,
+        **response.standard_fields(
+            success=ok,
+            provider="xai",
+            backend="xai-chat-completions",
+        ),
+    }
+
+
+def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    table: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
+        "grok_codex_consent_status": lambda a: {
+            "text": json.dumps(security.consent_status(), indent=2),
+            **security.consent_status(),
+        },
+        "grok_codex_provider_status": _provider_status,
+        "grok_codex_chat": chat.run_chat,
+        "grok_codex_list_models": models.list_models,
+        "grok_codex_doctor": _doctor,
+    }
+    if name not in table:
+        raise ValueError(f"unknown tool: {name}")
+    try:
+        return table[name](arguments or {})
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "text": str(exc),
+            "success": False,
+            "error": str(exc),
+            "error_type": getattr(exc, "code", type(exc).__name__),
+            "provider": "xai",
+            "backend": "xai-chat-completions",
+            "warnings": [],
+        }
+
+
+def handle_request(message: Dict[str, Any]) -> Dict[str, Any] | None:
+    request_id = message.get("id")
+    if request_id is None:
+        return None
+    method = message.get("method")
+    try:
+        if method == "initialize":
+            params = message.get("params") or {}
+            requested = str(params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION)
+            selected = (
+                requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+            )
+            result = {
+                "protocolVersion": selected,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+            }
+        elif method == "ping":
+            result = {}
+        elif method == "tools/list":
+            result = {"tools": tool_definitions()}
+        elif method == "tools/call":
+            params = message.get("params") or {}
+            name = str(params.get("name") or "")
+            arguments = params.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                raise RpcError(-32602, "tool arguments must be an object")
+            if name not in {t["name"] for t in tool_definitions()}:
+                raise RpcError(-32602, f"unknown tool: {name}")
+            result = dispatch_tool(name, arguments)
+        else:
+            raise RpcError(-32601, f"unsupported method: {method}")
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+    except RpcError as exc:
+        err: Dict[str, Any] = {"code": exc.code, "message": str(exc)}
+        if exc.data:
+            err["data"] = exc.data
+        return {"jsonrpc": "2.0", "id": request_id, "error": err}
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32000, "message": str(exc)},
+        }
+
+
+def serve() -> int:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(message, dict):
+            continue
+        # notifications
+        if message.get("id") is None and message.get("method"):
+            continue
+        response_msg = handle_request(message)
+        if response_msg is not None:
+            sys.stdout.write(json.dumps(response_msg, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(serve())

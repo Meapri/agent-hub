@@ -1,0 +1,4 @@
+{
+  "name": "orchestrate-codex",
+  "description": "Provider-neutral recipe orchestration for Codex multi-provider leaf MCPs."
+}

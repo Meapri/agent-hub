@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-hub"
+version = "1.0.0"
+description = "Unified personal multi-model coding hub: instruction consistency, cross-harness handoff, shared memory, and the orchestrate-codex conductor + provider leaf model-access stack in one project."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "Park Chanwoo" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8", "pytest-cov>=5", "ruff>=0.12"]
+
+# Console entry points — cwd-independent MCP/CLI launchers (available after `pip install -e .`).
+[project.scripts]
+orchestrate-codex-mcp = "orchestrate_codex.mcp_server:serve"
+claude-codex-mcp = "claude_codex.mcp_server:serve"
+claude-codex-consent = "claude_codex.consent_cli:main"
+grok-codex-mcp = "grok_codex.mcp_server:serve"
+grok-codex-consent = "grok_codex.consent_cli:main"
+google-antigravity-mcp = "google_antigravity_codex.mcp_server:serve"
+google-antigravity-consent = "google_antigravity_codex.consent_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+  "orchestrate_codex*",
+  "claude_codex*",
+  "grok_codex*",
+  "google_antigravity_codex*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+# importlib mode: lets same-named test files (test_core.py) coexist across tests/<pkg>/ dirs.
+addopts = "--import-mode=importlib --strict-markers"
+
+[tool.ruff]
+line-length = 100

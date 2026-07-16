@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest --cov=google_antigravity_codex
+      - run: python -m ruff check .
+      - run: python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
+      - run: python -m build
+      - run: python scripts/build_plugin_bundle.py
+      - run: cd dist/antigravity-plugin && zip -r ../google-antigravity-codex-plugin.zip google-antigravity-codex
+      - run: cd dist && sha256sum *.whl *.tar.gz *.zip > SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz dist/*.zip dist/SHA256SUMS --generate-notes --verify-tag

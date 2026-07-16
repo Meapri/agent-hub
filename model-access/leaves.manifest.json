@@ -1,0 +1,42 @@
+{
+  "schema": "vendored-provenance/1",
+  "note": "이 매니페스트는 통합(monorepo) 전 각 패키지를 어느 upstream 커밋에서 vendoring했는지 기록한다. 코드는 이제 src/ 안에 있고 별도 pin이 아니라 이 레포의 git 히스토리가 정본이다. upstream 반영이 필요하면 아래 commit 이후 변경을 diff해 수동 반영한다.",
+  "vendored_at": "2026-07-16",
+  "packages": [
+    {
+      "name": "orchestrate-codex",
+      "src": "src/orchestrate_codex",
+      "role": "conductor",
+      "upstream": "https://github.com/Meapri/orchestrate-codex",
+      "vendored_commit": "a3bc2b8ca7369ed9028eaaca619dc246aa07a6d1",
+      "version": "0.5.4"
+    },
+    {
+      "name": "claude-codex",
+      "src": "src/claude_codex",
+      "role": "leaf (Anthropic)",
+      "upstream": "https://github.com/Meapri/claude-codex",
+      "vendored_commit": "9268c930a99c4a150c28c6a8273bfe148d01bdc9",
+      "version": "0.2.0",
+      "auth": "subscription-oauth + api-key fallback"
+    },
+    {
+      "name": "grok-codex",
+      "src": "src/grok_codex",
+      "role": "leaf (xAI)",
+      "upstream": "https://github.com/Meapri/grok-codex",
+      "vendored_commit": "14d7bc330190aa6b9f05b48c812479655888b100",
+      "version": "0.2.0",
+      "auth": "device-code oauth + api-key fallback"
+    },
+    {
+      "name": "antigravity-codex",
+      "src": "src/google_antigravity_codex",
+      "role": "leaf (Google)",
+      "upstream": "https://github.com/Meapri/google-antigravity-codex",
+      "vendored_commit": "4355b37fb2f8c3135dbae8237d51407271b5eb0b",
+      "version": "0.9.8",
+      "auth": "oauth-pkce"
+    }
+  ]
+}

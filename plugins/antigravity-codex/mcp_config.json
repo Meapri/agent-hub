@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "google-antigravity-codex": {
+      "command": "python3",
+      "args": [
+        "${extensionPath}/scripts/google_antigravity_mcp.py"
+      ],
+      "cwd": "${extensionPath}",
+      "env": {
+        "GOOGLE_ANTIGRAVITY_RUNNING_UNDER_AGY": "1"
+      },
+      "disabledTools": [
+        "google_antigravity_agy_auth_refresh",
+        "google_antigravity_chat",
+        "google_grounded_search",
+        "google_antigravity_generate_image",
+        "google_antigravity_write",
+        "google_antigravity_compare_models",
+        "google_antigravity_review_diff"
+      ]
+    }
+  }
+}

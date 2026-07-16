@@ -1,0 +1,24 @@
+name: Latest Antigravity compatibility
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: curl -fsSL https://antigravity.google/cli/install.sh | bash
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: python scripts/build_plugin_bundle.py
+      - run: agy --version
+      - run: agy plugin validate dist/antigravity-plugin/google-antigravity-codex
+      - run: python scripts/google_antigravity_doctor.py --json --require-tested

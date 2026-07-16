@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest --cov=google_antigravity_codex
+      - run: python -m ruff check .
+      - run: python scripts/build_plugin_bundle.py
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m build
+      - run: python scripts/build_plugin_bundle.py
+      - run: python -m json.tool plugin.json
+      - run: python -m json.tool mcp_config.json
+      - run: python -m compileall -q google_antigravity_codex scripts tests
+
+  latest-agy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: curl -fsSL https://antigravity.google/cli/install.sh | bash
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: python scripts/build_plugin_bundle.py
+      - run: agy --version
+      - run: agy plugin validate dist/antigravity-plugin/google-antigravity-codex

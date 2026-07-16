@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Ruler run-time bridge (created only for the lifetime of a sync)
+/.ruler
+
+# basic-memory runtime state (config.json, memory.db, fastembed cache).
+# The human-readable notes in memory/data/ ARE tracked; this local state is not.
+/memory/.basic-memory/
+
+# macOS / editor
+.DS_Store
+*.bak
+
+# Local plugin marketplace cache
+.agents/

@@ -1,0 +1,34 @@
+{
+  "name": "orchestrate-codex",
+  "version": "0.5.4",
+  "description": "Supervised multi-step recipes that bind Claude, Grok, Antigravity, and other Codex leaf providers.",
+  "author": {
+    "name": "Park Chanwoo",
+    "url": "https://github.com/Meapri"
+  },
+  "homepage": "https://github.com/Meapri/orchestrate-codex",
+  "repository": "https://github.com/Meapri/orchestrate-codex",
+  "license": "MIT",
+  "keywords": ["codex", "mcp", "orchestration", "recipes"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Orchestrate Codex",
+    "shortDescription": "Recipe runner for multi-provider Codex leaves.",
+    "longDescription": "Defines durable/change/transform document classes and supervised recipes. Leaf providers (Claude, Grok, Antigravity) remain directly callable; this plugin only plans and verifies multi-step work.",
+    "developerName": "Park Chanwoo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Recipe listing",
+      "Supervised recipe planning",
+      "Document class context policy",
+      "Provider binding maps",
+      "MCP"
+    ],
+    "defaultPrompt": [
+      "List orchestrate recipes.",
+      "Plan a durable_readme recipe.",
+      "Explain durable vs change context policy."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

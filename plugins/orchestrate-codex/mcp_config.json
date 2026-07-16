@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "orchestrate-codex": {
+      "command": "python3",
+      "args": ["${extensionPath}/scripts/orchestrate_codex_mcp.py"],
+      "cwd": "${extensionPath}",
+      "env": {
+        "ORCHESTRATE_CODEX_RUNNING_UNDER_CODEX_MCP": "1"
+      },
+      "disabledTools": []
+    }
+  }
+}
