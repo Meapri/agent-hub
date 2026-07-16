@@ -21,7 +21,7 @@ from orchestrate_codex import mcp_server as _orch
 
 from agent_hub.core.rpc import RpcError
 
-from .base import Provider
+from .base import Provider, text_content_result
 
 
 def _run_auto_inprocess(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,14 +74,7 @@ class OrchestrateProvider(Provider):
             payload = _run_auto_inprocess(arguments)
         else:
             payload = _orch.dispatch_tool(name, arguments)
-        text = payload.get("text")
-        if not isinstance(text, str):
-            text = json.dumps(payload, ensure_ascii=False)
-        return {
-            "content": [{"type": "text", "text": text}],
-            "isError": not bool(payload.get("success", True)),
-            **payload,
-        }
+        return text_content_result(payload)
 
 
 orchestrate_provider = OrchestrateProvider()

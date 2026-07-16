@@ -81,18 +81,32 @@ def _call(mod_or_server, name, args):
     return mod_or_server.handle_request(msg)
 
 
-def test_toolscall_is_byte_equal_to_legacy_for_readonly_tools():
-    # Representative read-only tool per package (no network / no consent side effects).
-    cases = [
-        (orchestrate, "orchestrate_list_recipes", {}),
-        (claude, "claude_codex_consent_status", {}),
-        (grok, "grok_codex_consent_status", {}),
-        (antigravity, "google_antigravity_consent_status", {}),
-    ]
-    for owner, name, args in cases:
-        via_server = _call(server, name, args)
-        via_legacy = _call(owner, name, args)
-        assert json.dumps(via_server, sort_keys=True) == json.dumps(via_legacy, sort_keys=True), name
+def test_every_toolscall_result_is_mcp_compliant():
+    # Every tool's tools/call result MUST carry content[] — strict clients (Codex
+    # under the modern protocol) reject raw payloads with a response-format error.
+    for name in ["orchestrate_list_recipes", "claude_codex_consent_status",
+                 "grok_codex_consent_status", "google_antigravity_consent_status"]:
+        r = _call(server, name, {})["result"]
+        assert isinstance(r.get("content"), list) and r["content"], name
+        assert r["content"][0].get("type") == "text", name
+
+
+def test_leaf_result_wraps_but_preserves_structured_payload():
+    # claude/grok raw payloads are wrapped in content[] but keep their fields on top.
+    for owner, name in [(claude, "claude_codex_consent_status"), (grok, "grok_codex_consent_status")]:
+        wrapped = _call(server, name, {})["result"]
+        raw = owner.dispatch_tool(name, {})
+        assert "content" in wrapped
+        for k, v in raw.items():
+            assert wrapped.get(k) == v, f"{name}.{k}"
+
+
+def test_content_having_providers_stay_byte_equal_to_legacy():
+    # orchestrate + antigravity already produced content[]; the adapter path is byte-equal.
+    for owner, name in [(orchestrate, "orchestrate_list_recipes"),
+                        (antigravity, "google_antigravity_consent_status")]:
+        assert json.dumps(_call(server, name, {}), sort_keys=True) == \
+               json.dumps(_call(owner, name, {}), sort_keys=True), name
 
 
 def test_unknown_tool_errors():
