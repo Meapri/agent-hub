@@ -30,7 +30,26 @@ def test_writing_routes_to_antigravity_chat():
     assert result["task"] == "polish"
     assert result["profiles"] == ["chanwoo-ko"]
     assert seen["model"] == "gemini-3.1-pro-preview"
+    assert seen["max_tokens"] == writing.chat.DEFAULT_MAX_TOKENS == 65536
     assert "rough text" in seen["prompt"]
+
+
+def test_writing_marks_max_token_response_incomplete():
+    def fake_run_chat(_arguments):
+        return {
+            "text": "문장 중간에서",
+            "finish_reason": "max_tokens",
+            "success": False,
+            "warnings": ["incomplete_finish_reason:max_tokens"],
+            "usage": {"total_tokens": 65536},
+        }
+
+    with patch.object(writing.chat, "run_chat", fake_run_chat):
+        result = writing.run_writing({"task": "rewrite", "source_text": "source"})
+
+    assert result["success"] is False
+    assert result["finish_reason"] == "max_tokens"
+    assert "incomplete_finish_reason:max_tokens" in result["warnings"]
 
 
 def test_durable_readme_forces_git_off_and_injects_fact_pack(tmp_path, monkeypatch):

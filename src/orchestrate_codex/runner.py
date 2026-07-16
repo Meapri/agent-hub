@@ -27,9 +27,10 @@ FALLBACK_CHAINS: Dict[str, List[str]] = {
 MAX_RUNS = 200
 
 # Default output budget for a structured write (README/PR/etc.); leaf defaults truncate.
-DEFAULT_WRITE_MAX_TOKENS = 8192
-# Chat leaves default small (Claude 4096); raise it so long analysis/synthesis isn't cut.
-DEFAULT_CHAT_MAX_TOKENS = 8192
+DEFAULT_WRITE_MAX_TOKENS = 65536
+# Keep enough headroom for long synthesis and for providers whose reasoning tokens share
+# the output budget (notably Gemini high-thinking models).
+DEFAULT_CHAT_MAX_TOKENS = 65536
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
 
@@ -129,8 +130,8 @@ def _enrich_chat_args(
         args["query"] = prompt or args.get("query") or "status"  # GROUNDING_SCHEMA has no max_tokens
     else:
         args["prompt"] = "\n\n".join(p for p in parts if p)
-        # Chat leaves default to a small max_tokens (e.g. Claude 4096) which silently
-        # truncated long analysis / prompt-engineering / synthesis outputs mid-text.
+        # Always pass the conductor budget so every provider has the same generous
+        # headroom for long analysis, prompt engineering, and synthesis.
         args["max_tokens"] = int(user_args.get("max_tokens") or DEFAULT_CHAT_MAX_TOKENS)
     model = _stage_model(step, user_args)
     if model:

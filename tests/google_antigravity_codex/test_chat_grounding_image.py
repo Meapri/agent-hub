@@ -78,6 +78,25 @@ def test_chat_uses_grounding_env_default():
     assert result["success"] is True
     assert result["backend"] == "agy-session"
     assert {"google_search": {}} in seen["request"]["tools"]
+    assert seen["request"]["generationConfig"]["maxOutputTokens"] == chat.DEFAULT_MAX_TOKENS == 65536
+
+
+def test_chat_marks_max_token_response_incomplete():
+    payload = {
+        "response": {
+            "candidates": [
+                {"content": {"parts": [{"text": "partial"}]}, "finishReason": "MAX_TOKENS"}
+            ]
+        }
+    }
+
+    with patch.dict(os.environ, {"GOOGLE_ANTIGRAVITY_USER_CONSENT": "1"}), patch.object(
+        chat.provider, "generate_content", return_value=payload
+    ):
+        result = chat.run_chat({"prompt": "long document"})
+
+    assert result["success"] is False
+    assert "incomplete_finish_reason:max_tokens" in result["warnings"]
 
 
 def test_chat_extracts_text_and_usage():

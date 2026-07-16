@@ -129,7 +129,7 @@ def review_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "model": model,
             "task": "code",
             "temperature": arguments.get("temperature", 0.2),
-            "max_tokens": int(arguments.get("max_tokens") or 4096),
+            "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
             "timeout_sec": arguments.get("timeout_sec") or 180,
             "retry_count": arguments.get("retry_count", 1),
             "thinking_level": str(arguments.get("thinking_level") or "high"),

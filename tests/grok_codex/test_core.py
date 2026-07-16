@@ -46,13 +46,31 @@ def test_chat_builds_and_parses(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
     monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
 
+    seen = {}
+
     def fake_request(method, url, headers, body, timeout):
+        seen.update(body)
         return chat_fake_response(body)
 
     with patch.object(chat.api, "http_json", side_effect=fake_request):
         result = chat.run_chat({"prompt": "hello", "model": models.DEFAULT_MODEL})
     assert result["success"] is True
     assert "hello" in result["text"]
+    assert seen["max_tokens"] == chat.DEFAULT_MAX_TOKENS == 65536
+
+
+def test_chat_marks_length_response_incomplete(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
+    payload = chat_fake_response({"model": models.DEFAULT_MODEL})
+    payload["choices"][0]["finish_reason"] = "length"
+
+    with patch.object(chat.api, "http_json", return_value=payload):
+        result = chat.run_chat({"prompt": "hello"})
+
+    assert result["success"] is False
+    assert "incomplete_finish_reason:length" in result["warnings"]
 
 
 def test_mcp_initialize_and_tools_list():

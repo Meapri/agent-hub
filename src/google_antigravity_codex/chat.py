@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import model_prefs, provider, response as response_schema
 
 DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_MAX_TOKENS = 65536
 MIN_REASONING_MODEL_OUTPUT_TOKENS = 256
 MIN_OUTPUT_TOKEN_MODEL_MARKERS = (
     "gemini-3.5-flash",
@@ -468,7 +469,7 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         messages=messages,
         model=model,
         temperature=arguments.get("temperature"),
-        max_tokens=arguments.get("max_tokens"),
+        max_tokens=arguments.get("max_tokens") or DEFAULT_MAX_TOKENS,
         top_p=arguments.get("top_p"),
         thinking_level=str(arguments.get("thinking_level") or ""),
         grounding=grounding,
@@ -554,6 +555,10 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         used = diagnostics.get("used_model") or model
         requested = diagnostics.get("requested_model") or model
         warnings.append(f"capacity_fallback:{requested}->{used}")
+    finish_reason = str(extracted.get("finish_reason") or "stop").lower()
+    incomplete = finish_reason in {"max_tokens", "length"}
+    if incomplete:
+        warnings.append(f"incomplete_finish_reason:{finish_reason}")
     text_out = extracted["text"]
     if diagnostics.get("capacity_fallback") and text_out:
         used = diagnostics.get("used_model") or model
@@ -565,7 +570,7 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         "text": text_out,
         "model": model,
         "created": int(time.time()),
-        "finish_reason": extracted["finish_reason"],
+        "finish_reason": finish_reason,
         "usage": extracted.get("usage", {}),
         "reasoning": extracted.get("reasoning", ""),
         "tool_calls": extracted.get("tool_calls", []),
@@ -573,6 +578,7 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         "capacity_fallback": bool(diagnostics.get("capacity_fallback")),
         "used_model": diagnostics.get("used_model") or model,
         **response_schema.standard_fields(
+            success=not incomplete,
             model=model,
             usage=extracted.get("usage", {}),
             warnings=warnings,

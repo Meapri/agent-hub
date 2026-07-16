@@ -35,7 +35,7 @@ CHAT_SCHEMA: Dict[str, Any] = {
         "prompt": {"type": "string"},
         "system": {"type": "string"},
         "model": {"type": "string"},
-        "max_tokens": {"type": "integer", "minimum": 1, "default": 4096},
+        "max_tokens": {"type": "integer", "minimum": 1, "default": chat.DEFAULT_MAX_TOKENS},
         "temperature": {"type": "number"},
         "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 600, "default": 120},
         "messages": {

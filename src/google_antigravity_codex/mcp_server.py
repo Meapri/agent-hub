@@ -167,7 +167,7 @@ COMPARE_SCHEMA: Dict[str, Any] = {
                 {"type": "string"},
             ],
         },
-        "max_tokens": {"type": "integer", "minimum": 32, "maximum": 1024, "default": 256},
+        "max_tokens": {"type": "integer", "minimum": 32, "maximum": 131072, "default": chat.DEFAULT_MAX_TOKENS},
         "temperature": {"type": "number"},
         "timeout_sec": {"type": "integer", "minimum": 20, "maximum": 300, "default": 90},
         "grounding": {"type": "string", "enum": ["off", "auto", "always"], "default": "off"},
@@ -188,7 +188,7 @@ REVIEW_DIFF_SCHEMA: Dict[str, Any] = {
         "instruction": {"type": "string"},
         "focus": {"type": "string"},
         "model": {"type": "string"},
-        "max_tokens": {"type": "integer", "minimum": 256, "maximum": 8192},
+        "max_tokens": {"type": "integer", "minimum": 256, "maximum": 131072, "default": chat.DEFAULT_MAX_TOKENS},
         "timeout_sec": {"type": "integer", "minimum": 30, "maximum": 600},
         "thinking_level": {"type": "string"},
     },
@@ -223,7 +223,7 @@ CHAT_SCHEMA: Dict[str, Any] = {
         "model": {"type": "string", "default": chat.DEFAULT_MODEL},
         "temperature": {"type": "number"},
         "top_p": {"type": "number"},
-        "max_tokens": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072, "default": chat.DEFAULT_MAX_TOKENS},
         "thinking_level": {
             "type": "string",
             "enum": ["minimal", "low", "medium", "high"],
@@ -331,7 +331,7 @@ WRITING_SCHEMA: Dict[str, Any] = {
         "max_project_context_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
         "model": {"type": "string", "default": writing.DEFAULT_MODEL},
         "temperature": {"type": "number"},
-        "max_tokens": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072, "default": chat.DEFAULT_MAX_TOKENS},
         "timeout_sec": {"type": "integer", "minimum": 20, "maximum": 600},
         "retry_count": {"type": "integer", "minimum": 0, "maximum": 5, "default": 1},
         "retry_sleep_cap_sec": {"type": "number", "minimum": 0, "maximum": 30, "default": 8},
@@ -362,7 +362,7 @@ RELEASE_DRAFT_SCHEMA: Dict[str, Any] = {
         "tag": {"type": "string"},
         "polish": {"type": "boolean", "default": False},
         "model": {"type": "string", "default": writing.DEFAULT_MODEL},
-        "max_tokens": {"type": "integer", "minimum": 1},
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072, "default": chat.DEFAULT_MAX_TOKENS},
         "timeout_sec": {"type": "integer", "minimum": 20, "maximum": 600},
     },
     "additionalProperties": False,
@@ -750,7 +750,7 @@ def _safe_call(
         else:
             data = func(arguments)
         text = data.get("text") or data.get("answer") or json.dumps(data, ensure_ascii=False, indent=2)
-        return _text_result(str(text), data)
+        return _text_result(str(text), data, is_error=data.get("success") is False)
     except (
         agy_auth.AgyAuthError,
         antigravity_api.AntigravityApiError,

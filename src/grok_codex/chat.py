@@ -16,6 +16,7 @@ from uuid import uuid4
 from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
+DEFAULT_MAX_TOKENS = 65536
 
 
 def _normalize_messages(arguments: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -93,7 +94,7 @@ def _usage(payload: Dict[str, Any]) -> Dict[str, Any]:
 def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     security.require_consent()
     model = str(arguments.get("model") or os.getenv("GROK_CODEX_MODEL") or DEFAULT_MODEL).strip()
-    max_tokens = int(arguments.get("max_tokens") or 4096)
+    max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature")
     timeout = float(arguments.get("timeout_sec") or 120)
     session_id = str(arguments.get("session_id") or "").strip() or str(uuid4())
@@ -129,15 +130,27 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         auth_ctx = auth.resolve_auth()
     except Exception:
         auth_ctx = {}
+    if api_mode in {"responses", "response"}:
+        finish_reason = str(payload.get("status") or "completed").lower()
+        incomplete = finish_reason == "incomplete"
+    else:
+        choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+        first = choices[0] if choices and isinstance(choices[0], dict) else {}
+        finish_reason = str(first.get("finish_reason") or "stop").lower()
+        incomplete = finish_reason == "length"
+    warnings = [f"incomplete_finish_reason:{finish_reason}"] if incomplete else []
     return {
         "text": text,
+        "finish_reason": finish_reason,
         "session_id": session_id,
         "auth_mode": auth_ctx.get("mode"),
         **response.standard_fields(
+            success=not incomplete,
             provider="xai",
             backend=backend + ("-oauth" if auth_ctx.get("mode") == "subscription_oauth" else ""),
             model=str(payload.get("model") or model),
             usage=_usage(payload),
+            warnings=warnings,
             diagnostics={
                 "api_mode": api_mode,
                 "session_id": session_id,

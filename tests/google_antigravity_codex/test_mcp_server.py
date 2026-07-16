@@ -42,6 +42,10 @@ def test_initialize_and_tools_list():
     assert release_tool["title"]
     assert release_tool["annotations"]["readOnlyHint"] is True
     assert release_tool["outputSchema"]["type"] == "object"
+    by_name = {tool["name"]: tool for tool in tools["result"]["tools"]}
+    assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
+    assert by_name["google_antigravity_write"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
+    assert by_name["google_antigravity_compare_models"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
 
 
 def modern_request(request_id, method, params=None, *, version="2026-07-28"):
@@ -94,6 +98,22 @@ def test_rc_tool_call_result_has_result_type():
 
     assert response["result"]["resultType"] == "complete"
     assert response["result"]["structuredContent"]["success"] is True
+
+
+def test_incomplete_generation_is_an_mcp_tool_error():
+    incomplete = {
+        "text": "partial",
+        "success": False,
+        "finish_reason": "max_tokens",
+        "warnings": ["incomplete_finish_reason:max_tokens"],
+    }
+    with patch.object(mcp_server.writing, "run_writing", return_value=incomplete):
+        result = mcp_server.dispatch_tool(
+            "google_antigravity_write", {"task": "rewrite", "source_text": "source"}
+        )
+
+    assert result["isError"] is True
+    assert result["structuredContent"]["finish_reason"] == "max_tokens"
 
 
 def test_consent_status_is_read_only_and_reports_master_opt_in(monkeypatch):

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
+DEFAULT_MAX_TOKENS = 65536
 
 
 def _content_to_text(content: Any) -> str:
@@ -124,7 +125,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(arguments.get("prompt") or "").strip()
     system = str(arguments.get("system") or "").strip()
     model = str(arguments.get("model") or os.getenv("CLAUDE_CODEX_MODEL") or DEFAULT_MODEL).strip()
-    max_tokens = int(arguments.get("max_tokens") or 4096)
+    max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature")
     timeout = float(arguments.get("timeout_sec") or 120)
     messages = arguments.get("messages")
@@ -157,16 +158,21 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         if auth_ctx.get("mode") == "subscription_oauth"
         else "anthropic-messages"
     )
+    stop_reason = str(payload.get("stop_reason") or "end_turn").lower()
+    incomplete = stop_reason == "max_tokens"
+    warnings = ["incomplete_finish_reason:max_tokens"] if incomplete else []
     return {
         "text": text,
-        "stop_reason": payload.get("stop_reason"),
+        "stop_reason": stop_reason,
         "raw_id": payload.get("id"),
         "auth_mode": auth_ctx.get("mode"),
         **response.standard_fields(
+            success=not incomplete,
             provider="anthropic",
             backend=backend,
             model=str(payload.get("model") or model),
             usage=usage,
+            warnings=warnings,
             diagnostics={
                 "api_mode": "anthropic_messages",
                 "auth_mode": auth_ctx.get("mode"),

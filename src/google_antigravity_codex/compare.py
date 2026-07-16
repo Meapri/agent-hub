@@ -29,7 +29,7 @@ def compare_models(arguments: Dict[str, Any]) -> Dict[str, Any]:
         models = [a, b if b != a else "gemini-3.5-flash-high"]
     models = models[:3]  # hard cap cost
 
-    max_tokens = int(arguments.get("max_tokens") or 256)
+    max_tokens = int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature", 0.2)
     timeout = int(arguments.get("timeout_sec") or 90)
     results: List[Dict[str, Any]] = []

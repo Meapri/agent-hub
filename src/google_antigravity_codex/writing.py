@@ -401,7 +401,7 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "model": model,
             "task": "writing",
             "temperature": arguments.get("temperature", 0.35),
-            "max_tokens": int(arguments.get("max_tokens") or 4096),
+            "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
             "timeout_sec": arguments.get("timeout_sec") or 180,
             "retry_count": arguments.get("retry_count", 1),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
@@ -409,6 +409,9 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
     )
     text = str(chat_response.get("text") or "").strip()
     warnings = review_text(text, durable=bool(built.get("durable")))
+    warnings.extend(str(item) for item in chat_response.get("warnings") or [] if str(item) not in warnings)
+    finish_reason = str(chat_response.get("finish_reason") or "stop").lower()
+    incomplete = finish_reason in {"max_tokens", "length"} or chat_response.get("success") is False
     diagnostics = dict(chat_response.get("diagnostics") or {})
     diagnostics.update(
         {
@@ -428,7 +431,9 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "fact_pack_used": built.get("fact_pack_used"),
         "quality_warnings": warnings,
         "usage": chat_response.get("usage", {}),
+        "finish_reason": finish_reason,
         **response_schema.standard_fields(
+            success=not incomplete,
             model=model,
             usage=chat_response.get("usage", {}),
             warnings=warnings,

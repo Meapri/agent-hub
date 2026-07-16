@@ -11,7 +11,20 @@
 
 - **현재 단계**
 
-  **[2026-07-16 실행 완료 — 이 블록이 최신]**
+  **[2026-07-16 출력 토큰·잘림 판정 수정 — 이 블록이 최신]**
+  ACT-5400 장문 작성 중 Gemini 3.5 Flash High가 4,096 출력 토큰 중 대부분을 high-thinking에 사용하고
+  실제 본문 164토큰만 낸 뒤 `finish_reason=max_tokens`로 끝난 사례를 재현했다. 기존 Antigravity writing
+  wrapper와 broker가 종료 이유를 잃어 356자짜리 미완성 문서를 성공으로 처리한 것이 원인이었다.
+  Claude/Gemini/Grok 및 conductor의 chat/write 기본 예산을 65,536으로 통일하고 Gemini schema 상한을
+  131,072로 확대했다. 32,768 재시험은 본문 2,137자에서 다시 한도 종료됐지만 실패로 정확히 잡혔고,
+  65,536 재시험은 2,868자와 종료 표식까지 생성해 `finish_reason=stop`으로 완주했다. Claude `max_tokens`,
+  Gemini `max_tokens`/`length`, Grok `length`/`incomplete` 종료는
+  이제 `success=false`와 `incomplete_finish_reason:*`로 전달되어 broker가 부분 문서를 완료본으로 채택하지 않는다.
+  관련 회귀 테스트를 추가했고 compileall, 전체 pytest 204개, Ruler sync, Phase 1 fixture, diff-check가 통과했다.
+
+  ---
+
+  **[2026-07-16 실행 완료 — 이전 완료 기록]**
   재기획 후 `EXECUTION-PLAN.md` R1~R6를 실행하고 **완성 정의 3개 증거를 전부 커밋**했다:
   - **E1** custody (`3527245`): `model-access/leaves.manifest.json` + `model-access/evidence/`(실제 orchestrate run).
   - **E3** 크로스-하네스 메모리 (`4ccddb8`): Claude Code(`claude -p`)와 Codex(`codex exec`)가 같은
@@ -417,7 +430,8 @@
   - 나머지 설계 금지사항은 `BUILD-SPEC.md` §8을 따를 것.
 
 - **다음 한 걸음**
-  구축(E1~E3)은 완료됐다. 남은 것은 **사용자 게이트인 R3**: `EXECUTION-PLAN.md` R3 절차로 claude-codex 구독
+  Codex 앱을 재시작한 뒤 ACT-5400 장문 작성 smoke에서 `max_tokens=65536`,
+  `finish_reason=stop`, 요청 길이 충족을 확인한다. 그 다음 기존 사용자 게이트인 R3: `EXECUTION-PLAN.md` R3 절차로 claude-codex 구독
   plan-lane 실과금 여부를 1회 확인하고(🔒 사용자가 호출 승인 + Anthropic Console 확인), 결과·ToS 수용 여부를
   `model-access/evidence/EVIDENCE.md`에 기록한다. 판정 전에는 claude-codex leaf 대량 호출을 하지 않는다.
   (선택) R6 leaf live load: antigravity `list_models` 1회로 Claude Code 실기 로드까지 확인. 로컬 router는

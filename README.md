@@ -28,7 +28,7 @@
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -e '.[dev]'      # 4 패키지 + console script 한 번에
-./.venv/bin/pytest -q                    # 통합 테스트 (186 passed 기준)
+./.venv/bin/pytest -q                    # 통합 테스트 (204 passed 기준)
 ./scripts/doctor.sh                      # 건강 점검 5종
 ```
 
@@ -57,6 +57,14 @@ MCP 서버 5종(memory + orchestrate + 3 leaf)은 `instructions/.ruler/ruler.tom
 3. **메모리:** `memory` MCP로 `memory/data/*.md` 결정·교훈을 읽고 쓴다(하네스 공유).
 4. **핸드오프:** `/handoff`로 `HANDOFF.md`에 상태 기록 → 다른 하네스에서 `/takeover`.
 5. **다중 모델:** `orchestrate` 컨덕터에 위임하면 host가 적절한 leaf로 라우팅·검증.
+
+### 출력 토큰 정책
+
+Claude·Gemini·Grok 채팅과 Agent Hub의 채팅/작성 단계는 기본 출력 예산을 **65,536토큰**으로 통일한다.
+Gemini high-thinking처럼 내부 사고 토큰과 본문이 같은 출력 예산을 쓰는 모델도 긴 문서를 끝까지 작성할 수 있게
+여유를 둔 값이다. 호출에서 `max_tokens`를 직접 지정하면 그 값을 우선한다. Gemini 도구 스키마는 최대
+131,072토큰까지 허용하며, 모델이 한도에 닿아 `max_tokens`/`length`로 종료하면 부분 출력을 성공으로 처리하지
+않고 `incomplete_finish_reason` 오류로 표시한다.
 
 ## 저장소 구조
 

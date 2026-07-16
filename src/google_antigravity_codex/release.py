@@ -452,7 +452,7 @@ def release_draft(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "source_text": draft,
                 "model": arguments.get("model"),
                 "timeout_sec": arguments.get("timeout_sec") or 180,
-                "max_tokens": arguments.get("max_tokens") or 4096,
+                "max_tokens": arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS,
             }
         )
     return {
