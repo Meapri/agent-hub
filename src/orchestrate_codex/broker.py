@@ -60,15 +60,19 @@ def run_auto(
     max_leaf_calls: int = DEFAULT_MAX_LEAF_CALLS,
     per_call_timeout: float = DEFAULT_PER_CALL_TIMEOUT,
     leaves: Optional[Dict[str, Dict[str, Any]]] = None,
+    client_resolver=None,
 ) -> Dict[str, Any]:
-    reg = leaves_mod.load_leaves() if leaves is None else leaves
-    if not reg:
-        return {
-            "ok": False,
-            "error": "no leaf servers configured",
-            "hint": "Create ~/.orchestrate_codex/leaves.json (or set ORCHESTRATE_CODEX_LEAVES), "
-                    "or use the supervised orchestrate_start_run flow instead.",
-        }
+    if client_resolver is None:
+        reg = leaves_mod.load_leaves() if leaves is None else leaves
+        if not reg:
+            return {
+                "ok": False,
+                "error": "no leaf servers configured",
+                "hint": "Create ~/.orchestrate_codex/leaves.json (or set ORCHESTRATE_CODEX_LEAVES), "
+                        "or use the supervised orchestrate_start_run flow instead.",
+            }
+    else:
+        reg = {}
 
     state = runner.start_run(recipe_id, args=args or {}, bindings=bindings, project_root=project_root)
     clients: Dict[str, LeafClient] = {}
@@ -95,7 +99,11 @@ def run_auto(
                     )
                     trace.append({"stage": stage, "tool": tool, "ok": False, "error": "max_leaf_calls"})
                     continue
-                client, err = _get_client(tool, reg, clients, per_call_timeout)
+                if client_resolver is not None:
+                    client = client_resolver(tool)
+                    err = "" if client is not None else f"no in-process provider for tool: {tool}"
+                else:
+                    client, err = _get_client(tool, reg, clients, per_call_timeout)
                 if client is None:
                     # Unconfigured/unspawnable leaf → report as a leaf failure so the
                     # runner rotates to the next fallback tool.
