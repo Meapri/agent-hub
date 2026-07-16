@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from agent_hub.core.http import http_json  # noqa: F401
+
 import json
 import os
 import urllib.error
@@ -19,22 +21,6 @@ def base_url() -> str:
     return os.getenv("ANTHROPIC_BASE_URL", DEFAULT_BASE).rstrip("/")
 
 
-def http_json(
-    method: str,
-    url: str,
-    headers: Dict[str, str],
-    body: Optional[Dict[str, Any]],
-    timeout: float,
-) -> Dict[str, Any]:
-    data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="replace")[:2000]
-        raise RuntimeError(f"HTTP {exc.code}: {err_body}") from exc
 
 
 def build_headers(*, auth_ctx: Optional[Dict[str, Any]] = None, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:

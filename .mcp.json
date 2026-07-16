@@ -13,20 +13,8 @@
       },
       "type": "stdio"
     },
-    "orchestrate": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/orchestrate-codex-mcp",
-      "type": "stdio"
-    },
-    "claude_codex": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/claude-codex-mcp",
-      "type": "stdio"
-    },
-    "grok_codex": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/grok-codex-mcp",
-      "type": "stdio"
-    },
-    "antigravity": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/google-antigravity-mcp",
+    "agent-hub": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/agent-hub-mcp",
       "type": "stdio"
     }
   }

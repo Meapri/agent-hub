@@ -1,26 +1,17 @@
-"""Filesystem paths for Google Antigravity Codex cache and local settings."""
-
-from __future__ import annotations
-
-import os
-from pathlib import Path
+"""Compatibility shim — implementation in agent_hub.core.paths."""
+from agent_hub.core import paths as _core
 
 APP_NAME = "google-antigravity-codex"
+_PREFIX = "GOOGLE_ANTIGRAVITY"
 
 
-def config_dir() -> Path:
-    override = os.getenv("GOOGLE_ANTIGRAVITY_CONFIG_DIR", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".config" / APP_NAME
+def config_dir():
+    return _core.config_dir(APP_NAME, _PREFIX)
 
 
-def cache_dir() -> Path:
-    override = os.getenv("GOOGLE_ANTIGRAVITY_CACHE_DIR", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".cache" / APP_NAME
+def cache_dir():
+    return _core.cache_dir(APP_NAME, _PREFIX)
 
 
-def images_dir() -> Path:
-    return cache_dir() / "images"
+def images_dir():
+    return _core.images_dir(APP_NAME, _PREFIX)
