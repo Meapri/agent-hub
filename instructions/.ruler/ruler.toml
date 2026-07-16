@@ -50,16 +50,9 @@ BASIC_MEMORY_CONFIG_DIR = "/Users/naen/Git/agent-hub-mono/memory/.basic-memory"
 BASIC_MEMORY_HOME = "/Users/naen/Git/agent-hub-mono/memory/data"
 BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED = "false"
 
-# Model-access stack (vendored under src/, installed via `pip install -e .`).
-# Console scripts live in the project venv; paths are machine-specific (see README).
-[mcp_servers.orchestrate]
-command = "/Users/naen/Git/agent-hub-mono/.venv/bin/orchestrate-codex-mcp"
-
-[mcp_servers.claude_codex]
-command = "/Users/naen/Git/agent-hub-mono/.venv/bin/claude-codex-mcp"
-
-[mcp_servers.grok_codex]
-command = "/Users/naen/Git/agent-hub-mono/.venv/bin/grok-codex-mcp"
-
-[mcp_servers.antigravity]
-command = "/Users/naen/Git/agent-hub-mono/.venv/bin/google-antigravity-mcp"
+# Unified model-access + orchestration: ONE server (agent_hub.server) exposes
+# every tool (orchestrate conductor + claude/grok/antigravity leaves) with
+# shared core protocol (streaming, modern, discover). Tool names are unchanged.
+# Machine-specific venv path (see README).
+[mcp_servers.agent-hub]
+command = "/Users/naen/Git/agent-hub-mono/.venv/bin/agent-hub-mcp"

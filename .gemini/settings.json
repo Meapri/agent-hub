@@ -13,17 +13,8 @@
         "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
       }
     },
-    "orchestrate": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/orchestrate-codex-mcp"
-    },
-    "claude_codex": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/claude-codex-mcp"
-    },
-    "grok_codex": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/grok-codex-mcp"
-    },
-    "antigravity": {
-      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/google-antigravity-mcp"
+    "agent-hub": {
+      "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/agent-hub-mcp"
     }
   }
 }
