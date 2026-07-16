@@ -23,20 +23,56 @@ def test_merged_tool_list_is_union_with_stable_names():
     assert len(server.tool_definitions()) == sum(len(m.tool_definitions()) for m in _OWNERS)
 
 
-def test_every_tool_routes_to_its_owner():
+def test_every_tool_routes_to_its_adapter():
     from agent_hub.providers.grok import grok_provider
     from agent_hub.providers.claude import claude_provider
     from agent_hub.providers.orchestrate import orchestrate_provider
-    # grok is adapter-owned; the rest are still delegated to their module.
-    for mod in [antigravity]:
+    from agent_hub.providers.antigravity import antigravity_provider
+    pairs = [(orchestrate, orchestrate_provider), (claude, claude_provider),
+             (grok, grok_provider), (antigravity, antigravity_provider)]
+    for mod, adapter in pairs:
         for spec in mod.tool_definitions():
-            assert server._REGISTRY[spec["name"]] is mod
-    for spec in grok.tool_definitions():
-        assert server._REGISTRY[spec["name"]] is grok_provider
-    for spec in claude.tool_definitions():
-        assert server._REGISTRY[spec["name"]] is claude_provider
-    for spec in orchestrate.tool_definitions():
-        assert server._REGISTRY[spec["name"]] is orchestrate_provider
+            assert server._REGISTRY[spec["name"]] is adapter
+
+
+def test_modern_protocol_completion_and_discover():
+    modern = "2026-07-28"
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": modern,
+        "io.modelcontextprotocol/clientInfo": {"name": "t"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    # antigravity tool under modern: unified == legacy package (byte-equal)
+    msg = {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+           "params": {"name": "google_antigravity_consent_status", "arguments": {}, "_meta": meta}}
+    assert (json.dumps(server.handle_request(msg), sort_keys=True)
+            == json.dumps(antigravity.handle_request(msg), sort_keys=True))
+    # tools/list under modern gets resultType/ttl (server-wide now, not just antigravity)
+    lst = server.handle_request({"jsonrpc": "2.0", "id": 6, "method": "tools/list",
+                                 "params": {"_meta": meta}})
+    assert lst["result"]["resultType"] == "complete"
+    assert lst["result"]["ttlMs"] == 300_000
+    # server/discover only under modern
+    disc = server.handle_request({"jsonrpc": "2.0", "id": 7, "method": "server/discover",
+                                  "params": {"_meta": meta}})
+    assert disc["result"]["serverInfo"]["name"] == "agent-hub"
+    assert modern in disc["result"]["supportedVersions"]
+    no_meta = server.handle_request({"jsonrpc": "2.0", "id": 8, "method": "server/discover"})
+    assert no_meta["error"]["code"] == -32602
+    # initialize/ping rejected under modern (stateless)
+    init_modern = server.handle_request({"jsonrpc": "2.0", "id": 9, "method": "initialize",
+                                         "params": {"_meta": meta}})
+    assert init_modern["error"]["code"] == -32601
+
+
+def test_streaming_progress_available_to_adapters():
+    # A leaf tool call carries the core stream emitter; non-streaming tools ignore it.
+    from agent_hub.providers.antigravity import antigravity_provider
+    emitted = []
+    res = antigravity_provider.call("google_antigravity_consent_status", {},
+                                    progress=lambda m, p: emitted.append((m, p)))
+    assert "content" in res  # ignored progress, normal result
+    assert emitted == []
 
 
 def _call(mod_or_server, name, args):

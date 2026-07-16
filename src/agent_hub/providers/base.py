@@ -23,7 +23,7 @@ class Provider:
     def tool_names(self) -> List[str]:
         return [spec["name"] for spec in self.tool_specs()]
 
-    def call(self, name: str, arguments: Any) -> Dict[str, Any]:
+    def call(self, name: str, arguments: Any, progress=None) -> Dict[str, Any]:
         raise NotImplementedError
 
 
@@ -37,7 +37,7 @@ class RawLeafProvider(Provider):
     def tool_specs(self) -> List[Dict[str, Any]]:
         return self._module.tool_definitions()
 
-    def call(self, name: str, arguments: Any) -> Dict[str, Any]:
+    def call(self, name: str, arguments: Any, progress=None) -> Dict[str, Any]:
         if not isinstance(arguments, dict):
             raise RpcError(-32602, "tool arguments must be an object")
         return self._module.dispatch_tool(name, arguments)

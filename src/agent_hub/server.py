@@ -1,10 +1,11 @@
 """Unified single MCP server.
 
-One JSON-RPC/stdio process exposes every tool from the co-located stack. Each
-tool is owned by either a provider *adapter* (agent_hub.providers) or, until its
-adapter lands, its legacy package module (delegated verbatim). Tool names keep
-their existing prefixes — already globally unique and used by orchestrate's
-routing — so external clients and internal routing are byte-stable.
+One JSON-RPC/stdio process exposes every tool from the co-located stack through
+provider adapters (agent_hub.providers). Protocol mechanics that only the
+antigravity leaf used to have — the stateless modern protocol, the streaming
+side-channel, and server/discover — now live in agent_hub.core.mcp and apply
+server-wide, so every provider is a peer (any tool can stream and is reachable
+under the modern protocol). Tool names keep their prefixes (byte-stable).
 """
 
 from __future__ import annotations
@@ -13,37 +14,31 @@ import json
 import sys
 from typing import Any, Dict, List, Optional
 
-from google_antigravity_codex import mcp_server as _antigravity
-from orchestrate_codex import mcp_server as _orchestrate
-
 from . import __version__
+from .core import mcp as _mcp
 from .core.rpc import RpcError
+from .providers.antigravity import antigravity_provider
 from .providers.base import Provider
 from .providers.claude import claude_provider
-from .providers.orchestrate import orchestrate_provider
 from .providers.grok import grok_provider
+from .providers.orchestrate import orchestrate_provider
+
+from orchestrate_codex import mcp_server as _orchestrate  # for prompts/resources delegation
 
 SERVER_NAME = "agent-hub"
 SERVER_VERSION = __version__
-DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+DEFAULT_PROTOCOL_VERSION = _mcp.DEFAULT_PROTOCOL_VERSION
+LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+SUPPORTED_PROTOCOL_VERSIONS = (_mcp.MODERN_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
 
-# Owners in fixed order. Adapters (Provider instances) own their tools directly;
-# modules are delegated to their legacy handle_request until adapted.
-# Migration flips one entry from module -> adapter at a time.
-_OWNERS: List[Any] = [orchestrate_provider, claude_provider, grok_provider, _antigravity]
+_OWNERS: List[Provider] = [orchestrate_provider, claude_provider, grok_provider, antigravity_provider]
 _ORCHESTRATE = _orchestrate
 
 
-def _specs(owner: Any) -> List[Dict[str, Any]]:
-    if isinstance(owner, Provider):
-        return owner.tool_specs()
-    return owner.tool_definitions()
-
-
-def _build_registry() -> Dict[str, Any]:
-    registry: Dict[str, Any] = {}
+def _build_registry() -> Dict[str, Provider]:
+    registry: Dict[str, Provider] = {}
     for owner in _OWNERS:
-        for spec in _specs(owner):
+        for spec in owner.tool_specs():
             name = spec["name"]
             if name in registry:
                 raise RuntimeError(f"tool name collision: {name}")
@@ -51,33 +46,30 @@ def _build_registry() -> Dict[str, Any]:
     return registry
 
 
-_REGISTRY: Dict[str, Any] = _build_registry()
+_REGISTRY: Dict[str, Provider] = _build_registry()
 
 
 def tool_definitions() -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
     for owner in _OWNERS:
-        merged.extend(_specs(owner))
+        merged.extend(owner.tool_specs())
     return merged
 
 
-def _supported_protocol_versions() -> set:
-    versions: set = {DEFAULT_PROTOCOL_VERSION}
-    for owner in _OWNERS:
-        module = owner if not isinstance(owner, Provider) else None
-        if module is None:
-            continue
-        default = getattr(module, "DEFAULT_PROTOCOL_VERSION", None)
-        if isinstance(default, str):
-            versions.add(default)
-        for attr in ("LEGACY_PROTOCOL_VERSIONS", "MODERN_PROTOCOL_VERSIONS"):
-            value = getattr(module, attr, ())
-            if isinstance(value, (list, tuple)):
-                versions.update(v for v in value if isinstance(v, str))
-        modern = getattr(module, "MODERN_PROTOCOL_VERSION", None)
-        if isinstance(modern, str):
-            versions.add(modern)
-    return versions
+def _discovery_result() -> Dict[str, Any]:
+    return {
+        "resultType": "complete",
+        "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+        "capabilities": {"tools": {}},
+        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        "instructions": (
+            "agent-hub unifies the orchestrate conductor and the claude/grok/"
+            "antigravity provider leaves. Tools are consent-gated per provider; "
+            "pass repository and workspace roots explicitly."
+        ),
+        "ttlMs": _mcp.DISCOVERY_TTL_MS,
+        "cacheScope": "public",
+    }
 
 
 def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -86,11 +78,18 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     method = message.get("method")
     try:
-        if method == "initialize":
+        protocol = _mcp.modern_request_protocol(message, SUPPORTED_PROTOCOL_VERSIONS)
+        modern = protocol == _mcp.MODERN_PROTOCOL_VERSION
+        if modern and method in ("initialize", "ping"):
+            raise RpcError(-32601, f"{method} is not available in stateless MCP {protocol}")
+        if method == "server/discover":
+            if not modern:
+                raise RpcError(-32602, "server/discover requires the modern MCP protocol")
+            result = _discovery_result()
+        elif method == "initialize":
             params = message.get("params") or {}
             requested = str(params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION)
-            supported = _supported_protocol_versions()
-            selected = requested if requested in supported else DEFAULT_PROTOCOL_VERSION
+            selected = requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
             result = {
                 "protocolVersion": selected,
                 "capabilities": {
@@ -110,15 +109,13 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             owner = _REGISTRY.get(name)
             if owner is None:
                 raise RpcError(-32602, f"unknown tool: {name}")
-            if isinstance(owner, Provider):
-                result = owner.call(name, params.get("arguments") or {})
-            else:
-                # Delegate verbatim to the legacy package (its exact envelope).
-                return owner.handle_request(message)
+            result = owner.call(name, params.get("arguments") or {}, progress=_mcp.emit_notification)
         elif method in ("prompts/list", "prompts/get", "resources/list", "resources/read"):
             return _ORCHESTRATE.handle_request(message)
         else:
             raise RpcError(-32601, f"unsupported method: {method}")
+        if modern:
+            result = _mcp.complete_modern_result(str(method), result)
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     except RpcError as exc:
         error: Dict[str, Any] = {"code": exc.code, "message": str(exc)}

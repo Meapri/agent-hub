@@ -30,7 +30,7 @@ class OrchestrateProvider(Provider):
     def tool_specs(self) -> List[Dict[str, Any]]:
         return _orch.tool_definitions()
 
-    def call(self, name: str, arguments: Any) -> Dict[str, Any]:
+    def call(self, name: str, arguments: Any, progress=None) -> Dict[str, Any]:
         if not isinstance(arguments, dict):
             raise RpcError(-32602, "tool arguments must be an object")
         payload = _orch.dispatch_tool(name, arguments)
