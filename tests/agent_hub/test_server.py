@@ -26,14 +26,17 @@ def test_merged_tool_list_is_union_with_stable_names():
 def test_every_tool_routes_to_its_owner():
     from agent_hub.providers.grok import grok_provider
     from agent_hub.providers.claude import claude_provider
+    from agent_hub.providers.orchestrate import orchestrate_provider
     # grok is adapter-owned; the rest are still delegated to their module.
-    for mod in [orchestrate, antigravity]:
+    for mod in [antigravity]:
         for spec in mod.tool_definitions():
             assert server._REGISTRY[spec["name"]] is mod
     for spec in grok.tool_definitions():
         assert server._REGISTRY[spec["name"]] is grok_provider
     for spec in claude.tool_definitions():
         assert server._REGISTRY[spec["name"]] is claude_provider
+    for spec in orchestrate.tool_definitions():
+        assert server._REGISTRY[spec["name"]] is orchestrate_provider
 
 
 def _call(mod_or_server, name, args):

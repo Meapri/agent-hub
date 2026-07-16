@@ -20,6 +20,7 @@ from . import __version__
 from .core.rpc import RpcError
 from .providers.base import Provider
 from .providers.claude import claude_provider
+from .providers.orchestrate import orchestrate_provider
 from .providers.grok import grok_provider
 
 SERVER_NAME = "agent-hub"
@@ -29,7 +30,7 @@ DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 # Owners in fixed order. Adapters (Provider instances) own their tools directly;
 # modules are delegated to their legacy handle_request until adapted.
 # Migration flips one entry from module -> adapter at a time.
-_OWNERS: List[Any] = [_orchestrate, claude_provider, grok_provider, _antigravity]
+_OWNERS: List[Any] = [orchestrate_provider, claude_provider, grok_provider, _antigravity]
 _ORCHESTRATE = _orchestrate
 
 
