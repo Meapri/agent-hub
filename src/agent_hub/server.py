@@ -121,7 +121,10 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             raise RpcError(-32601, f"unsupported method: {method}")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     except RpcError as exc:
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": exc.code, "message": str(exc)}}
+        error: Dict[str, Any] = {"code": exc.code, "message": str(exc)}
+        if getattr(exc, "data", None) is not None:
+            error["data"] = exc.data
+        return {"jsonrpc": "2.0", "id": request_id, "error": error}
     except Exception as exc:  # noqa: BLE001
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
 
