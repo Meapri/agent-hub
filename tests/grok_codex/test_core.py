@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from grok_codex import auth, chat, models, security
+from grok_codex import auth, chat, models, oauth_login, security
 from grok_codex.mcp_server import dispatch_tool, handle_request, tool_definitions
 
 
@@ -96,6 +96,38 @@ def test_dispatch_doctor(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
     out = dispatch_tool("grok_codex_doctor", {})
     assert "consent" in out
+
+
+def test_oauth_tools_are_dispatchable(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+
+    status = dispatch_tool("grok_codex_login_status", {})
+    assert status["success"] is False
+    assert status["logged_in"] is False
+
+    with patch.object(
+        oauth_login,
+        "start_login",
+        return_value={"success": True, "text": "open browser", "user_code": "TEST"},
+    ):
+        started = dispatch_tool("grok_codex_login_start", {"open_browser": False})
+    assert started["success"] is True
+    assert started["user_code"] == "TEST"
+
+    with patch.object(
+        oauth_login,
+        "complete_login",
+        return_value={"success": True, "text": "complete", "token_file": "/tmp/token"},
+    ):
+        completed = dispatch_tool("grok_codex_login_complete", {})
+    assert completed["success"] is True
+
+    (tmp_path / "cfg").mkdir(parents=True, exist_ok=True)
+    oauth_login.token_path().write_text('{"access_token":"test"}', encoding="utf-8")
+    logged_out = dispatch_tool("grok_codex_logout", {})
+    assert logged_out["success"] is True
+    assert logged_out["removed"] is True
 
 
 def test_strips_reasoning_effort(monkeypatch, tmp_path):

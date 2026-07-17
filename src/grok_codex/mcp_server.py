@@ -152,6 +152,62 @@ def _doctor(_args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _login_status(_args: Dict[str, Any]) -> Dict[str, Any]:
+    state = oauth_login.status()
+    return {
+        "text": json.dumps(state, indent=2),
+        **state,
+        **response.standard_fields(
+            success=bool(state.get("logged_in")),
+            provider="xai",
+            backend="subscription-oauth",
+        ),
+    }
+
+
+def _login_start(args: Dict[str, Any]) -> Dict[str, Any]:
+    security.require_consent()
+    out = oauth_login.start_login(open_browser=bool(args.get("open_browser", True)))
+    return {
+        **out,
+        **response.standard_fields(
+            success=bool(out.get("success")),
+            provider="xai",
+            backend="subscription-oauth",
+        ),
+    }
+
+
+def _login_complete(_args: Dict[str, Any]) -> Dict[str, Any]:
+    security.require_consent()
+    out = oauth_login.complete_login()
+    return {
+        **out,
+        **response.standard_fields(
+            success=bool(out.get("success")),
+            provider="xai",
+            backend="subscription-oauth",
+        ),
+    }
+
+
+def _logout(_args: Dict[str, Any]) -> Dict[str, Any]:
+    removed = oauth_login.clear_tokens()
+    out = {
+        "success": True,
+        "removed": removed,
+        "text": "Local SuperGrok OAuth tokens removed." if removed else "No local SuperGrok OAuth tokens found.",
+    }
+    return {
+        **out,
+        **response.standard_fields(
+            success=True,
+            provider="xai",
+            backend="subscription-oauth",
+        ),
+    }
+
+
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     table: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
         "grok_codex_consent_status": lambda a: {
@@ -161,6 +217,10 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         "grok_codex_provider_status": _provider_status,
         "grok_codex_chat": chat.run_chat,
         "grok_codex_list_models": models.list_models,
+        "grok_codex_login_status": _login_status,
+        "grok_codex_login_start": _login_start,
+        "grok_codex_login_complete": _login_complete,
+        "grok_codex_logout": _logout,
         "grok_codex_doctor": _doctor,
     }
     if name not in table:

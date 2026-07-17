@@ -134,7 +134,7 @@ def tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "orchestrate_get_run",
-            "description": "Fetch run state by run_id (same process only).",
+            "description": "Fetch run state by run_id from memory or the file-backed run store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"run_id": {"type": "string"}},
@@ -207,16 +207,19 @@ def tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "orchestrate_probe_models",
-            "description": "Live-confirm the latest working model id per leaf (tiny ping). Leaf catalogs are stale; this is the source of truth. Needs leaves.json configured.",
+            "description": (
+                "Live-confirm model ids with tiny provider calls. The standalone orchestrate "
+                "server uses leaves.json; Agent Hub should prefer its unified provider status path."
+            ),
             "inputSchema": _empty(),
         },
         {
             "name": "orchestrate_run",
             "description": (
-                "AUTONOMOUS (opt-in): run a recipe end-to-end. The broker spawns the "
-                "configured leaf MCP servers itself and returns the final artifact — no "
-                "per-step next_action loop. Requires leaves.json (see orchestrate_check_leaves). "
-                "Each leaf still enforces its own consent/auth."
+                "AUTONOMOUS (opt-in): run a recipe end-to-end. In the unified Agent Hub server, "
+                "the broker calls co-located provider adapters in-process. The standalone "
+                "orchestrate server uses configured leaf MCP subprocesses. Each provider still "
+                "enforces its own consent and authentication."
             ),
             "inputSchema": {
                 "type": "object",
@@ -236,7 +239,10 @@ def tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "orchestrate_check_leaves",
-            "description": "Preflight the autonomous broker: spawn each configured leaf and list its tools.",
+            "description": (
+                "Preflight the standalone broker by spawning leaves from leaves.json. "
+                "This is a legacy diagnostic; unified Agent Hub providers run in-process."
+            ),
             "inputSchema": _empty(),
         },
         {

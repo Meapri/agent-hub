@@ -35,8 +35,8 @@ flowchart LR
 
 | 구성 요소 | 역할 | 현재 제공하는 기능 |
 |---|---|---|
-| 통합 MCP 서버 | 모델 연결과 오케스트레이션을 한곳에서 처리합니다 | 60개 도구, 단일 stdio 프로세스 |
-| Orchestrator | 작업 분배, 모델 선택, 대체 모델 호출, 결과 검토를 돕습니다 | 15개 도구, 21개 내장 recipe |
+| 통합 MCP 서버 | 모델 연결과 오케스트레이션을 한곳에서 처리합니다 | 기본 26개 통합 도구, 단일 stdio 프로세스 |
+| Orchestrator | 작업 분배, 모델 선택, 대체 모델 호출, 결과 검토를 돕습니다 | 4개 workflow와 preset, legacy recipe 호환 |
 | Claude | 대화, 모델 조회, 로그인과 상태 확인을 제공합니다 | 구독 OAuth 우선, API 키 대체 사용 가능 |
 | Grok | 대화, 모델 조회, 로그인과 상태 확인을 제공합니다 | SuperGrok OAuth 우선, API 키 대체 사용 가능 |
 | Gemini | 대화, 웹 검색, 글쓰기, 이미지 생성, diff 검토, 릴리스 문서 작성을 제공합니다 | Google Antigravity OAuth |
@@ -51,9 +51,9 @@ flowchart LR
 간단한 질문이나 한 번이면 끝나는 작업은 원하는 모델에 바로 보낼 수 있습니다.
 
 ```text
-claude_codex_chat으로 이 설계에서 문제가 될 만한 부분을 검토해줘.
-grok_codex_chat으로 같은 문제를 다른 관점에서 분석해줘.
-google_antigravity_write로 이 초안을 읽기 쉬운 한국어 문서로 다듬어줘.
+agent_hub_chat에서 provider=claude로 이 설계의 위험을 검토해줘.
+agent_hub_chat에서 provider=grok으로 같은 문제를 다른 관점에서 분석해줘.
+agent_hub_write로 이 초안을 읽기 쉬운 한국어 문서로 다듬어줘.
 ```
 
 ### 여러 모델이 역할을 나눌 수 있습니다
@@ -66,7 +66,7 @@ google_antigravity_write로 이 초안을 읽기 쉬운 한국어 문서로 다�
 
 - **단계별 실행:** Codex나 Claude Code가 한 단계씩 모델을 호출하고 결과를 확인합니다. 진행 과정을 직접
   살펴보면서 작업하고 싶을 때 적합합니다.
-- **자동 실행:** `orchestrate_run`이 정해진 recipe를 끝까지 실행합니다. 각 모델에 설정된 동의와 로그인
+- **자동 실행:** `agent_hub_run_workflow`가 정해진 workflow를 끝까지 실행합니다. 각 모델에 설정된 동의와 로그인
   검사는 자동 실행 중에도 그대로 적용됩니다.
 
 ### AI 클라이언트가 달라도 같은 규칙을 사용합니다
@@ -191,56 +191,66 @@ SuperGrok device-code OAuth를 우선 사용합니다. 필요한 경우 `XAI_API
 ```
 
 이 명령은 공통 규칙의 동기화 상태, Python 패키지, basic-memory, provider별 MCP 실행 파일, 메모리 저장소를
-확인합니다. 로그인 상태는 각 provider의 `*_provider_status` 또는 `*_doctor` 도구로 확인할 수 있습니다.
+확인합니다. 로그인과 실행 준비 상태는 `agent_hub_status`로 한 번에 확인할 수 있습니다.
 
-## 오케스트레이션 사용법
+## Workflow 사용법
 
 ### 단계를 직접 확인하면서 실행
 
 ```text
-먼저 orchestrate_advise로 사용할 수 있는 모델과 각 모델의 역할을 확인해줘.
-그다음 이 작업을 단계별로 나누고, 모델이 만든 결과는 orchestrate_verify로 확인해줘.
+먼저 agent_hub_status와 agent_hub_list_models로 사용할 수 있는 모델을 확인해줘.
+그다음 agent_hub_plan_workflow로 실행 단계를 보여주고, 결과는 agent_hub_verify로 확인해줘.
 ```
 
 실행 순서는 아래와 같습니다.
 
-1. `orchestrate_advise`로 사용할 수 있는 모델과 권장 역할을 확인합니다.
-2. `orchestrate_step`으로 다음에 실행할 모델 호출을 준비합니다.
-3. 반환된 모델 도구를 호출합니다.
-4. 필요한 경우 결과를 `orchestrate_verify`로 검사합니다.
-5. 문제가 발견되면 다른 모델에 다시 검토하거나 수정하도록 요청합니다.
+1. `agent_hub_plan_workflow`로 단계와 사용할 preset을 확인합니다.
+2. `agent_hub_start_workflow`로 실행을 시작합니다.
+3. 반환된 다음 작업을 실행한 뒤 `agent_hub_continue_workflow`에 결과를 전달합니다.
+4. 완료된 문서는 `agent_hub_verify`로 한 번 더 확인합니다.
 
-### Recipe를 자동으로 실행
+### Workflow를 자동으로 실행
 
 ```text
-orchestrate_run으로 deep_readme recipe를 실행해서 이 저장소의 README 초안을 만들어줘.
+agent_hub_run_workflow로 deep_readme workflow를 실행해서 이 저장소의 README 초안을 만들어줘.
 project_root는 현재 저장소의 절대경로를 사용하고, 모델 호출은 최대 8회로 제한해줘.
 ```
 
-자주 사용하는 recipe는 아래와 같습니다.
+기본 workflow는 아래 네 가지입니다. 비슷한 작업은 별도 workflow를 복사하지 않고 preset으로 선택합니다.
 
-| 작업 | Recipe |
-|---|---|
-| README 작성 | `durable_readme`, `deep_readme` |
-| 기술 문서와 제안서 | `technical_doc`, `proposal` |
-| 웹 검색 후 근거가 포함된 글 작성 | `research_brief`, `research_then_write` |
-| 번역, 교정, 요약 | `translate_doc`, `polish_text`, `rewrite_text`, `summarize_text` |
-| 변경 사항 검토와 릴리스 문서 | `review_diff`, `change_pr`, `release_draft`, `release_notes` |
-| 모델 비교와 이미지 생성 | `compare_models`, `generate_image` |
+| Workflow | Preset | 실제 작업 |
+|---|---|---|
+| `repo_document` | `readme`, `technical-doc`, `proposal` | 저장소 조사, 문서 작성, 검증 |
+| `git_document` | `pr-description`, `release-notes` | Git 변경 수집과 변경 문서 작성 |
+| `research_brief` | `default` | 웹 검색, 근거 기반 요약, 검증 |
+| `deep_readme` | `default` | 여러 모델이 분석과 검토를 나눠 맡는 README 작성 |
 
-`orchestrate_list_recipes`로 전체 목록을 확인할 수 있고, `orchestrate_explain_recipe`로 각 recipe의 단계를
-확인할 수 있습니다.
+번역, 교정, 요약, 이미지 생성처럼 한 번의 모델 호출로 끝나는 기능은 workflow가 아니라
+`agent_hub_write`, `agent_hub_generate_image` 같은 직접 도구로 제공합니다. 예전 `research_then_write`는
+`research_brief`의 호환 alias로 계속 사용할 수 있습니다.
 
 ## 제공하는 도구
 
-기존 provider별 MCP를 사용하던 설정과 호환될 수 있도록 도구 이름의 prefix는 그대로 유지했습니다.
+기본 `tools/list`에는 아래 26개 통합 도구만 표시됩니다. 모든 도구가 같은 결과 형식을 사용하므로 provider가
+달라져도 `success`, `text`, `error`, `usage`, `data`를 같은 방식으로 확인할 수 있습니다.
 
-| Prefix | 개수 | 주요 기능 |
+| 구분 | 개수 | 주요 기능 |
 |---|---:|---|
-| `orchestrate_*` | 15 | recipe, 모델 선택, 단계 실행, 결과 검토, 대체 모델 호출, 자동 실행 |
-| `claude_codex_*` | 8 | Claude 대화, 모델 목록, 로그인, 상태 확인 |
-| `grok_codex_*` | 9 | Grok 대화, 모델 목록, 로그인, 상태 확인 |
-| `google_antigravity_*` / `google_grounded_search` | 28 | Gemini 대화, 검색, 글쓰기, 이미지, 모델 설정, diff와 릴리스 작업 |
+| Provider와 로그인 | 6 | `status`, `list_models`, 로그인 시작·완료·갱신·로그아웃 |
+| 직접 작업 | 8 | 대화, 검색, 글쓰기, 이미지, 모델 비교, diff 검토, 릴리스 문서 |
+| 설정 | 3 | 모델·transport·profile 설정 조회, 변경, 초기화 |
+| Workflow | 9 | 목록, 설명, 계획, 단계 실행, 자동 실행, 결과 검증 |
+
+도구 이름에는 모두 `agent_hub_` prefix가 붙습니다. 예전 60개 `orchestrate_*`, `claude_codex_*`,
+`grok_codex_*`, `google_antigravity_*` 이름도 기존 자동화가 깨지지 않도록 계속 호출할 수 있지만 기본 목록에는
+표시하지 않습니다.
+
+마이그레이션이나 문제 진단 때문에 예전 목록이 필요하면 서버 환경변수를 바꿀 수 있습니다.
+
+```bash
+AGENT_HUB_TOOL_SURFACE=legacy agent-hub-mcp  # 예전 60개만 표시
+AGENT_HUB_TOOL_SURFACE=all agent-hub-mcp     # 통합 26개와 예전 60개 모두 표시
+```
 
 통합 서버는 legacy MCP 초기화 방식과 stateless modern protocol을 모두 지원합니다. `tools/list`,
 `tools/call`, streaming notification, `server/discover`를 서버 하나에서 처리합니다.
@@ -279,7 +289,7 @@ agent-hub/
   외부 임베딩 API로 전송되지 않습니다.
 - **저장소 범위 지정:** diff 검토나 프로젝트 정보 수집에는 대상 저장소의 절대경로를 전달합니다.
 - **잘린 출력 거부:** 모델이 토큰 한도에 도달한 결과는 정상 완료로 처리하지 않습니다.
-- **호출 횟수 제한:** 자동 recipe와 모델 비교는 여러 번의 외부 호출을 만들 수 있습니다. 작업에 맞게
+- **호출 횟수 제한:** 자동 workflow와 모델 비교는 여러 번의 외부 호출을 만들 수 있습니다. 작업에 맞게
   `max_leaf_calls`, 모델, 출력 토큰을 제한해 주세요.
 
 provider별 자세한 내용은 [`plugins/`](./plugins/)에서 확인할 수 있습니다. Antigravity의 보안 경계는
@@ -287,10 +297,10 @@ provider별 자세한 내용은 [`plugins/`](./plugins/)에서 확인할 수 있
 
 ## 알아둘 점
 
-- provider의 로그인 방식과 모델 ID는 서비스 변경에 따라 달라질 수 있습니다. `*_list_models`와
-  `orchestrate_probe_models`로 실제 사용 가능 여부를 확인해 주세요.
-- `orchestrate_get_run`의 실행 상태는 현재 MCP 프로세스 안에서만 유지됩니다. 오래 보관해야 하는 상태는
-  `HANDOFF.md`와 Git에 기록해 주세요.
+- provider의 로그인 방식과 모델 ID는 서비스 변경에 따라 달라질 수 있습니다. `agent_hub_list_models`에서
+  `probe=true`로 실제 사용 가능 여부를 확인해 주세요.
+- workflow 실행 상태는 메모리와 로컬 파일 저장소에 보관됩니다. 오래 유지해야 하는 결정과 작업 맥락은
+  `HANDOFF.md`와 Git에도 함께 기록해 주세요.
 - Ruler와 MCP 설정에 절대경로가 포함되어 있습니다. 다른 기기에서 사용할 때는 경로를 수정하고 설정을
   다시 동기화해야 합니다.
 - basic-memory는 검색을 돕는 보조 기능입니다. 작업 규칙과 진행 상태, 코드 상태는 각각 원래 저장 위치를
@@ -308,11 +318,12 @@ provider별 자세한 내용은 [`plugins/`](./plugins/)에서 확인할 수 있
 
 중요한 변경을 할 때는 아래 항목도 함께 확인해 주세요.
 
-1. 통합 `tools/list`에 이름이 겹치는 도구가 없는지 확인합니다.
-2. 모든 `tools/call` 결과가 MCP `content[]` 형식을 지키는지 확인합니다.
-3. 자동 실행 중에도 provider별 동의 검사가 유지되는지 확인합니다.
-4. legacy와 modern protocol 응답이 모두 유효한지 확인합니다.
-5. 생성된 AI 규칙이 원본과 일치하는지 확인합니다.
+1. 기본 `tools/list`에 26개 통합 도구만 표시되는지 확인합니다.
+2. 숨겨진 legacy 도구도 기존 이름으로 호출되는지 확인합니다.
+3. 모든 `tools/call` 결과가 MCP `content[]`와 공통 output 형식을 지키는지 확인합니다.
+4. 자동 실행 중에도 provider별 동의 검사가 유지되는지 확인합니다.
+5. legacy와 modern protocol 응답이 모두 유효한지 확인합니다.
+6. 생성된 AI 규칙이 원본과 일치하는지 확인합니다.
 
 ## 관련 문서
 

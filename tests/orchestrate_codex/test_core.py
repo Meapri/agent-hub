@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from orchestrate_codex import catalog, errors, gather, policy, recipes, runner, store, verify
 from orchestrate_codex.mcp_server import dispatch_tool, handle_request, tool_definitions
 
@@ -137,6 +139,26 @@ def test_list_recipes():
     ids = {r["id"] for r in items}
     assert "durable_readme" in ids
     assert "change_pr" in ids
+
+
+def test_unified_workflows_group_presets_and_keep_legacy_alias():
+    workflows = recipes.list_workflows()
+    assert {item["id"] for item in workflows} == {
+        "repo_document", "git_document", "research_brief", "deep_readme"
+    }
+    readme = recipes.resolve_workflow("repo_document", "readme")
+    assert readme["recipe_id"] == "durable_readme"
+    alias = recipes.resolve_workflow("research_then_write")
+    assert alias["workflow_id"] == "research_brief"
+    assert alias["recipe_id"] == "research_brief"
+    assert "research_then_write" not in {item["id"] for item in recipes.list_recipes()}
+    legacy_run = runner.start_run("research_then_write", args={"prompt": "q"})
+    assert legacy_run["recipe_id"] == "research_brief"
+
+
+def test_one_stage_recipes_are_not_presented_as_workflows():
+    with pytest.raises(ValueError, match="unknown workflow"):
+        recipes.resolve_workflow("direct_chat")
 
 
 def test_multi_domain_recipes_registered():
