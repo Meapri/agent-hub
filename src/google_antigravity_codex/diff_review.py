@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from . import chat, model_prefs, response, security
 
 MAX_DIFF_CHARS = 80_000
+MAX_UNTRACKED_FILES = 100
+MAX_UNTRACKED_FILE_BYTES = 1_000_000
 DEFAULT_REVIEW_PROMPT = (
     "You are reviewing a git diff for bugs, security issues, regressions, and "
     "missing tests. Be specific: cite file paths and hunks. Separate must-fix "
@@ -37,6 +40,7 @@ def _collect_diff(
     staged: bool = False,
     base: str = "",
     paths: Optional[List[str]] = None,
+    include_untracked: bool = False,
 ) -> str:
     if staged:
         args = ["diff", "--cached"]
@@ -47,7 +51,44 @@ def _collect_diff(
     if paths:
         args.append("--")
         args.extend(paths)
-    return _run_git(repo, args)
+    tracked = _run_git(repo, args)
+    if staged or not include_untracked:
+        return tracked
+
+    raw_untracked = _run_git(repo, ["ls-files", "--others", "--exclude-standard", "-z"])
+    untracked = [item for item in raw_untracked.split("\0") if item]
+    if paths:
+        selected: List[str] = []
+        for item in untracked:
+            for requested in paths:
+                prefix = str(requested).strip().strip("/")
+                if item == prefix or item.startswith(prefix + "/"):
+                    selected.append(item)
+                    break
+        untracked = selected
+    additions: List[str] = []
+    for relative in untracked[:MAX_UNTRACKED_FILES]:
+        candidate = (repo / relative).resolve()
+        try:
+            candidate.relative_to(repo)
+        except ValueError:
+            continue
+        if not candidate.is_file() or candidate.is_symlink():
+            continue
+        try:
+            if candidate.stat().st_size > MAX_UNTRACKED_FILE_BYTES:
+                continue
+            with candidate.open("rb") as stream:
+                if b"\0" in stream.read(8192):
+                    continue
+        except OSError:
+            continue
+        # git diff --no-index returns 1 when differences are found; _run_git accepts
+        # non-zero status when stdout contains the generated patch.
+        additions.append(_run_git(repo, ["diff", "--no-index", "--", os.devnull, relative]))
+        if len(tracked) + sum(len(item) for item in additions) >= MAX_DIFF_CHARS:
+            break
+    return tracked + ("\n" if tracked and additions else "") + "\n".join(additions)
 
 
 def _resolve_repo(cwd: str) -> Path:
@@ -72,10 +113,17 @@ def review_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
     base = str(arguments.get("base") or arguments.get("ref") or "").strip()
     paths = arguments.get("paths")
     path_list = [str(p) for p in paths] if isinstance(paths, list) else None
+    include_untracked = bool(arguments.get("include_untracked", False))
 
     status = _run_git(repo, ["status", "--short"])
     branch = _run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
-    diff = _collect_diff(repo, staged=staged, base=base, paths=path_list)
+    diff = _collect_diff(
+        repo,
+        staged=staged,
+        base=base,
+        paths=path_list,
+        include_untracked=include_untracked,
+    )
     if not diff.strip():
         # unstaged empty — try unstaged + untracked message
         return {

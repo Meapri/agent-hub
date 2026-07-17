@@ -1,13 +1,23 @@
 {
   "name": "agent-hub",
-  "version": "0.1.0",
-  "description": "Personal cross-agent substrate for Codex: shared memory (basic-memory), multi-model access (provider leaf plugins + orchestrate-codex), and git-artifact handoff.",
+  "version": "1.2.0",
+  "description": "Use one Agent Hub MCP for LLM-planned adaptive workflows, cross-model consistency, shared memory, and Git-artifact handoff in Codex.",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
+  "homepage": "https://github.com/Meapri/agent-hub",
+  "repository": "https://github.com/Meapri/agent-hub",
   "interface": {
-    "displayName": "agent-hub",
-    "category": "orchestration"
+    "displayName": "Agent Hub",
+    "shortDescription": "Plan and run consistent multi-model workflows",
+    "longDescription": "Agent Hub lets Codex ask a planner LLM to decompose a goal into a validated dependency DAG, run independent Claude, Grok, and Gemini steps concurrently, and fail closed on policy, provider, or decision disagreement. Shared memory and Git handoffs keep work portable across host apps.",
+    "developerName": "Meapri",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Use Agent Hub to plan this task, show which steps can run concurrently, then execute the reviewed plan",
+      "Compare Claude, Grok, and Gemini with a fail-closed consistency gate"
+    ]
   },
-  "author": "naen",
+  "author": { "name": "Meapri" },
   "license": "MIT"
 }

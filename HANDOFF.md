@@ -11,7 +11,33 @@
 
 - **현재 단계**
 
-  **[2026-07-17 Claude·Grok capability 확장 — 이 블록이 최신]**
+  **[2026-07-17 Adaptive orchestration·Consistency Gate·앱 플러그인 — 이 블록이 최신]**
+
+  원래 목표였던 모델 간 일관성을 두 층으로 나눠 완성했다. Ruler는 동일한 프로젝트 규칙을 Codex와 Claude
+  Code에 배포하고, Agent Hub는 실제 provider 호출 때 정본 정책을 다시 주입해 `policy_sha256`과
+  `request_sha256`을 남긴다. 닫힌 선택 문제는 `agent_hub_compare_models.consistency`로 엄격한 JSON 응답을
+  받아 합의율·응답 수·provenance를 검사한다. 불일치나 provider 실패는 성공으로 포장하지 않고 사람 검토로
+  돌린다.
+
+  `workflow_id=adaptive`는 고정된 Claude→Grok→Gemini 순서를 사용하지 않는다. planner LLM이 단계, provider,
+  의존 관계, fallback과 마지막 결과 단계를 고른다. 로컬 validator가 capability/provider allowlist, cycle,
+  orphan, 단일 final sink, 단계·호출 예산을 검사하고, scheduler가 의존성이 해결된 frontier를 동시에 실행한다.
+  검토된 plan을 다시 넘기면 planner 호출 없이 validate-only 경로로 실행한다. 실패한 단계는 선언된 fallback을
+  사용하고 모두 실패하면 의존 단계를 막은 채 fail-closed로 끝낸다.
+
+  Codex와 Claude Code 플러그인은 같은 엔진을 호출하는 얇은 cockpit으로 정리했다. 공통
+  `adaptive-orchestrate` 스킬은 `hubs/shared/skills/`에서 두 플러그인으로 동기화하며, Claude Code에는
+  `/agent-hub-plan`, `/agent-hub-run` 명령도 추가했다. provider별 MCP나 별도 orchestration 로직은 플러그인에
+  복제하지 않는다. 버전은 `1.2.0`, 공개 도구는 26개 그대로이며 workflow만 5개로 늘었다.
+
+  실제 dogfood에서는 Gemini 3.5 Flash High가 독립 코드 리뷰 2개와 최종 종합 단계의 DAG를 만들었다. 첫
+  wave의 두 리뷰가 병렬로 실행됐고, Claude 리뷰가 완료 계약을 지키지 않자 Grok fallback으로 전환한 뒤 두
+  결과가 준비된 후 Gemini 종합이 실행됐다. 이 검토에서 확인된 untracked 파일 위험은 일반 diff 리뷰에서
+  기본 제외하고, adaptive 리뷰만 파일 수·크기·바이너리 제한을 둬 명시적으로 포함하도록 수정했다.
+
+  ---
+
+  **[2026-07-17 Claude·Grok capability 확장 — 이전 기록]**
 
   통합 공개 도구는 26개로 유지하면서 Gemini에만 연결돼 있던 직접 작업을 provider 중립 구조로 바꿨다.
   `agent_hub_search`, `agent_hub_write`, `agent_hub_review_diff`, `agent_hub_release_draft`는 Claude·Grok·Gemini를

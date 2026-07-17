@@ -74,6 +74,24 @@ def test_chat_marks_max_token_response_incomplete(monkeypatch, tmp_path):
     assert "incomplete_finish_reason:max_tokens" in result["warnings"]
 
 
+def test_chat_marks_unexecuted_tool_use_incomplete(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
+    payload = chat_fake_response({"model": models.DEFAULT_MODEL})
+    payload["stop_reason"] = "tool_use"
+    payload["content"].append(
+        {"type": "tool_use", "id": "tool_1", "name": "bash", "input": {"cmd": "ls"}}
+    )
+
+    with patch.object(chat.api, "http_json", return_value=payload):
+        result = chat.run_chat({"prompt": "review"})
+
+    assert result["success"] is False
+    assert result["finish_reason"] == "tool_use"
+    assert "incomplete_finish_reason:tool_use" in result["warnings"]
+
+
 def test_mcp_initialize_and_tools_list():
     init = handle_request(
         {

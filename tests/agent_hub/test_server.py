@@ -168,6 +168,7 @@ def test_canonical_results_have_envelope_and_mcp_error_signal():
         "git_document",
         "research_brief",
         "deep_readme",
+        "adaptive",
     }
 
     failed = _call(

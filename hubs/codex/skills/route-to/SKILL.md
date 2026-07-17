@@ -12,14 +12,15 @@ description: >
 
 - **단발 위임:** `agent_hub_chat`, `agent_hub_search`, `agent_hub_write`,
   `agent_hub_generate_image` 중 작업에 맞는 도구를 호출한다.
-- **다단계 위임:** `agent_hub_plan_workflow`로 계획을 확인한 뒤
-  `agent_hub_start_workflow`/`agent_hub_continue_workflow`를 사용하거나,
-  `agent_hub_run_workflow`로 끝까지 실행한다.
+- **LLM 판단이 필요한 다단계 위임:** `agent_hub_plan_workflow`를 `workflow_id="adaptive"`로 호출해
+  planner LLM이 provider와 의존성 DAG를 정하게 한다. 검토한 plan은 `agent_hub_run_workflow`로 실행한다.
+- **재현성이 우선인 정형 작업:** 기존 정적 workflow를 사용한다.
 - **검증:** 결과는 `agent_hub_verify`로 확인한다.
 - provider별 동의와 OAuth 검사는 내부 adapter가 계속 강제한다.
 
 ## Steps
-1. 단발이면 알맞은 `agent_hub_*` 도구를, 다단계면 workflow 계획을 먼저 받는다.
+1. 단발이면 알맞은 `agent_hub_*` 도구를 사용한다. 복잡한 다단계 작업은 호스트가 순서를 정하지 말고
+   adaptive plan을 먼저 받는다.
 2. 위임 프롬프트엔 필요한 컨텍스트(파일 경로·목표·제약)만 담는다 — 과대 패킷 금지.
 3. 모델 호출은 **provider 과금/구독 소진 상태 변경**이다. 대량·반복 호출 전엔 목적을 분명히 한다.
 4. 회수한 결과를 원 작업에 반영하고, 중요한 결정·교훈은 shared memory(`mcp__memory__*`)에 기록한다.

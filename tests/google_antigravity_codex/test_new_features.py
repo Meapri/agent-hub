@@ -92,9 +92,11 @@ def test_review_diff_on_temp_repo(tmp_path, monkeypatch):
     subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
     f.write_text("print(2)\n", encoding="utf-8")
+    (repo / "new_file.py").write_text("NEW_VALUE = 3\n", encoding="utf-8")
 
     def fake_chat(args, **kwargs):
-        assert "print(2)" in args["prompt"] or "diff" in args["prompt"].lower()
+        assert "print(2)" in args["prompt"]
+        assert "NEW_VALUE = 3" in args["prompt"]
         return {
             "text": "No critical issues.",
             "success": True,
@@ -107,10 +109,37 @@ def test_review_diff_on_temp_repo(tmp_path, monkeypatch):
     with patch.object(diff_review.chat, "run_chat", side_effect=fake_chat), patch.object(
         diff_review.security, "explicit_workspace_root", return_value=repo
     ):
-        result = diff_review.review_diff({"cwd": str(repo)})
+        result = diff_review.review_diff({"cwd": str(repo), "include_untracked": True})
     assert result["success"] is True
     assert "No critical issues" in result["text"]
     assert result["diff_chars"] > 0
+
+
+def test_review_diff_untracked_is_opt_in_and_binary_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_ANTIGRAVITY_ALLOWED_ROOTS", str(tmp_path))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
+    )
+    tracked = repo / "tracked.py"
+    tracked.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "new.py").write_text("NEW = 1\n", encoding="utf-8")
+    (repo / "binary.bin").write_bytes(b"prefix\0payload")
+
+    assert "new.py" not in diff_review._collect_diff(repo)
+    included = diff_review._collect_diff(repo, include_untracked=True)
+    assert "new.py" in included
+    assert "binary.bin" not in included
 
 
 def test_new_mcp_tools_registered():

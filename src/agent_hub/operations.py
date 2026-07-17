@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-import time
 from typing import Any, Callable, Dict, Iterable, List
 
-from agent_hub import capabilities, provider_settings
-from agent_hub.core import media
+from agent_hub import (
+    capabilities,
+    consistency as consistency_gate,
+    orchestrator,
+    provider_settings,
+)
+from agent_hub.core import media, parallel
 from claude_codex import auth as claude_auth
 from claude_codex import models as claude_models
 from claude_codex import mcp_server as claude_mcp
@@ -480,15 +484,21 @@ def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in defaults.items():
             call_args.setdefault(key, value)
     call_args = _prepare_multimodal(call_args)
+    call_args, provenance = consistency_gate.prepare_provider_call(call_args)
     if provider == "claude":
-        return claude_mcp.dispatch_tool(
+        raw = claude_mcp.dispatch_tool(
             "claude_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
         )
-    if provider == "grok":
-        return grok_mcp.dispatch_tool(
+    elif provider == "grok":
+        raw = grok_mcp.dispatch_tool(
             "grok_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
         )
-    return _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
+    else:
+        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
+    result = dict(raw)
+    existing = result.get("consistency") if isinstance(result.get("consistency"), dict) else {}
+    result["consistency"] = {**existing, **provenance}
+    return result
 
 
 def _chat(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -521,6 +531,10 @@ def _write(args: Dict[str, Any]) -> Dict[str, Any]:
             "temperature": args.get("temperature", 0.35),
             "max_tokens": args.get("max_tokens"),
             "timeout_sec": args.get("timeout_sec") or 180,
+            "project_root": args.get("project_root"),
+            "policy_mode": args.get("policy_mode"),
+            "policy_file": args.get("policy_file"),
+            "max_policy_chars": args.get("max_policy_chars"),
         },
     )
     text = str(raw_chat.get("text") or "").strip()
@@ -594,37 +608,158 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
             provider = prefix
         capabilities.require(provider, "compare")
         targets.append((provider, model))
-    results: List[Dict[str, Any]] = []
-    for provider, model in targets:
-        started = time.monotonic()
-        raw = _chat_raw(
+    gate_value = args.get("consistency")
+    gate_config = dict(gate_value) if isinstance(gate_value, dict) else {}
+    gate_enabled = bool(gate_config.get("enabled", bool(gate_config)))
+    labels: List[str] = []
+    call_prompt = prompt
+    project_root = str(gate_config.get("project_root") or args.get("project_root") or ".")
+    policy_mode = str(
+        gate_config.get("policy_mode")
+        or args.get("policy_mode")
+        or ("required" if gate_enabled else "auto")
+    )
+    policy_file = str(gate_config.get("policy_file") or args.get("policy_file") or "")
+    max_policy_chars = int(
+        gate_config.get("max_policy_chars")
+        or args.get("max_policy_chars")
+        or consistency_gate.DEFAULT_MAX_POLICY_CHARS
+    )
+    if gate_enabled:
+        labels = consistency_gate.validate_labels(gate_config.get("decision_labels") or [])
+        consistency_gate.load_policy(
+            project_root=project_root,
+            policy_file=policy_file,
+            required=policy_mode == "required",
+            max_chars=max_policy_chars,
+        )
+        call_prompt = consistency_gate.decision_prompt(prompt, labels)
+
+    def call_target(provider: str, model: str | None) -> Dict[str, Any]:
+        return _chat_raw(
             provider,
             {
-                "prompt": prompt,
+                "prompt": call_prompt,
+                "system": args.get("system"),
                 "model": model,
                 "temperature": args.get("temperature", 0.2),
                 "max_tokens": args.get("max_tokens"),
                 "timeout_sec": args.get("timeout_sec") or 180,
+                "project_root": project_root if (gate_enabled or args.get("project_root")) else None,
+                "policy_mode": policy_mode,
+                "policy_file": policy_file or None,
+                "max_policy_chars": max_policy_chars,
             },
         )
-        results.append(
-            {
+
+    execution = str(args.get("execution") or "parallel")
+    max_concurrency = int(args.get("max_concurrency") or 3)
+    outcomes = parallel.run_ordered(
+        [lambda p=provider, m=model: call_target(p, m) for provider, model in targets],
+        execution=execution,
+        max_workers=max_concurrency,
+    )
+    results: List[Dict[str, Any]] = []
+    for (provider, model), outcome in zip(targets, outcomes):
+        if outcome.error is not None:
+            provider_result: Dict[str, Any] = {
                 "provider": provider,
-                "model": raw.get("model") or model,
-                "success": bool(raw.get("success", not raw.get("error"))),
-                "text": str(raw.get("text") or "")[:4000],
-                "usage": raw.get("usage") or {},
-                "warnings": raw.get("warnings") or [],
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
-                **({"error": raw.get("error")} if raw.get("error") else {}),
+                "model": model,
+                "success": False,
+                "text": "",
+                "usage": {},
+                "warnings": ["provider_call_exception"],
+                "elapsed_ms": outcome.elapsed_ms,
+                "error": str(outcome.error),
+            }
+        else:
+            provider_raw = dict(outcome.value or {})
+            provider_ok = bool(provider_raw.get("success", not provider_raw.get("error")))
+            full_text = str(provider_raw.get("text") or "")
+            provider_result = {
+                "provider": provider,
+                "model": provider_raw.get("model") or model,
+                "success": provider_ok,
+                "text": full_text[:4000],
+                "usage": provider_raw.get("usage") or {},
+                "warnings": provider_raw.get("warnings") or [],
+                "finish_reason": provider_raw.get("finish_reason"),
+                "elapsed_ms": outcome.elapsed_ms,
+                "provenance": provider_raw.get("consistency") or {},
+            }
+            if not provider_ok:
+                provider_result["error"] = (
+                    provider_raw.get("error")
+                    or full_text
+                    or "provider returned an unsuccessful response"
+                )
+            if gate_enabled and provider_ok:
+                try:
+                    provider_result["decision"] = consistency_gate.parse_decision(full_text, labels)
+                except ValueError as exc:
+                    provider_result["contract_error"] = str(exc)
+        results.append(provider_result)
+
+    ok = sum(bool(item["success"]) for item in results)
+    warnings = [] if ok == len(results) else ["partial_compare_failures"]
+    consistency_report: Dict[str, Any] | None = None
+    success = ok > 0
+    text = f"Compared {len(results)} provider/model targets ({ok} succeeded)."
+    if gate_enabled:
+        consistency_report = consistency_gate.evaluate_decisions(
+            results,
+            threshold=float(gate_config.get("threshold", 1.0)),
+            require_all=bool(gate_config.get("require_all", True)),
+            min_responses=int(gate_config.get("min_responses", 2)),
+        )
+        policy_values = [
+            item.get("provenance", {}).get("policy_sha256") for item in results
+        ]
+        request_values = [
+            item.get("provenance", {}).get("request_sha256") for item in results
+        ]
+        policy_hashes = {value for value in policy_values if value}
+        request_hashes = {value for value in request_values if value}
+        provenance_consistent = bool(
+            len(policy_values) == len(results)
+            and all(policy_values)
+            and len(policy_hashes) == 1
+            and len(request_values) == len(results)
+            and all(request_values)
+            and len(request_hashes) == 1
+        )
+        consistency_report.update(
+            {
+                "policy_sha256": next(iter(policy_hashes)) if len(policy_hashes) == 1 else None,
+                "request_sha256": next(iter(request_hashes)) if len(request_hashes) == 1 else None,
+                "provenance_consistent": provenance_consistent,
+                "execution": execution,
+                "max_concurrency": max_concurrency,
             }
         )
-    ok = sum(bool(item["success"]) for item in results)
+        if not consistency_report["provenance_consistent"]:
+            consistency_report["passed"] = False
+            consistency_report["human_review"] = True
+            consistency_report["decision"] = None
+            consistency_report["review_reasons"].append("provenance_mismatch")
+        success = bool(consistency_report["passed"])
+        if success:
+            text = (
+                f'Consistency Gate passed with decision "{consistency_report["decision"]}" '
+                f'({consistency_report["valid_responses"]}/{len(results)} valid).'
+            )
+        else:
+            warnings.append("consistency_gate_human_review")
+            text = "Consistency Gate requires human review: " + ", ".join(
+                consistency_report["review_reasons"]
+            )
     raw = {
-        "success": ok > 0,
-        "text": f"Compared {len(results)} provider/model targets ({ok} succeeded).",
+        "success": success,
+        "text": text,
         "results": results,
-        "warnings": [] if ok == len(results) else ["partial_compare_failures"],
+        "execution": execution,
+        "warnings": list(dict.fromkeys(warnings)),
+        **({"consistency": consistency_report} if consistency_report is not None else {}),
     }
     return envelope("compare_models", raw, provider="multiple")
 
@@ -639,9 +774,16 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
     base = str(args.get("base") or args.get("ref") or "").strip()
     paths = args.get("paths")
     path_list = [str(item) for item in paths] if isinstance(paths, list) else None
+    include_untracked = bool(args.get("include_untracked", False))
     status = google_diff_review._run_git(repo, ["status", "--short"])
     branch = google_diff_review._run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
-    diff = google_diff_review._collect_diff(repo, staged=staged, base=base, paths=path_list)
+    diff = google_diff_review._collect_diff(
+        repo,
+        staged=staged,
+        base=base,
+        paths=path_list,
+        include_untracked=include_untracked,
+    )
     if not diff.strip():
         return envelope(
             "review_diff",
@@ -660,6 +802,14 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
     diff = diff[: google_diff_review.MAX_DIFF_CHARS]
     instruction = str(args.get("instruction") or google_diff_review.DEFAULT_REVIEW_PROMPT).strip()
     focus = str(args.get("focus") or "").strip()
+    require_complete = bool(args.get("require_complete", False))
+    completion_marker = "[AGENT_HUB_REVIEW_COMPLETE]"
+    if require_complete:
+        instruction += (
+            "\nThe entire available diff, including bounded untracked text files, is included below. "
+            "Do not request shell or file tools. Return the completed review now. If there are no "
+            f"findings, say so explicitly. End the response with {completion_marker}."
+        )
     prompt = (
         f"{instruction}\n\n"
         + (f"Focus: {focus}\n\n" if focus else "")
@@ -676,9 +826,25 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
             "temperature": args.get("temperature", 0.2),
             "max_tokens": args.get("max_tokens"),
             "timeout_sec": args.get("timeout_sec") or 180,
+            "project_root": str(repo),
+            "policy_mode": args.get("policy_mode") or "auto",
+            "policy_file": args.get("policy_file"),
+            "max_policy_chars": args.get("max_policy_chars"),
         },
     )
     warnings = list(raw_chat.get("warnings") or [])
+    text = str(raw_chat.get("text") or "")
+    complete = not require_complete or completion_marker in text
+    if require_complete and not complete:
+        warnings.append("incomplete_review_output")
+        raw_chat = {
+            **raw_chat,
+            "success": False,
+            "error": "review response did not include the completion marker",
+            "error_type": "incomplete_review_output",
+        }
+    elif require_complete:
+        raw_chat["text"] = text.replace(completion_marker, "").rstrip()
     if truncated:
         warnings.append("diff_truncated")
     return envelope(
@@ -727,6 +893,10 @@ def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
             "model": args.get("model"),
             "max_tokens": args.get("max_tokens"),
             "timeout_sec": args.get("timeout_sec") or 180,
+            "project_root": str(args.get("repo") or "."),
+            "policy_mode": args.get("policy_mode") or "auto",
+            "policy_file": args.get("policy_file"),
+            "max_policy_chars": args.get("max_policy_chars"),
         },
     )
     return envelope(
@@ -870,8 +1040,254 @@ def _workflow_resolution(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _is_adaptive(args: Dict[str, Any]) -> bool:
+    return str(args.get("workflow_id") or args.get("recipe_id") or "").strip().lower() in {
+        "adaptive",
+        "auto",
+    }
+
+
+def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
+    supplied = args.get("plan")
+    max_steps = int(args.get("max_steps") or orchestrator.MAX_PLAN_STEPS)
+    max_calls = int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS)
+    root = str(args.get("project_root") or ".")
+    policy_mode = str(args.get("policy_mode") or "required")
+    policy_file = str(args.get("policy_file") or "")
+    max_policy_chars = int(
+        args.get("max_policy_chars") or consistency_gate.DEFAULT_MAX_POLICY_CHARS
+    )
+    policy = consistency_gate.load_policy(
+        project_root=root,
+        policy_file=policy_file,
+        required=policy_mode == "required",
+        max_chars=max_policy_chars,
+    )
+    if isinstance(supplied, dict):
+        raw_supplied = {
+            key: supplied.get(key) for key in ("schema", "goal", "rationale", "steps")
+        }
+        plan = orchestrator.validate_plan(
+            raw_supplied, max_steps=max_steps, max_calls=max_calls
+        )
+        return {
+            **plan,
+            "planner": {
+                "provider": "caller",
+                "model": None,
+                "attempts": 0,
+                "policy_source": policy.get("source"),
+                "policy_sha256": policy.get("sha256"),
+            },
+        }
+
+    goal = str(args.get("prompt") or args.get("instruction") or "").strip()
+    if not goal:
+        raise ValueError("adaptive workflow requires prompt or instruction")
+    planner_provider = _normalize_provider(args.get("planner_provider") or "gemini")
+    facts_text = ""
+    try:
+        fact_pack = gather.gather_durable_facts(root)
+        facts_text = str(fact_pack.get("text") or "")
+    except (ValueError, OSError):
+        facts_text = ""
+    initial_prompt = orchestrator.planner_prompt(goal, facts=facts_text, max_steps=max_steps)
+    repairs = max(0, min(int(args.get("planner_repair_attempts", 1)), 2))
+    attempts: List[Dict[str, Any]] = []
+    previous_text = ""
+    validation_error = ""
+    for attempt in range(repairs + 1):
+        planner_input = initial_prompt
+        if attempt:
+            planner_input += (
+                "\n\nYour previous JSON plan was rejected by the local validator. "
+                f"Error: {validation_error}. Return a corrected JSON object only.\n"
+                f"Rejected plan:\n{previous_text[:12000]}"
+            )
+        response = _chat_raw(
+            planner_provider,
+            {
+                "prompt": planner_input,
+                "model": args.get("planner_model"),
+                "temperature": 0.1,
+                "max_tokens": int(args.get("planner_max_tokens") or 12000),
+                "timeout_sec": int(args.get("per_call_timeout") or 240),
+                "project_root": root,
+                "policy_mode": policy_mode,
+                "policy_file": policy_file or None,
+                "max_policy_chars": max_policy_chars,
+            },
+        )
+        previous_text = str(response.get("text") or "")
+        if not bool(response.get("success", not response.get("error"))):
+            validation_error = str(
+                response.get("error") or previous_text or "planner provider failed"
+            )
+            attempts.append(
+                {
+                    "attempt": attempt + 1,
+                    "success": False,
+                    "error": validation_error,
+                    "finish_reason": response.get("finish_reason"),
+                }
+            )
+            continue
+        try:
+            parsed = orchestrator.parse_plan(previous_text)
+            plan = orchestrator.validate_plan(parsed, max_steps=max_steps, max_calls=max_calls)
+        except ValueError as exc:
+            validation_error = str(exc)
+            attempts.append(
+                {"attempt": attempt + 1, "success": False, "error": validation_error}
+            )
+            continue
+        attempts.append({"attempt": attempt + 1, "success": True})
+        provenance = response.get("consistency") if isinstance(response.get("consistency"), dict) else {}
+        return {
+            **plan,
+            "planner": {
+                "provider": planner_provider,
+                "model": response.get("model") or args.get("planner_model"),
+                "attempts": len(attempts),
+                "attempt_log": attempts,
+                "policy_source": provenance.get("policy_source") or policy.get("source"),
+                "policy_sha256": provenance.get("policy_sha256") or policy.get("sha256"),
+                "request_sha256": provenance.get("request_sha256"),
+            },
+        }
+    raise ValueError(f"adaptive planner failed validation: {validation_error}")
+
+
+def _adaptive_context(
+    goal: str, step: Dict[str, Any], dependencies: Dict[str, Dict[str, Any]]
+) -> str:
+    parts = [f"Overall goal:\n{goal}", f"Current step:\n{step['instruction']}"]
+    for step_id, result in dependencies.items():
+        parts.append(f"Dependency output — {step_id}:\n{str(result.get('text') or '')[:24000]}")
+    return "\n\n".join(parts)
+
+
+def _adaptive_step_call(
+    step: Dict[str, Any],
+    provider: str,
+    dependencies: Dict[str, Dict[str, Any]],
+    *,
+    args: Dict[str, Any],
+    goal: str,
+) -> Dict[str, Any]:
+    root = str(args.get("project_root") or ".")
+    policy_args = {
+        "policy_mode": args.get("policy_mode") or "required",
+        "policy_file": args.get("policy_file"),
+        "max_policy_chars": args.get("max_policy_chars"),
+    }
+    context = _adaptive_context(goal, step, dependencies)
+    common = {
+        "provider": provider,
+        "model": None,
+        "max_tokens": args.get("max_tokens"),
+        "timeout_sec": args.get("per_call_timeout") or 180,
+        "project_root": root,
+        **policy_args,
+    }
+    capability = step["capability"]
+    if capability == "chat":
+        return _chat({**common, "prompt": context})
+    if capability == "search":
+        return _search(
+            {
+                "provider": provider,
+                "query": context,
+                "max_tokens": args.get("max_tokens"),
+                "timeout_sec": args.get("per_call_timeout") or 180,
+            }
+        )
+    if capability == "write":
+        source = "\n\n".join(str(result.get("text") or "") for result in dependencies.values())
+        return _write(
+            {
+                **common,
+                "task": "custom",
+                "instruction": context,
+                "source_text": source or None,
+            }
+        )
+    if capability == "review_diff":
+        return _review_diff(
+            {
+                **common,
+                "cwd": root,
+                "instruction": step["instruction"],
+                "focus": context if dependencies else None,
+                "require_complete": True,
+                "include_untracked": True,
+            }
+        )
+    if capability == "compare":
+        gate = None
+        if step.get("decision_labels"):
+            gate = {
+                "enabled": True,
+                "decision_labels": step["decision_labels"],
+                "project_root": root,
+                "policy_mode": policy_args["policy_mode"],
+                "policy_file": policy_args["policy_file"],
+                "max_policy_chars": policy_args["max_policy_chars"],
+            }
+        return _compare_models(
+            {
+                "prompt": context,
+                "providers": step.get("participants") or ["claude", "grok", "gemini"],
+                "project_root": root,
+                "execution": "parallel",
+                "max_concurrency": args.get("max_concurrency") or 3,
+                "consistency": gate,
+                "max_tokens": args.get("max_tokens"),
+                "timeout_sec": args.get("per_call_timeout") or 180,
+                **policy_args,
+            }
+        )
+    if capability == "verify":
+        verified = _verify(
+            {"text": context, "doc_class": "durable", "project_root": root}
+        )
+        if not bool(verified.get("data", {}).get("ok")):
+            verified["success"] = False
+            verified["error"] = {
+                "type": "verification_failed",
+                "message": verified.get("text") or "verification failed",
+            }
+        return verified
+    if capability == "release_snapshot":
+        return _release_snapshot({"repo": root})
+    if capability == "release_draft":
+        return _release_draft(
+            {
+                **common,
+                "repo": root,
+                "polish": True,
+                "title": step["instruction"],
+            }
+        )
+    raise ValueError(f"unsupported adaptive capability: {capability}")
+
+
 def _list_workflows(_args: Dict[str, Any]) -> Dict[str, Any]:
     workflows = recipes.list_workflows()
+    workflows.append(
+        {
+            "id": "adaptive",
+            "description": (
+                "A planner LLM creates a validated provider/dependency DAG; every ready frontier "
+                "runs concurrently and failures use declared fallbacks before failing closed."
+            ),
+            "default_preset": "llm-planned",
+            "presets": ["llm-planned"],
+            "recipe_ids": {},
+            "dynamic": True,
+            "capabilities": orchestrator.capability_manifest(),
+        }
+    )
     return envelope(
         "list_workflows",
         {"success": True, "text": f"{len(workflows)} workflow templates.", "workflows": workflows},
@@ -880,6 +1296,27 @@ def _list_workflows(_args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _is_adaptive(args):
+        return envelope(
+            "get_workflow",
+            {
+                "success": True,
+                "text": "Adaptive workflow uses an LLM-planned, locally validated DAG.",
+                "workflow_id": "adaptive",
+                "dynamic": True,
+                "schema": orchestrator.PLAN_SCHEMA,
+                "capabilities": orchestrator.capability_manifest(),
+                "execution": "dependency-ready frontiers run concurrently",
+                "safety": [
+                    "strict capability/provider allowlist",
+                    "cycle and orphan rejection",
+                    "step and call budgets",
+                    "single final sink",
+                    "fallback then fail-closed",
+                    "canonical policy provenance",
+                ],
+            },
+        )
     resolved = recipes.explain_workflow(
         str(args.get("workflow_id") or ""), str(args.get("preset") or "")
     )
@@ -887,6 +1324,18 @@ def _get_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _is_adaptive(args):
+        plan = _adaptive_plan(args)
+        return envelope(
+            "plan_workflow",
+            {
+                "success": True,
+                "text": f"Adaptive plan ready with {len(plan['steps'])} LLM-chosen steps.",
+                "workflow_id": "adaptive",
+                "dynamic": True,
+                "plan": plan,
+            },
+        )
     resolved = _workflow_resolution(args)
     bindings = args.get("bindings") if isinstance(args.get("bindings"), dict) else None
     plan_args = {
@@ -900,6 +1349,28 @@ def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
+    if _is_adaptive(args):
+        plan = _adaptive_plan(args)
+        return envelope(
+            "start_workflow",
+            {
+                "success": True,
+                "text": "Adaptive plan is ready for review; run it with agent_hub_run_workflow.",
+                "workflow_id": "adaptive",
+                "dynamic": True,
+                "status": "planned",
+                "plan": plan,
+                "next_action": {
+                    "type": "call_tool",
+                    "tool": "agent_hub_run_workflow",
+                    "arguments": {
+                        "workflow_id": "adaptive",
+                        "plan": plan,
+                        "project_root": str(args.get("project_root") or "."),
+                    },
+                },
+            },
+        )
     resolved = _workflow_resolution(args)
     bindings = args.get("bindings") if isinstance(args.get("bindings"), dict) else None
     run_args = {
@@ -943,6 +1414,28 @@ def _get_run(args: Dict[str, Any]) -> Dict[str, Any]:
 def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     from agent_hub.core.inprocess import make_resolver
 
+    if _is_adaptive(args):
+        plan = _adaptive_plan(args)
+        executable = {
+            key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")
+        }
+        result = orchestrator.execute_plan(
+            executable,
+            invoke=lambda step, provider, dependencies: _adaptive_step_call(
+                dict(step), provider, dict(dependencies), args=args, goal=plan["goal"]
+            ),
+            max_concurrency=int(args.get("max_concurrency") or 3),
+            max_calls=int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS),
+        )
+        return envelope(
+            "run_workflow",
+            {
+                **result,
+                "workflow_id": "adaptive",
+                "dynamic": True,
+                "planner": plan.get("planner"),
+            },
+        )
     resolved = _workflow_resolution(args)
     bindings = args.get("bindings") if isinstance(args.get("bindings"), dict) else None
     run_args = {
@@ -1020,6 +1513,26 @@ def _operation_schema(
     return schema
 
 
+POLICY_CONTROL_SCHEMA = {
+    "policy_mode": {
+        "type": "string",
+        "enum": ["off", "auto", "required"],
+        "default": "auto",
+        "description": "Inject a canonical project policy when project_root is supplied.",
+    },
+    "policy_file": {
+        "type": "string",
+        "description": "Optional policy path inside project_root; defaults to AGENTS.md then CLAUDE.md.",
+    },
+    "max_policy_chars": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000000,
+        "default": consistency_gate.DEFAULT_MAX_POLICY_CHARS,
+    },
+}
+
+
 CHAT_SCHEMA = _operation_schema(
     google_mcp.CHAT_SCHEMA,
     {
@@ -1029,7 +1542,9 @@ CHAT_SCHEMA = _operation_schema(
             "description": "Local paths, public URLs, or data URLs. Local paths require workspace_root.",
         },
         "workspace_root": {"type": "string"},
+        "project_root": {"type": "string"},
         "api_mode": {"type": "string", "enum": ["chat", "responses"]},
+        **POLICY_CONTROL_SCHEMA,
     },
 )
 SEARCH_SCHEMA = _operation_schema(
@@ -1044,7 +1559,7 @@ SEARCH_SCHEMA = _operation_schema(
         "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072},
     },
 )
-WRITING_SCHEMA = _operation_schema(google_mcp.WRITING_SCHEMA)
+WRITING_SCHEMA = _operation_schema(google_mcp.WRITING_SCHEMA, POLICY_CONTROL_SCHEMA)
 IMAGE_SCHEMA = _operation_schema(
     google_mcp.IMAGE_SCHEMA,
     {
@@ -1061,11 +1576,59 @@ COMPARE_SCHEMA = _operation_schema(
             "items": {"type": "string", "enum": list(PROVIDERS)},
             "minItems": 1,
             "maxItems": 3,
-        }
+        },
+        "system": {"type": "string"},
+        "project_root": {"type": "string"},
+        **POLICY_CONTROL_SCHEMA,
+        "execution": {
+            "type": "string",
+            "enum": ["parallel", "sequential"],
+            "default": "parallel",
+        },
+        "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
+        "consistency": {
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean", "default": True},
+                "decision_labels": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "minItems": 2,
+                    "maxItems": 20,
+                    "uniqueItems": True,
+                },
+                "threshold": {
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 1.0,
+                    "default": 1.0,
+                },
+                "require_all": {"type": "boolean", "default": True},
+                "min_responses": {"type": "integer", "minimum": 2, "maximum": 3, "default": 2},
+                "project_root": {"type": "string"},
+                **POLICY_CONTROL_SCHEMA,
+            },
+            "required": ["decision_labels"],
+            "additionalProperties": False,
+        },
     },
 )
-REVIEW_DIFF_SCHEMA = _operation_schema(google_mcp.REVIEW_DIFF_SCHEMA)
-RELEASE_DRAFT_SCHEMA = _operation_schema(google_mcp.RELEASE_DRAFT_SCHEMA)
+REVIEW_DIFF_SCHEMA = _operation_schema(google_mcp.REVIEW_DIFF_SCHEMA, POLICY_CONTROL_SCHEMA)
+REVIEW_DIFF_SCHEMA["properties"]["require_complete"] = {
+    "type": "boolean",
+    "default": False,
+    "description": "Require a completed review marker; missing marker fails closed.",
+}
+REVIEW_DIFF_SCHEMA["properties"]["include_untracked"] = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Include bounded, non-binary untracked files. Adaptive review enables this explicitly."
+    ),
+}
+RELEASE_DRAFT_SCHEMA = _operation_schema(
+    google_mcp.RELEASE_DRAFT_SCHEMA, POLICY_CONTROL_SCHEMA
+)
 WORKFLOW_BASE = {
     "workflow_id": {"type": "string"},
     "preset": {"type": "string"},
@@ -1073,6 +1636,36 @@ WORKFLOW_BASE = {
     "instruction": {"type": "string"},
     "project_root": {"type": "string", "default": "."},
     "bindings": {"type": "object", "additionalProperties": {"type": "string"}},
+    "plan": {
+        "type": "object",
+        "description": "A previously reviewed agent_hub_plan_v1 object for adaptive execution.",
+    },
+    "planner_provider": {
+        "type": "string",
+        "enum": list(PROVIDERS),
+        "default": "gemini",
+    },
+    "planner_model": {"type": "string"},
+    "planner_repair_attempts": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2,
+        "default": 1,
+    },
+    "planner_max_tokens": {
+        "type": "integer",
+        "minimum": 256,
+        "maximum": 131072,
+        "default": 12000,
+    },
+    "max_steps": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": orchestrator.MAX_PLAN_STEPS,
+        "default": orchestrator.MAX_PLAN_STEPS,
+    },
+    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
+    **POLICY_CONTROL_SCHEMA,
 }
 
 TOOL_SPECS: List[Dict[str, Any]] = [
@@ -1288,9 +1881,10 @@ TOOL_SPECS: List[Dict[str, Any]] = [
     _spec(
         "agent_hub_plan_workflow",
         "Plan Workflow",
-        "Resolve a workflow into concrete steps without starting it.",
+        "Resolve a static workflow or ask a planner LLM for a validated adaptive DAG.",
         _object(WORKFLOW_BASE, required=("workflow_id",), additional=True),
-        read_only=True,
+        read_only=False,
+        open_world=True,
     ),
     _spec(
         "agent_hub_start_workflow",

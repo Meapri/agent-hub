@@ -1,0 +1,18 @@
+{
+  "name": "agent-hub",
+  "description": "Agent Hub plugins for adaptive multi-model orchestration in Claude Code.",
+  "owner": {
+    "name": "Meapri"
+  },
+  "plugins": [
+    {
+      "name": "agent-hub",
+      "source": "./hubs/claude-code",
+      "description": "LLM-planned adaptive workflows, consistency checks, shared memory, and Git handoff through one Agent Hub MCP.",
+      "version": "1.2.0",
+      "author": {
+        "name": "Meapri"
+      }
+    }
+  ]
+}

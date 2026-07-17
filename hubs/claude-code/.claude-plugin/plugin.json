@@ -1,9 +1,11 @@
 {
   "name": "agent-hub",
-  "displayName": "agent-hub",
-  "version": "0.1.0",
-  "description": "Personal cross-agent substrate for Claude Code: shared memory (basic-memory), multi-model access (provider leaf plugins + orchestrate-codex), and git-artifact handoff.",
-  "author": { "name": "naen" },
+  "displayName": "Agent Hub",
+  "version": "1.2.0",
+  "description": "Use one Agent Hub MCP for LLM-planned adaptive workflows, cross-model consistency, shared memory, and Git-artifact handoff in Claude Code.",
+  "author": { "name": "Meapri" },
   "license": "MIT",
-  "keywords": ["orchestration", "handoff", "mcp", "multi-model"]
+  "homepage": "https://github.com/Meapri/agent-hub",
+  "repository": "https://github.com/Meapri/agent-hub",
+  "keywords": ["adaptive-orchestration", "consistency", "handoff", "mcp", "multi-model"]
 }

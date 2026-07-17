@@ -245,13 +245,14 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         else "anthropic-messages"
     )
     stop_reason = str(payload.get("stop_reason") or "end_turn").lower()
-    incomplete = stop_reason == "max_tokens"
-    warnings = ["incomplete_finish_reason:max_tokens"] if incomplete else []
+    incomplete = stop_reason in {"max_tokens", "tool_use"}
+    warnings = [f"incomplete_finish_reason:{stop_reason}"] if incomplete else []
     if temperature_ignored:
         warnings.append("temperature_ignored_by_model")
     return {
         "text": text,
         "stop_reason": stop_reason,
+        "finish_reason": stop_reason,
         "raw_id": payload.get("id"),
         "auth_mode": auth_ctx.get("mode"),
         "citations": extract_citations(payload),

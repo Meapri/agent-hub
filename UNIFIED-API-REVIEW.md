@@ -4,6 +4,17 @@
 
 ## 구현 결과
 
+### 2026-07-17 adaptive 확장
+
+- 공개 도구 수는 26개로 유지하고 `workflow_id=adaptive`를 기존 workflow 도구에 추가했습니다.
+- workflow는 고정 recipe 4개와 LLM이 계획하는 adaptive 1개, 총 5개입니다.
+- adaptive planner가 단계·provider·dependency·fallback을 고르며 로컬 validator가 신뢰 경계를 담당합니다.
+- scheduler는 provider 순서가 아니라 dependency-ready frontier를 기준으로 병렬 실행합니다.
+- 같은 정책과 응답 계약을 세 모델에 주입하는 Consistency Gate를 `agent_hub_compare_models`에 opt-in으로
+  추가했습니다. 자유 형식 응답은 합의 점수로 위장하지 않습니다.
+- Codex와 Claude Code 플러그인은 별도 엔진을 갖지 않고 같은 26개 API와 공통 스킬을 사용합니다.
+- 일반 diff review는 untracked 파일을 기본 제외하고, adaptive code review만 제한을 둬 포함합니다.
+
 이 문서 아래의 분석은 재설계 전 상태를 기록한 내용입니다. 당시 제안했던 legacy 호환 계층은 최종 구현에서
 제거했으며, 아래의 호환·단계별 이전 제안은 현재 사용법이 아니라 과거 검토 기록입니다.
 

@@ -14,7 +14,7 @@ AI 클라이언트에는 `agent-hub-mcp` 하나만 연결합니다. 단순한 �
 - MCP 서버 1개: `agent-hub-mcp`
 - 공개 도구 26개: 모두 `agent_hub_*` 이름과 같은 결과 형식을 사용합니다.
 - 모델 3종: Claude, Grok, Google Antigravity 기반 Gemini
-- workflow 4개: 저장소 문서, Git 문서, 근거 기반 조사, 멀티모델 README
+- workflow 5개: 고정 workflow 4개와 LLM이 작업 구조를 고르는 `adaptive`
 - 공통 규칙: Ruler 원본에서 `AGENTS.md`, `CLAUDE.md`와 클라이언트 설정을 생성합니다.
 - 로컬 메모리: basic-memory의 semantic embedding을 끄고 FTS 검색만 사용합니다.
 - 작업 인계: `HANDOFF.md`와 Git으로 다른 AI 클라이언트에서도 이어서 작업할 수 있습니다.
@@ -31,7 +31,8 @@ flowchart LR
     P --> GR["Grok"]
     P --> GE["Gemini"]
     O --> W["Workflow engine"]
-    W --> P
+    W --> D["Validated dependency DAG"]
+    D --> P
     C --> M["Local memory"]
     R["Git: rules · handoff · notes"] --> C
 ```
@@ -192,6 +193,35 @@ agent_hub_compare_models에서 providers=["claude", "grok", "gemini"]로 같은 
 provider별 응답, 실제 모델, 소요 시간, 사용량, warning을 같은 결과 형식으로 반환합니다. 일부 provider만
 실패하면 성공한 결과는 유지하고 `partial_compare_failures` warning을 남깁니다.
 
+결론이 정해진 선택지 중 하나여야 할 때는 `consistency.decision_labels`를 함께 전달할 수 있습니다. 이때 세
+모델은 같은 프로젝트 규칙과 같은 JSON 계약으로 답하고, 로컬 Consistency Gate가 응답 수, 정책 hash, 요청
+hash와 합의율을 확인합니다. 하나라도 계약을 어기거나 기준에 못 미치면 결론을 꾸며내지 않고 사람 검토가
+필요하다고 반환합니다. 자유 형식 글의 의미를 억지 점수로 바꾸는 용도로는 사용하지 않습니다.
+
+### LLM이 작업 구조를 고르는 Adaptive workflow
+
+```text
+agent_hub_plan_workflow를 workflow_id=adaptive로 호출해줘.
+prompt에는 목표를, project_root에는 현재 저장소 절대경로를 넣고 policy_mode=required로 설정해줘.
+```
+
+planner LLM은 필요한 단계, 각 단계의 provider, 실제 의존 관계와 fallback을 JSON DAG로 제안합니다. Agent
+Hub는 이 계획을 그대로 믿지 않고 허용된 기능·provider인지, 순환이나 고립된 단계가 없는지, 마지막 결과가
+하나인지, 호출 예산을 넘지 않는지 로컬에서 검사합니다. 검사를 통과한 plan에는 `plan_sha256`과 적용한 정책의
+`policy_sha256`이 붙습니다.
+
+계획을 확인한 뒤 반환된 `plan`을 그대로 실행합니다.
+
+```text
+agent_hub_run_workflow를 workflow_id=adaptive로 호출하고, 방금 검토한 plan을 전달해줘.
+max_concurrency=3, max_leaf_calls=9로 제한해줘.
+```
+
+실행 순서는 provider 이름으로 고정하지 않습니다. 현재 의존성이 모두 해결된 단계들을 한 wave로 묶어 동시에
+실행하고, 다음 단계는 필요한 결과가 준비된 뒤에만 시작합니다. 한 provider가 실패하면 plan에 적힌 fallback을
+순서대로 시도하며, 모두 실패하면 뒤 단계를 실행하지 않고 실패 상태로 끝냅니다. 이미 검토한 plan을 넘기면
+planner를 다시 호출하지 않습니다.
+
 ### Workflow를 계획한 뒤 단계별로 실행하기
 
 ```text
@@ -228,6 +258,7 @@ project_root는 현재 저장소의 절대경로를 사용하고 max_leaf_calls�
 | `git_document` | `release-notes` | Git 변경 수집 → 릴리스 노트 작성 |
 | `research_brief` | `default` | 근거 검색 → 출처 기반 요약 → 검증 |
 | `deep_readme` | `default` | Claude 구조 분석 → Grok 사용성 분석 → Gemini 작성 → 검증 |
+| `adaptive` | `llm-planned` | LLM 계획 → 로컬 DAG 검증 → 준비된 단계 병렬 실행 → 선택된 최종 단계 |
 
 번역, 윤문, 요약, 이미지 생성처럼 한 번의 모델 호출로 끝나는 기능은 workflow로 감싸지 않고 직접 도구로
 제공합니다.

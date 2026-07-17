@@ -61,8 +61,13 @@ def test_compare_defaults_to_three_providers(monkeypatch):
 
     monkeypatch.setattr(operations, "_chat_raw", fake_chat)
     result = operations.dispatch_tool("agent_hub_compare_models", {"prompt": "compare"})
-    assert called == ["claude", "grok", "gemini"]
-    assert [item["provider"] for item in result["data"]["results"]] == called
+    assert set(called) == {"claude", "grok", "gemini"}
+    assert [item["provider"] for item in result["data"]["results"]] == [
+        "claude",
+        "grok",
+        "gemini",
+    ]
+    assert result["data"]["execution"] == "parallel"
     assert result["provider"] == "multiple"
 
 

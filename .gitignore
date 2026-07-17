@@ -21,5 +21,8 @@ htmlcov/
 .DS_Store
 *.bak
 
-# Local plugin marketplace cache
-.agents/
+# Local plugin marketplace cache; keep the installable Codex catalog manifest.
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json

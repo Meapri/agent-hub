@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Claude subscription login helpers (Claude Code OAuth)."""
+
 from __future__ import annotations
-import argparse, json, sys
+
+import argparse
+import json
+import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from claude_codex import subscription_auth, auth  # noqa: E402
+from claude_codex import auth, subscription_auth  # noqa: E402
+
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Claude Codex subscription auth")
@@ -24,7 +30,8 @@ def main(argv=None) -> int:
     if args.cmd == "refresh":
         creds = subscription_auth.read_credentials()
         if not creds or not creds.get("refreshToken"):
-            print(json.dumps({"success": False, "error": "no refresh token"})); return 1
+            print(json.dumps({"success": False, "error": "no refresh token"}))
+            return 1
         r = subscription_auth.refresh_token_pure(creds["refreshToken"])
         subscription_auth.write_credentials(r["access_token"], r["refresh_token"], r["expires_at_ms"])
         print(json.dumps({"success": True, "expires_at_ms": r["expires_at_ms"]}, indent=2))
@@ -48,6 +55,7 @@ Chat requests use subscription OAuth by default and apply the hermes-claude-auth
 plan-lane fingerprint. Force API key: CLAUDE_CODEX_AUTH_MODE=api_key
 """)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
