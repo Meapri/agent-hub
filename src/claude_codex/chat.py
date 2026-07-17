@@ -10,10 +10,20 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_hub.core import media
+
 from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
 DEFAULT_MAX_TOKENS = 65536
+
+
+def supports_temperature(model: str) -> bool:
+    lowered = model.lower()
+    return not any(
+        marker in lowered
+        for marker in ("claude-sonnet-5", "claude-fable-5", "claude-mythos-5")
+    )
 
 
 def _content_to_text(content: Any) -> str:
@@ -28,6 +38,51 @@ def _content_to_text(content: Any) -> str:
                 parts.append(block)
         return "".join(parts)
     return str(content or "")
+
+
+def _content_to_anthropic(content: Any) -> str | List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts: List[Dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append({"type": "text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        kind = str(block.get("type") or "").lower()
+        if kind in {"text", "input_text"}:
+            text = str(block.get("text") or "")
+            if text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if kind not in {"image", "image_url", "input_image"}:
+            continue
+        source = block.get("source")
+        if isinstance(source, dict) and source.get("type") in {"base64", "url", "file"}:
+            parts.append({"type": "image", "source": source})
+            continue
+        raw_url = block.get("image_url") or block.get("url")
+        if isinstance(raw_url, dict):
+            raw_url = raw_url.get("url")
+        url = str(raw_url or "")
+        if url.startswith("data:image/"):
+            header, _, data = url.partition(",")
+            parts.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": header[5:].split(";", 1)[0],
+                        "data": data,
+                    },
+                }
+            )
+        elif url.startswith(("https://", "http://")):
+            parts.append({"type": "image", "source": {"type": "url", "url": url}})
+    return parts
 
 
 def to_anthropic_messages(
@@ -53,13 +108,23 @@ def to_anthropic_messages(
         if role not in {"user", "assistant"}:
             # map tool/function-ish to user text for leaf simplicity
             role = "user"
-        if not text:
+        content = _content_to_anthropic(msg.get("content"))
+        if not content:
             continue
-        # merge consecutive same-role messages (Anthropic requirement)
-        if out and out[-1]["role"] == role and isinstance(out[-1]["content"], str):
-            out[-1]["content"] = str(out[-1]["content"]) + "\n\n" + text
+        # Merge consecutive same-role messages (Anthropic requirement), including
+        # multimodal blocks appended by the unified Agent Hub adapter.
+        if out and out[-1]["role"] == role:
+            previous = out[-1]["content"]
+            if isinstance(previous, str) and isinstance(content, str):
+                out[-1]["content"] = previous + "\n\n" + content
+            else:
+                previous_parts = (
+                    previous if isinstance(previous, list) else [{"type": "text", "text": previous}]
+                )
+                new_parts = content if isinstance(content, list) else [{"type": "text", "text": content}]
+                out[-1]["content"] = [*previous_parts, *new_parts]
         else:
-            out.append({"role": role, "content": text})
+            out.append({"role": role, "content": content})
     if not out:
         raise ValueError("at least one user/assistant message is required")
     if out[0]["role"] != "user":
@@ -120,6 +185,17 @@ def extract_usage(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def extract_citations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    citations: List[Dict[str, Any]] = []
+    for block in payload.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        for citation in block.get("citations") or []:
+            if isinstance(citation, dict):
+                citations.append(dict(citation))
+    return citations
+
+
 def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     security.require_consent()
     prompt = str(arguments.get("prompt") or "").strip()
@@ -135,6 +211,15 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         if not prompt:
             raise ValueError("prompt or messages is required")
         oai = [{"role": "user", "content": prompt}]
+    images = media.normalize_images(
+        arguments.get("images"), workspace_root=arguments.get("workspace_root")
+    )
+    if images:
+        image_message = {"role": "user", "content": media.user_content(prompt, images)}
+        if isinstance(messages, list) and messages:
+            oai.append(image_message)
+        else:
+            oai = [image_message]
     system_text, anth_messages = to_anthropic_messages(oai, system=system)
     body: Dict[str, Any] = {
         "model": model,
@@ -143,7 +228,8 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
     if system_text:
         body["system"] = system_text
-    if temperature is not None:
+    temperature_ignored = temperature is not None and not supports_temperature(model)
+    if temperature is not None and not temperature_ignored:
         body["temperature"] = float(temperature)
     tools = convert_tools_to_anthropic(arguments.get("tools") if isinstance(arguments.get("tools"), list) else None)
     if tools:
@@ -161,11 +247,14 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     stop_reason = str(payload.get("stop_reason") or "end_turn").lower()
     incomplete = stop_reason == "max_tokens"
     warnings = ["incomplete_finish_reason:max_tokens"] if incomplete else []
+    if temperature_ignored:
+        warnings.append("temperature_ignored_by_model")
     return {
         "text": text,
         "stop_reason": stop_reason,
         "raw_id": payload.get("id"),
         "auth_mode": auth_ctx.get("mode"),
+        "citations": extract_citations(payload),
         **response.standard_fields(
             success=not incomplete,
             provider="anthropic",

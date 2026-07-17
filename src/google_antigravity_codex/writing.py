@@ -322,7 +322,7 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     system = (
-        "You are the writing arm of Google Antigravity Codex. Return only the "
+        "You are the writing arm of Agent Hub. Return only the "
         "requested writing unless the output mode asks for notes. Preserve source "
         "facts, names, versions, dates, commands, and numbers. Do not invent tests, "
         "links, issue IDs, or compatibility claims. If evidence is missing, use a "

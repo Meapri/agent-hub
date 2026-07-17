@@ -1,4 +1,4 @@
-# HANDOFF — agent-hub 초기 구축
+# HANDOFF — Agent Hub
 
 > 이건 요약이 아니다. **다음 에이전트(어느 하네스든)를 위한 복구 기록**이다.
 > 실행 확정판은 [`EXECUTION-PLAN.md`](./EXECUTION-PLAN.md)(단계 R0~R6)다 — 이 파일 최상단 재기획 블록을
@@ -11,7 +11,28 @@
 
 - **현재 단계**
 
-  **[2026-07-16 출력 토큰·잘림 판정 수정 — 이 블록이 최신]**
+  **[2026-07-17 Claude·Grok capability 확장 — 이 블록이 최신]**
+
+  통합 공개 도구는 26개로 유지하면서 Gemini에만 연결돼 있던 직접 작업을 provider 중립 구조로 바꿨다.
+  `agent_hub_search`, `agent_hub_write`, `agent_hub_review_diff`, `agent_hub_release_draft`는 Claude·Grok·Gemini를
+  선택할 수 있고, `agent_hub_compare_models`는 세 provider를 같은 입력으로 비교한다. `agent_hub_generate_image`는
+  Grok과 Gemini를 지원하며 `agent_hub_release_snapshot`은 순수 로컬 작업으로 분리했다.
+
+  `agent_hub_chat.images[]`와 `workspace_root`를 공통 입력으로 추가했다. 로컬 이미지 경로는 명시한 root 안에서만
+  읽고, 크기·MIME·민감 경로·원격 URL을 검사한 뒤 provider 형식으로 변환한다. 실제 첨부 이미지 smoke에서
+  Claude Sonnet 5와 Grok 4.5가 모두 `지원 범위`를 정확히 읽었다. Claude web search와 Grok web search도 현재
+  subscription OAuth에서 citation을 포함해 성공했고, Claude·Grok 비교도 두 모델 모두 정상 완료했다.
+
+  기본 모델은 live catalog에 맞춰 Claude Sonnet 5와 Grok 4.5로 갱신했다. Claude 5 계열이 더 이상 받지 않는
+  `temperature`는 adapter가 제거하고 `temperature_ignored_by_model` warning을 남긴다. Agent Hub 버전은
+  `1.1.0`, Claude·Grok 내부 adapter 버전은 `0.3.0`이다.
+
+  자동 테스트와 전체 검증 결과는 루트 [`RUN-REPORT.md`](./RUN-REPORT.md)에 기록한다. Grok 이미지 생성은
+  endpoint·응답·로컬 캐시까지 mock으로 확인했지만 실제 호출은 비용이 발생하므로 이 작업에서는 실행하지 않았다.
+
+  ---
+
+  **[2026-07-16 출력 토큰·잘림 판정 수정 — 이전 기록]**
   ACT-5400 장문 작성 중 Gemini 3.5 Flash High가 4,096 출력 토큰 중 대부분을 high-thinking에 사용하고
   실제 본문 164토큰만 낸 뒤 `finish_reason=max_tokens`로 끝난 사례를 재현했다. 기존 Antigravity writing
   wrapper와 broker가 종료 이유를 잃어 356자짜리 미완성 문서를 성공으로 처리한 것이 원인이었다.

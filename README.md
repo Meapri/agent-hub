@@ -41,20 +41,28 @@ flowchart LR
 
 ## 지원 범위
 
-| 작업 | Claude | Grok | Gemini |
-|---|:---:|:---:|:---:|
-| 대화 | ✓ | ✓ | ✓ |
-| 상태·모델 목록·로그인 | ✓ | ✓ | ✓ |
-| 근거가 포함된 검색 |  |  | ✓ |
-| 초안·번역·윤문·요약 |  |  | ✓ |
-| 이미지 생성 |  |  | ✓ |
-| 모델 비교·Git diff 검토 |  |  | ✓ |
-| 릴리스 스냅샷·문서 |  |  | ✓ |
-| 모델·transport·profile 설정 |  |  | ✓ |
+| 작업 | Claude | Grok | Gemini | Hub·로컬 |
+|---|:---:|:---:|:---:|:---:|
+| 대화 | ✓ | ✓ | ✓ |  |
+| 상태·모델 목록·로그인 | ✓ | ✓ | ✓ |  |
+| 이미지·프레임 분석 | ✓ | ✓ | ✓ | 입력 정규화 |
+| 근거가 포함된 검색 | ✓ | ✓ | ✓ | 출처 형식 통합 |
+| 초안·번역·윤문·요약 | ✓ | ✓ | ✓ | 공통 prompt와 검증 |
+| 이미지 생성 |  | ✓ | ✓ | 로컬 캐시 |
+| 모델 비교 | ✓ | ✓ | ✓ | 다중 provider 실행 |
+| Git diff 검토 | ✓ | ✓ | ✓ | diff 수집 |
+| 릴리스 스냅샷 |  |  |  | ✓ |
+| 릴리스 문서 | ✓ | ✓ | ✓ | Git 사실 수집 |
+| 모델 설정 | ✓ | ✓ | ✓ | provider별 범위 적용 |
+| transport·profile 설정 |  |  | ✓ |  |
+
+이 표는 각 회사 제품 전체의 기능이 아니라 Agent Hub adapter에 구현된 범위를 뜻합니다. 대화·vision·글쓰기·
+diff 검토는 현재 로그인 방식으로 사용할 수 있습니다. Claude·Grok의 native 검색과 Grok 이미지 생성은 계정의
+API 권한이 필요할 수 있으므로 실제 호출 결과까지 확인해야 합니다.
 
 `agent_hub_chat`은 `provider=claude|grok|gemini`로 모델을 직접 선택할 수 있습니다. `provider=auto`는 전달한
-모델 이름을 기준으로 경로를 고르며, 모델을 지정하지 않으면 Claude를 사용합니다. 검색, 글쓰기, 이미지처럼
-Gemini 전용인 도구는 입력 schema에서도 `auto`와 `gemini`만 받습니다.
+모델 이름을 기준으로 경로를 고르며, 모델을 지정하지 않으면 Claude를 사용합니다. 검색·글쓰기·diff 검토·
+릴리스 문서는 세 provider를 선택할 수 있고, 이미지 생성은 Grok과 Gemini를 지원합니다.
 
 ## 설치
 
@@ -165,6 +173,25 @@ agent_hub_write로 이 초안을 읽기 쉬운 한국어 기술 문서로 다듬
 agent_hub_review_diff로 현재 저장소 변경 사항에서 버그와 빠진 테스트를 찾아줘.
 ```
 
+### 이미지나 프레임 분석하기
+
+```text
+agent_hub_chat에서 provider=claude로 이 프레임의 쥐 자세와 가려진 관절을 설명해줘.
+images에는 프레임 경로를, workspace_root에는 그 파일이 들어 있는 작업 폴더의 절대경로를 넣어줘.
+```
+
+같은 요청을 `provider=grok`, `provider=gemini`로 반복하면 프레임별 판단을 교차 검토할 수 있습니다. 로컬 파일은
+명시한 `workspace_root` 안에 있어야 하며, JPEG·PNG·GIF·WebP 파일 하나는 20 MiB를 넘을 수 없습니다.
+
+### 여러 provider를 한 번에 비교하기
+
+```text
+agent_hub_compare_models에서 providers=["claude", "grok", "gemini"]로 같은 설계를 비교해줘.
+```
+
+provider별 응답, 실제 모델, 소요 시간, 사용량, warning을 같은 결과 형식으로 반환합니다. 일부 provider만
+실패하면 성공한 결과는 유지하고 `partial_compare_failures` warning을 남깁니다.
+
 ### Workflow를 계획한 뒤 단계별로 실행하기
 
 ```text
@@ -223,21 +250,21 @@ project_root는 현재 저장소의 절대경로를 사용하고 max_leaf_calls�
 | 도구 | 용도 |
 |---|---|
 | `agent_hub_chat` | Claude, Grok, Gemini 대화 |
-| `agent_hub_search` | 출처가 포함된 검색 |
-| `agent_hub_write` | 초안, 번역, 윤문, 재작성, 요약 |
-| `agent_hub_generate_image` | 이미지 생성과 로컬 캐시 저장 |
-| `agent_hub_compare_models` | 같은 입력을 여러 모델로 비교 |
-| `agent_hub_review_diff` | Git diff 수집과 코드 리뷰 |
+| `agent_hub_search` | Claude web search, Grok web·X search, Gemini grounding |
+| `agent_hub_write` | 선택한 provider로 초안, 번역, 윤문, 재작성, 요약 |
+| `agent_hub_generate_image` | Grok·Gemini 이미지 생성과 로컬 캐시 저장 |
+| `agent_hub_compare_models` | 같은 입력을 Claude·Grok·Gemini에서 비교 |
+| `agent_hub_review_diff` | 로컬 Git diff 수집 후 선택한 provider로 검토 |
 | `agent_hub_release_snapshot` | 모델 호출 없이 로컬 릴리스 정보 수집 |
-| `agent_hub_release_draft` | PR 설명이나 릴리스 문서 작성 |
+| `agent_hub_release_draft` | 로컬 초안 생성과 선택적 provider 윤문 |
 
 ### 설정
 
 | 도구 | 용도 |
 |---|---|
-| `agent_hub_get_settings` | Gemini 모델, transport, profile 설정 조회 |
-| `agent_hub_update_settings` | 설정 변경 |
-| `agent_hub_reset_settings` | 설정 일부 또는 전체 초기화 |
+| `agent_hub_get_settings` | provider별 기본 모델과 적용 범위 조회 |
+| `agent_hub_update_settings` | Claude·Grok 모델 기본값 또는 Gemini 설정 변경 |
+| `agent_hub_reset_settings` | provider 일부 또는 전체 설정 초기화 |
 
 ### Workflow
 
@@ -293,6 +320,7 @@ semantic embedding을 사용하지 않습니다.
 ## 보안
 
 - 각 provider는 별도의 명시적 동의를 확인합니다.
+- adapter 구현 여부와 현재 계정의 native API 권한을 구분합니다.
 - OAuth 토큰과 API 키는 사용자 설정 디렉터리, Keychain 또는 환경변수에만 둡니다.
 - source file, Git diff, 저장소 사실을 읽는 도구에는 대상 workspace의 절대경로를 명시합니다.
 - 홈 디렉터리 전체, 파일시스템 루트, 민감한 인증 경로는 workspace root로 사용할 수 없습니다.
@@ -317,8 +345,10 @@ provider 패키지 안의 leaf 구현은 내부 workflow 실행을 위해 남아
 agent-hub/
 ├── src/agent_hub/                 # 공개 operation registry와 통합 MCP 서버
 │   ├── operations.py              # 26개 도구의 schema, handler, 공통 결과 형식
+│   ├── capabilities.py            # provider별 실제 구현 capability
+│   ├── provider_settings.py       # Claude·Grok 기본 설정 저장
 │   ├── server.py                  # MCP protocol과 tools/list, tools/call
-│   ├── core/                      # protocol, in-process transport, 공통 보안 유틸리티
+│   ├── core/                      # protocol, media 입력, transport, 공통 보안 유틸리티
 │   └── providers/                 # 내부 provider adapters
 ├── src/orchestrate_codex/         # workflow, broker, 상태 저장, 검증
 ├── src/claude_codex/              # Claude 내부 provider 구현
@@ -362,6 +392,7 @@ agent-hub/
 - [`UNIFIED-API-REVIEW.md`](./UNIFIED-API-REVIEW.md): 통합 전 중복 분석과 최종 재설계 결과
 - [`BUILD-SPEC.md`](./BUILD-SPEC.md): 프로젝트 배경과 초기 설계 원칙
 - [`EXECUTION-PLAN.md`](./EXECUTION-PLAN.md): 구축 과정과 검증 기록
+- [`RUN-REPORT.md`](./RUN-REPORT.md): 현재 provider capability와 실제 호출 검증 결과
 - [`HANDOFF.md`](./HANDOFF.md): 현재 상태와 다음 작업
 - [`memory/README.md`](./memory/README.md): 로컬 메모리 저장 범위
 - [`model-access/leaves.manifest.json`](./model-access/leaves.manifest.json): provider 코드 출처

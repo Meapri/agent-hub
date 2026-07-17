@@ -1,6 +1,6 @@
 # Agent Hub 도구·워크플로 통합 재설계 검토 기록
 
-검토 기준: `80a6125` (`main`, 2026-07-17)
+최종 재설계 기준점: `c04555f` (`main`, 2026-07-17) 이후 provider capability 확장 작업
 
 ## 구현 결과
 
@@ -10,7 +10,12 @@
 - 기본 `tools/list`를 60개 provider별 도구에서 26개 `agent_hub_*` 통합 도구로 바꿨습니다.
 - 기존 60개 이름과 `AGENT_HUB_TOOL_SURFACE` 호환 계층을 제거했습니다.
 - 통합 서버의 목록과 호출 registry에는 26개 `agent_hub_*` 도구만 남겼습니다.
-- 상태, 모델 목록, 로그인, 대화, Gemini 전용 작업, 설정, workflow를 공통 결과 형식으로 묶었습니다.
+- 상태, 모델 목록, 로그인, 대화, 직접 작업, 설정, workflow를 공통 결과 형식으로 묶었습니다.
+- 검색·글쓰기·diff 검토·릴리스 문서를 Claude, Grok, Gemini에서 선택할 수 있게 확장했습니다.
+- 이미지·프레임 입력을 공통 계약으로 정규화하고 Claude·Grok vision 경로를 연결했습니다.
+- 모델 비교는 Gemini 내부 비교가 아니라 Claude·Grok·Gemini를 함께 실행하는 operation으로 바꿨습니다.
+- 릴리스 스냅샷은 provider에서 분리해 순수 로컬 operation으로 정리했습니다.
+- Grok native web·X 검색과 이미지 생성, Claude native web search를 adapter에 추가했습니다.
 - 21개 recipe를 새 API에서는 4개 workflow와 preset으로 정리했습니다.
 - `research_then_write` alias와 옛 recipe ID를 workflow로 받던 호환 경로도 제거했습니다.
 - 목록에만 있던 Grok 로그인 도구 4개의 실행 경로를 연결했습니다.
@@ -371,8 +376,9 @@ Claude의 `mirror_keychain`처럼 특정 운영체제에만 필요한 기능은 
 | `agent_hub_release_snapshot` | 로컬 Git 릴리스 정보를 수집합니다 |
 | `agent_hub_release_draft` | 수집한 정보를 바탕으로 릴리스 문서를 작성합니다 |
 
-현재 일부 operation이 Gemini에서만 실행되더라도 이름은 provider와 분리합니다. 나중에 다른 provider가 같은
-기능을 지원할 때 공개 API를 다시 바꾸지 않아도 됩니다.
+이 원칙에 따라 검색·글쓰기·diff 검토·릴리스 문서는 세 provider에서 실행되고, 이미지 생성은 Grok과
+Gemini에서 실행됩니다. `release_snapshot`은 모델을 호출하지 않는 로컬 operation입니다. 지원 여부는
+`agent_hub_status`의 capability 정보와 각 도구의 provider enum에서 함께 확인합니다.
 
 ### 설정
 

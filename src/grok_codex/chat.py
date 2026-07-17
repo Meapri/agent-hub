@@ -13,38 +13,112 @@ import os
 from typing import Any, Dict, List
 from uuid import uuid4
 
+from agent_hub.core import media
+
 from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
 DEFAULT_MAX_TOKENS = 65536
 
 
-def _normalize_messages(arguments: Dict[str, Any]) -> List[Dict[str, str]]:
+def _normalize_messages(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     prompt = str(arguments.get("prompt") or "").strip()
     system = str(arguments.get("system") or "").strip()
     messages = arguments.get("messages")
-    out: List[Dict[str, str]] = []
+    out: List[Dict[str, Any]] = []
     if system:
         out.append({"role": "system", "content": system})
-    if isinstance(messages, list) and messages:
+    supplied_messages = isinstance(messages, list) and bool(messages)
+    if supplied_messages:
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
             role = str(msg.get("role") or "user")
             content = msg.get("content")
-            if isinstance(content, list):
-                # flatten text parts
-                text = "".join(
-                    str(b.get("text") or "") if isinstance(b, dict) else str(b) for b in content
-                )
-            else:
-                text = str(content or "")
-            if text:
-                out.append({"role": role, "content": text})
+            if content:
+                out.append({"role": role, "content": content})
     elif prompt:
         out.append({"role": "user", "content": prompt})
+    images = media.normalize_images(
+        arguments.get("images"), workspace_root=arguments.get("workspace_root")
+    )
+    if images:
+        if not supplied_messages:
+            out = [message for message in out if message.get("role") == "system"]
+        out.append({"role": "user", "content": media.user_content(prompt, images)})
     if not out or all(m["role"] == "system" for m in out):
         raise ValueError("prompt or messages is required")
+    return out
+
+
+def _has_images(messages: List[Dict[str, Any]]) -> bool:
+    return any(
+        isinstance(block, dict)
+        and str(block.get("type") or "").lower() in {"image", "image_url", "input_image"}
+        for message in messages
+        for block in (message.get("content") if isinstance(message.get("content"), list) else [])
+    )
+
+
+def _responses_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            out.append(dict(message))
+            continue
+        blocks: List[Dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, str):
+                blocks.append({"type": "input_text", "text": block})
+            elif isinstance(block, dict):
+                kind = str(block.get("type") or "").lower()
+                if kind in {"text", "input_text"}:
+                    blocks.append({"type": "input_text", "text": str(block.get("text") or "")})
+                elif kind in {"image", "image_url", "input_image"}:
+                    raw = block.get("image_url") or block.get("url")
+                    if isinstance(raw, dict):
+                        raw = raw.get("url")
+                    blocks.append(
+                        {
+                            "type": "input_image",
+                            "image_url": str(raw or ""),
+                            "detail": str(block.get("detail") or "auto"),
+                        }
+                    )
+        out.append({"role": message.get("role") or "user", "content": blocks})
+    return out
+
+
+def _chat_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            out.append(dict(message))
+            continue
+        blocks: List[Dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, str):
+                blocks.append({"type": "text", "text": block})
+            elif isinstance(block, dict):
+                kind = str(block.get("type") or "").lower()
+                if kind in {"text", "input_text"}:
+                    blocks.append({"type": "text", "text": str(block.get("text") or "")})
+                elif kind in {"image", "image_url", "input_image"}:
+                    raw = block.get("image_url") or block.get("url")
+                    if isinstance(raw, dict):
+                        raw = raw.get("url")
+                    blocks.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": str(raw or ""),
+                                "detail": str(block.get("detail") or "auto"),
+                            },
+                        }
+                    )
+        out.append({"role": message.get("role") or "user", "content": blocks})
     return out
 
 
@@ -100,14 +174,15 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     session_id = str(arguments.get("session_id") or "").strip() or str(uuid4())
     api_mode = str(arguments.get("api_mode") or os.getenv("GROK_CODEX_API_MODE") or "chat").strip().lower()
     messages = _normalize_messages(arguments)
+    if _has_images(messages):
+        api_mode = "responses"
 
     if api_mode in {"responses", "response"}:
         # Minimal Responses body (Hermes uses richer conversion; keep leaf simple).
         # Concatenate as input string if needed.
-        input_text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
         body: Dict[str, Any] = {
             "model": model,
-            "input": input_text,
+            "input": _responses_messages(messages),
             "max_output_tokens": max(1, max_tokens),
         }
         payload = api.responses_create(body, timeout=timeout, session_id=session_id)
@@ -117,7 +192,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     else:
         body = {
             "model": model,
-            "messages": messages,
+            "messages": _chat_messages(messages),
             "max_tokens": max(1, max_tokens),
         }
         if temperature is not None:
@@ -144,6 +219,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "finish_reason": finish_reason,
         "session_id": session_id,
         "auth_mode": auth_ctx.get("mode"),
+        "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
         **response.standard_fields(
             success=not incomplete,
             provider="xai",

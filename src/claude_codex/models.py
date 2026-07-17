@@ -6,8 +6,15 @@ from typing import Any, Dict, List
 
 from . import api, auth, response, security
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
-CURATED: List[Dict[str, str]] = [{'id': 'claude-sonnet-4-6', 'display': 'Claude Sonnet 4.6', 'source': 'curated'}, {'id': 'claude-opus-4-6', 'display': 'Claude Opus 4.6', 'source': 'curated'}, {'id': 'claude-haiku-4-5', 'display': 'Claude Haiku 4.5', 'source': 'curated'}, {'id': 'claude-sonnet-4-5', 'display': 'Claude Sonnet 4.5', 'source': 'curated'}, {'id': 'claude-opus-4-5', 'display': 'Claude Opus 4.5', 'source': 'curated'}]
+DEFAULT_MODEL = "claude-sonnet-5"
+CURATED: List[Dict[str, str]] = [
+    {"id": "claude-sonnet-5", "display": "Claude Sonnet 5", "source": "curated"},
+    {"id": "claude-fable-5", "display": "Claude Fable 5", "source": "curated"},
+    {"id": "claude-opus-4-8", "display": "Claude Opus 4.8", "source": "curated"},
+    {"id": "claude-opus-4-7", "display": "Claude Opus 4.7", "source": "curated"},
+    {"id": "claude-sonnet-4-6", "display": "Claude Sonnet 4.6", "source": "curated"},
+    {"id": "claude-haiku-4-5-20251001", "display": "Claude Haiku 4.5", "source": "curated"},
+]
 
 
 def list_models(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:

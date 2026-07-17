@@ -4,17 +4,23 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import time
 from typing import Any, Callable, Dict, Iterable, List
 
+from agent_hub import capabilities, provider_settings
+from agent_hub.core import media
 from claude_codex import auth as claude_auth
 from claude_codex import models as claude_models
 from claude_codex import mcp_server as claude_mcp
+from claude_codex import search as claude_search
 from claude_codex import security as claude_security
 from claude_codex import subscription_auth as claude_subscription
 from grok_codex import auth as grok_auth
 from grok_codex import models as grok_models
 from grok_codex import mcp_server as grok_mcp
+from grok_codex import image as grok_image
 from grok_codex import oauth_login as grok_oauth
+from grok_codex import search as grok_search
 from grok_codex import security as grok_security
 from google_antigravity_codex import account as google_account
 from google_antigravity_codex import agy_auth as google_auth
@@ -23,8 +29,11 @@ from google_antigravity_codex import model_prefs as google_model_prefs
 from google_antigravity_codex import oauth_login as google_oauth
 from google_antigravity_codex import profiles as google_profiles
 from google_antigravity_codex import provider as google_provider
+from google_antigravity_codex import diff_review as google_diff_review
+from google_antigravity_codex import release as google_release
 from google_antigravity_codex import security as google_security
 from google_antigravity_codex import session_prefs as google_session_prefs
+from google_antigravity_codex import writing as google_writing
 from orchestrate_codex import broker, gather, policy, recipes, runner, verify
 
 
@@ -119,14 +128,15 @@ def _with_provider(schema: Dict[str, Any], *, auto: bool = True) -> Dict[str, An
     return out
 
 
-def _with_gemini_provider(schema: Dict[str, Any]) -> Dict[str, Any]:
+def _with_supported_provider(
+    schema: Dict[str, Any], providers: Iterable[str], *, allow_all: bool = False
+) -> Dict[str, Any]:
     out = deepcopy(schema)
+    values = ["auto", *providers]
+    if allow_all:
+        values.insert(1, "all")
     out["properties"] = {
-        "provider": {
-            "type": "string",
-            "enum": ["auto", "gemini"],
-            "default": "auto",
-        },
+        "provider": {"type": "string", "enum": values, "default": values[0]},
         **(out.get("properties") or {}),
     }
     out["additionalProperties"] = False
@@ -238,6 +248,8 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "ready": bool(consent.get("user_consent") and auth.get("configured")),
                 "auth_mode": auth.get("mode") or login.get("mode"),
                 "default_model": claude_models.DEFAULT_MODEL,
+                "settings": provider_settings.get("claude"),
+                "capabilities": capabilities.provider_capabilities("claude"),
                 "warnings": [],
             }
         elif provider == "grok":
@@ -250,6 +262,8 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "ready": bool(consent.get("user_consent") and auth.get("configured")),
                 "auth_mode": auth.get("mode") or login.get("mode"),
                 "default_model": grok_models.DEFAULT_MODEL,
+                "settings": provider_settings.get("grok"),
+                "capabilities": capabilities.provider_capabilities("grok"),
                 "warnings": [],
             }
         else:
@@ -277,6 +291,7 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 ),
                 "identity": {"email": login.get("email")} if login.get("email") else None,
                 "quota_available": False,
+                "capabilities": capabilities.provider_capabilities("gemini"),
                 "warnings": []
                 if ready
                 else [str(provider_state.get("error_type") or "provider_not_ready")],
@@ -409,47 +424,371 @@ _BASIC_CHAT_KEYS = {
     "temperature",
     "timeout_sec",
     "messages",
+    "images",
+    "workspace_root",
+    "api_mode",
+    "session_id",
+    "tools",
 }
+
+
+def _operation_provider(
+    args: Dict[str, Any], capability: str, *, default: str = "gemini"
+) -> str:
+    requested = _normalize_provider(args.get("provider") or "auto", allow_auto=True)
+    if requested != "auto":
+        capabilities.require(requested, capability)
+        return requested
+    model = str(args.get("model") or "").lower()
+    if model.startswith("claude"):
+        selected = "claude"
+    elif model.startswith("grok"):
+        selected = "grok"
+    elif model.startswith("gemini") or model.startswith("models/gemini"):
+        selected = "gemini"
+    elif capability == "search" and str(args.get("source") or "").lower() in {"x", "both"}:
+        selected = "grok"
+    else:
+        selected = default
+    capabilities.require(selected, capability)
+    return selected
+
+
+def _prepare_multimodal(call_args: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(call_args)
+    images = media.normalize_images(out.pop("images", None), workspace_root=out.get("workspace_root"))
+    out.pop("workspace_root", None)
+    if not images:
+        return out
+    prompt = str(out.get("prompt") or "")
+    messages = out.get("messages") if isinstance(out.get("messages"), list) else []
+    messages = [dict(item) for item in messages if isinstance(item, dict)]
+    if not messages and out.get("system"):
+        messages.append({"role": "system", "content": str(out["system"])})
+    messages.append({"role": "user", "content": media.user_content(prompt, images)})
+    out["messages"] = messages
+    out.pop("prompt", None)
+    out.pop("system", None)
+    return out
+
+
+def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    capabilities.require(provider, "chat")
+    call_args = {k: v for k, v in args.items() if k != "provider" and v is not None}
+    if provider in {"claude", "grok"}:
+        defaults = provider_settings.get(provider)
+        for key, value in defaults.items():
+            call_args.setdefault(key, value)
+    call_args = _prepare_multimodal(call_args)
+    if provider == "claude":
+        return claude_mcp.dispatch_tool(
+            "claude_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
+        )
+    if provider == "grok":
+        return grok_mcp.dispatch_tool(
+            "grok_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
+        )
+    return _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
 
 
 def _chat(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = _auto_chat_provider(args)
-    call_args = {k: v for k, v in args.items() if k != "provider" and v is not None}
-    if provider == "claude":
-        raw = claude_mcp.dispatch_tool(
-            "claude_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
-        )
-    elif provider == "grok":
-        raw = grok_mcp.dispatch_tool(
-            "grok_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
-        )
-    else:
-        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
+    raw = _chat_raw(provider, args)
     return envelope("chat", raw, provider=provider)
 
 
-def _google_operation(operation: str, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = _normalize_provider(args.get("provider") or "auto", allow_auto=True)
-    if provider not in {"auto", "gemini"}:
-        raise ValueError(f"{operation} is currently supported only by the Gemini adapter")
-    call_args = {k: v for k, v in args.items() if k != "provider" and v is not None}
-    raw = _unwrap_mcp_result(google_mcp.dispatch_tool(tool, call_args))
-    return envelope(operation, raw, provider="gemini")
+def _search(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _operation_provider(args, "search", default="gemini")
+    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
+    if provider == "claude":
+        raw = claude_search.run_search(call_args)
+    elif provider == "grok":
+        raw = grok_search.run_search(call_args)
+    else:
+        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_grounded_search", call_args))
+    return envelope("search", raw, provider=provider)
 
 
-def _get_settings(_args: Dict[str, Any]) -> Dict[str, Any]:
+def _write(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _operation_provider(args, "write", default="gemini")
+    built = google_writing.build_prompt(args)
+    raw_chat = _chat_raw(
+        provider,
+        {
+            "prompt": built["prompt"],
+            "system": built["system"],
+            "model": args.get("model"),
+            "temperature": args.get("temperature", 0.35),
+            "max_tokens": args.get("max_tokens"),
+            "timeout_sec": args.get("timeout_sec") or 180,
+        },
+    )
+    text = str(raw_chat.get("text") or "").strip()
+    warnings = google_writing.review_text(text, durable=bool(built.get("durable")))
+    warnings.extend(
+        str(item) for item in raw_chat.get("warnings") or [] if str(item) not in warnings
+    )
     raw = {
-        "success": True,
-        "text": "Agent Hub settings loaded.",
-        "model_preferences": google_model_prefs.get_prefs_tool({}),
-        "session": google_session_prefs.get_session_prefs({}),
-        "profiles": google_profiles.list_profiles_tool({}),
-        "scope": "gemini",
+        **raw_chat,
+        "text": text,
+        "task": built["task"],
+        "profiles": built["profiles"],
+        "doc_class": built.get("doc_class"),
+        "project_context_used": built.get("project_context_used"),
+        "fact_pack_used": built.get("fact_pack_used"),
+        "warnings": warnings,
     }
+    return envelope("write", raw, provider=provider)
+
+
+def _generate_image(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _operation_provider(args, "image_generation", default="gemini")
+    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
+    if provider == "grok":
+        raw = grok_image.generate_image(call_args)
+    else:
+        raw = _unwrap_mcp_result(
+            google_mcp.dispatch_tool("google_antigravity_generate_image", call_args)
+        )
+    return envelope("generate_image", raw, provider=provider)
+
+
+def _model_provider(model: str) -> str:
+    lowered = model.lower()
+    if lowered.startswith("claude"):
+        return "claude"
+    if lowered.startswith("grok"):
+        return "grok"
+    return "gemini"
+
+
+def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
+    prompt = str(args.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("prompt is required")
+    raw_models = args.get("models")
+    if isinstance(raw_models, str):
+        models = [item.strip() for item in raw_models.replace(";", ",").split(",") if item.strip()]
+    elif isinstance(raw_models, list):
+        models = [str(item).strip() for item in raw_models if str(item).strip()]
+    else:
+        models = []
+    raw_providers = args.get("providers")
+    providers = (
+        [_normalize_provider(item) for item in raw_providers]
+        if isinstance(raw_providers, list) and raw_providers
+        else []
+    )
+    requested = str(args.get("provider") or "auto").lower()
+    if not providers and requested not in {"auto", "all", ""}:
+        providers = [_normalize_provider(requested)]
+    if not providers and models:
+        providers = [_model_provider(model.split("/", 1)[-1]) for model in models]
+    if not providers:
+        providers = list(PROVIDERS)
+    targets: List[tuple[str, str | None]] = []
+    for index, provider in enumerate(providers[:3]):
+        model = models[index] if index < len(models) else None
+        if model and "/" in model and model.split("/", 1)[0] in PROVIDERS:
+            prefix, model = model.split("/", 1)
+            provider = prefix
+        capabilities.require(provider, "compare")
+        targets.append((provider, model))
+    results: List[Dict[str, Any]] = []
+    for provider, model in targets:
+        started = time.monotonic()
+        raw = _chat_raw(
+            provider,
+            {
+                "prompt": prompt,
+                "model": model,
+                "temperature": args.get("temperature", 0.2),
+                "max_tokens": args.get("max_tokens"),
+                "timeout_sec": args.get("timeout_sec") or 180,
+            },
+        )
+        results.append(
+            {
+                "provider": provider,
+                "model": raw.get("model") or model,
+                "success": bool(raw.get("success", not raw.get("error"))),
+                "text": str(raw.get("text") or "")[:4000],
+                "usage": raw.get("usage") or {},
+                "warnings": raw.get("warnings") or [],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                **({"error": raw.get("error")} if raw.get("error") else {}),
+            }
+        )
+    ok = sum(bool(item["success"]) for item in results)
+    raw = {
+        "success": ok > 0,
+        "text": f"Compared {len(results)} provider/model targets ({ok} succeeded).",
+        "results": results,
+        "warnings": [] if ok == len(results) else ["partial_compare_failures"],
+    }
+    return envelope("compare_models", raw, provider="multiple")
+
+
+def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _operation_provider(args, "review_diff", default="gemini")
+    cwd = str(args.get("cwd") or args.get("repo") or ".").strip() or "."
+    repo = google_diff_review._resolve_repo(cwd)
+    if not (repo / ".git").exists() and not (repo / ".git").is_file():
+        raise ValueError(f"Not a git repository: {repo}")
+    staged = bool(args.get("staged"))
+    base = str(args.get("base") or args.get("ref") or "").strip()
+    paths = args.get("paths")
+    path_list = [str(item) for item in paths] if isinstance(paths, list) else None
+    status = google_diff_review._run_git(repo, ["status", "--short"])
+    branch = google_diff_review._run_git(repo, ["rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    diff = google_diff_review._collect_diff(repo, staged=staged, base=base, paths=path_list)
+    if not diff.strip():
+        return envelope(
+            "review_diff",
+            {
+                "success": True,
+                "text": "No diff to review (working tree matches selected base).",
+                "repo": str(repo),
+                "branch": branch,
+                "diff_chars": 0,
+                "status": status,
+                "warnings": ["empty_diff"],
+            },
+            provider="local",
+        )
+    truncated = len(diff) > google_diff_review.MAX_DIFF_CHARS
+    diff = diff[: google_diff_review.MAX_DIFF_CHARS]
+    instruction = str(args.get("instruction") or google_diff_review.DEFAULT_REVIEW_PROMPT).strip()
+    focus = str(args.get("focus") or "").strip()
+    prompt = (
+        f"{instruction}\n\n"
+        + (f"Focus: {focus}\n\n" if focus else "")
+        + f"Repository: {repo}\nBranch: {branch}\n"
+        + f"Diff mode: {'staged' if staged else (f'base={base}' if base else 'HEAD')}\n"
+        + ("(diff truncated)\n" if truncated else "")
+        + f"```diff\n{diff}\n```\n\nGit status:\n```\n{status[:4000]}\n```"
+    )
+    raw_chat = _chat_raw(
+        provider,
+        {
+            "prompt": prompt,
+            "model": args.get("model"),
+            "temperature": args.get("temperature", 0.2),
+            "max_tokens": args.get("max_tokens"),
+            "timeout_sec": args.get("timeout_sec") or 180,
+        },
+    )
+    warnings = list(raw_chat.get("warnings") or [])
+    if truncated:
+        warnings.append("diff_truncated")
+    return envelope(
+        "review_diff",
+        {
+            **raw_chat,
+            "repo": str(repo),
+            "branch": branch,
+            "diff_chars": len(diff),
+            "truncated": truncated,
+            "status_preview": status[:2000],
+            "warnings": warnings,
+        },
+        provider=provider,
+    )
+
+
+def _release_snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
+    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
+    return envelope("release_snapshot", google_release.release_snapshot(call_args), provider="local")
+
+
+def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
+    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
+    snapshot = google_release.collect_snapshot(call_args)
+    draft = google_release.render_draft(snapshot, call_args)
+    if not bool(args.get("polish")):
+        return envelope(
+            "release_draft",
+            {
+                "success": True,
+                "text": draft,
+                "draft": draft,
+                "snapshot": google_release.snapshot_to_dict(snapshot),
+            },
+            provider="local",
+        )
+    provider = _operation_provider(args, "release_draft", default="gemini")
+    polished = _chat_raw(
+        provider,
+        {
+            "prompt": (
+                "Polish this release draft without inventing facts. Preserve versions, links, "
+                f"commands, and validation results.\n\n{draft}"
+            ),
+            "model": args.get("model"),
+            "max_tokens": args.get("max_tokens"),
+            "timeout_sec": args.get("timeout_sec") or 180,
+        },
+    )
+    return envelope(
+        "release_draft",
+        {
+            **polished,
+            "draft": draft,
+            "snapshot": google_release.snapshot_to_dict(snapshot),
+        },
+        provider=provider,
+    )
+
+
+def _get_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+    requested = str(args.get("provider") or "all")
+    providers = _selected_providers(requested)
+    values: Dict[str, Any] = {}
+    if "claude" in providers:
+        values["claude"] = {
+            "defaults": {"model": claude_models.DEFAULT_MODEL},
+            "overrides": provider_settings.get("claude"),
+            "scope": capabilities.provider_capabilities("claude")["settings"]["scope"],
+        }
+    if "grok" in providers:
+        values["grok"] = {
+            "defaults": {"model": grok_models.DEFAULT_MODEL, "api_mode": "chat"},
+            "overrides": provider_settings.get("grok"),
+            "scope": capabilities.provider_capabilities("grok")["settings"]["scope"],
+        }
+    if "gemini" in providers:
+        values["gemini"] = {
+            "model_preferences": google_model_prefs.get_prefs_tool({}),
+            "session": google_session_prefs.get_session_prefs({}),
+            "profiles": google_profiles.list_profiles_tool({}),
+            "scope": capabilities.provider_capabilities("gemini")["settings"]["scope"],
+        }
+    raw = {"success": True, "text": "Agent Hub settings loaded.", "providers": values}
     return envelope("get_settings", raw, success=True)
 
 
 def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _normalize_provider(args.get("provider") or "gemini", allow_auto=True)
+    if provider == "auto":
+        provider = "gemini"
+    if provider in {"claude", "grok"}:
+        changes = {
+            key: args.get(key)
+            for key in ("model", "temperature", "max_tokens", "api_mode")
+            if args.get(key) is not None and (provider == "grok" or key != "api_mode")
+        }
+        if not changes:
+            raise ValueError(f"provide a supported {provider} setting to update")
+        current = provider_settings.update(provider, changes)
+        return envelope(
+            "update_settings",
+            {
+                "success": True,
+                "text": f"Updated {provider} defaults.",
+                "provider_settings": current,
+            },
+            provider=provider,
+        )
     changes: List[Dict[str, Any]] = []
     if args.get("model"):
         changes.append(
@@ -491,6 +830,18 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = str(args.get("provider") or "gemini").lower()
+    if provider in {"claude", "grok"}:
+        removed = provider_settings.reset(provider)
+        return envelope(
+            "reset_settings",
+            {"success": True, "text": f"Reset {provider} settings.", **removed},
+            provider=provider,
+        )
+    if provider == "all":
+        removed = [provider_settings.reset(item) for item in ("claude", "grok")]
+    else:
+        removed = []
     reset = str(args.get("reset") or "all")
     changes: List[Dict[str, Any]] = []
     if reset in {"all", "model"}:
@@ -507,8 +858,9 @@ def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
         "success": all(change.get("success", True) for change in changes),
         "text": f"Reset {reset} settings.",
         "changes": changes,
+        "provider_settings_removed": removed,
     }
-    return envelope("reset_settings", raw, provider="gemini")
+    return envelope("reset_settings", raw, provider="multiple" if provider == "all" else "gemini")
 
 
 def _workflow_resolution(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -656,6 +1008,64 @@ PROVIDER_SCHEMA = {
     "probe": {"type": "boolean", "default": False},
 }
 AUTH_PROVIDER_SCHEMA = {"provider": _provider_property()}
+
+
+def _operation_schema(
+    base: Dict[str, Any], extra: Dict[str, Any] | None = None, *, neutral_model: bool = True
+) -> Dict[str, Any]:
+    schema = deepcopy(base)
+    schema["properties"] = {**(schema.get("properties") or {}), **(extra or {})}
+    if neutral_model and isinstance(schema["properties"].get("model"), dict):
+        schema["properties"]["model"].pop("default", None)
+    return schema
+
+
+CHAT_SCHEMA = _operation_schema(
+    google_mcp.CHAT_SCHEMA,
+    {
+        "images": {
+            "type": "array",
+            "items": {"type": ["string", "object"]},
+            "description": "Local paths, public URLs, or data URLs. Local paths require workspace_root.",
+        },
+        "workspace_root": {"type": "string"},
+        "api_mode": {"type": "string", "enum": ["chat", "responses"]},
+    },
+)
+SEARCH_SCHEMA = _operation_schema(
+    google_mcp.GROUNDING_SCHEMA,
+    {
+        "source": {"type": "string", "enum": ["web", "x", "both"], "default": "web"},
+        "allowed_domains": {"type": "array", "items": {"type": "string"}},
+        "blocked_domains": {"type": "array", "items": {"type": "string"}},
+        "allowed_x_handles": {"type": "array", "items": {"type": "string"}},
+        "from_date": {"type": "string"},
+        "to_date": {"type": "string"},
+        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072},
+    },
+)
+WRITING_SCHEMA = _operation_schema(google_mcp.WRITING_SCHEMA)
+IMAGE_SCHEMA = _operation_schema(
+    google_mcp.IMAGE_SCHEMA,
+    {
+        "resolution": {"type": "string"},
+        "n": {"type": "integer", "minimum": 1, "maximum": 4, "default": 1},
+        "response_format": {"type": "string", "enum": ["url", "b64_json"], "default": "url"},
+    },
+)
+COMPARE_SCHEMA = _operation_schema(
+    google_mcp.COMPARE_SCHEMA,
+    {
+        "providers": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(PROVIDERS)},
+            "minItems": 1,
+            "maxItems": 3,
+        }
+    },
+)
+REVIEW_DIFF_SCHEMA = _operation_schema(google_mcp.REVIEW_DIFF_SCHEMA)
+RELEASE_DRAFT_SCHEMA = _operation_schema(google_mcp.RELEASE_DRAFT_SCHEMA)
 WORKFLOW_BASE = {
     "workflow_id": {"type": "string"},
     "preset": {"type": "string"},
@@ -740,7 +1150,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_chat",
         "Chat",
         "Chat through an explicit provider or route by model when provider=auto.",
-        _with_provider(google_mcp.CHAT_SCHEMA),
+        _with_provider(CHAT_SCHEMA),
         read_only=False,
         open_world=True,
     ),
@@ -748,7 +1158,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_search",
         "Grounded Search",
         "Run a source-backed search operation.",
-        _with_gemini_provider(google_mcp.GROUNDING_SCHEMA),
+        _with_supported_provider(SEARCH_SCHEMA, PROVIDERS),
         read_only=False,
         open_world=True,
     ),
@@ -756,7 +1166,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_write",
         "Write",
         "Draft, rewrite, translate, polish, or summarize text.",
-        _with_gemini_provider(google_mcp.WRITING_SCHEMA),
+        _with_supported_provider(WRITING_SCHEMA, PROVIDERS),
         read_only=False,
         open_world=True,
     ),
@@ -764,7 +1174,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_generate_image",
         "Generate Image",
         "Generate and cache an image.",
-        _with_gemini_provider(google_mcp.IMAGE_SCHEMA),
+        _with_supported_provider(IMAGE_SCHEMA, ("grok", "gemini")),
         read_only=False,
         open_world=True,
     ),
@@ -772,7 +1182,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_compare_models",
         "Compare Models",
         "Run one prompt across multiple models.",
-        _with_gemini_provider(google_mcp.COMPARE_SCHEMA),
+        _with_supported_provider(COMPARE_SCHEMA, PROVIDERS, allow_all=True),
         read_only=False,
         open_world=True,
     ),
@@ -780,7 +1190,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_review_diff",
         "Review Diff",
         "Collect and review a Git diff.",
-        _with_gemini_provider(google_mcp.REVIEW_DIFF_SCHEMA),
+        _with_supported_provider(REVIEW_DIFF_SCHEMA, PROVIDERS),
         read_only=True,
         open_world=True,
     ),
@@ -788,7 +1198,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_release_snapshot",
         "Release Snapshot",
         "Collect local Git release facts without model generation.",
-        _with_gemini_provider(google_mcp.RELEASE_SNAPSHOT_SCHEMA),
+        deepcopy(google_mcp.RELEASE_SNAPSHOT_SCHEMA),
         read_only=True,
         idempotent=True,
     ),
@@ -796,7 +1206,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_release_draft",
         "Release Draft",
         "Draft release notes or a PR description from a Git snapshot.",
-        _with_gemini_provider(google_mcp.RELEASE_DRAFT_SCHEMA),
+        _with_supported_provider(RELEASE_DRAFT_SCHEMA, PROVIDERS),
         read_only=False,
         open_world=True,
     ),
@@ -804,7 +1214,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_get_settings",
         "Get Settings",
         "Read model, transport, and profile preferences.",
-        _object(),
+        _object({"provider": _provider_property(all_value=True)}),
         read_only=True,
         idempotent=True,
     ),
@@ -814,7 +1224,11 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "Update model, transport, or profile preferences.",
         _object(
             {
+                "provider": _provider_property(auto=True),
                 "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "max_tokens": {"type": "integer", "minimum": 1},
+                "api_mode": {"type": "string", "enum": ["chat", "responses"]},
                 "task": {"type": "string"},
                 "validate": {"type": "boolean", "default": True},
                 "notes": {"type": "string"},
@@ -834,6 +1248,11 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "Reset model, transport, profile, or all preferences.",
         _object(
             {
+                "provider": {
+                    "type": "string",
+                    "enum": ["all", *PROVIDERS],
+                    "default": "gemini",
+                },
                 "reset": {
                     "type": "string",
                     "enum": ["all", "model", "transport", "profile"],
@@ -996,23 +1415,13 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_auth_refresh": _auth_refresh,
     "agent_hub_auth_logout": _auth_logout,
     "agent_hub_chat": _chat,
-    "agent_hub_search": lambda args: _google_operation("search", "google_grounded_search", args),
-    "agent_hub_write": lambda args: _google_operation("write", "google_antigravity_write", args),
-    "agent_hub_generate_image": lambda args: _google_operation(
-        "generate_image", "google_antigravity_generate_image", args
-    ),
-    "agent_hub_compare_models": lambda args: _google_operation(
-        "compare_models", "google_antigravity_compare_models", args
-    ),
-    "agent_hub_review_diff": lambda args: _google_operation(
-        "review_diff", "google_antigravity_review_diff", args
-    ),
-    "agent_hub_release_snapshot": lambda args: _google_operation(
-        "release_snapshot", "google_antigravity_release_snapshot", args
-    ),
-    "agent_hub_release_draft": lambda args: _google_operation(
-        "release_draft", "google_antigravity_release_draft", args
-    ),
+    "agent_hub_search": _search,
+    "agent_hub_write": _write,
+    "agent_hub_generate_image": _generate_image,
+    "agent_hub_compare_models": _compare_models,
+    "agent_hub_review_diff": _review_diff,
+    "agent_hub_release_snapshot": _release_snapshot,
+    "agent_hub_release_draft": _release_draft,
     "agent_hub_get_settings": _get_settings,
     "agent_hub_update_settings": _update_settings,
     "agent_hub_reset_settings": _reset_settings,

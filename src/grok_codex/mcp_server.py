@@ -40,15 +40,12 @@ CHAT_SCHEMA: Dict[str, Any] = {
         "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 600, "default": 120},
         "messages": {
             "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "role": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["role", "content"],
-            },
+            "items": {"type": "object"},
         },
+        "images": {"type": "array", "items": {"type": ["string", "object"]}},
+        "workspace_root": {"type": "string"},
+        "api_mode": {"type": "string", "enum": ["chat", "responses"]},
+        "session_id": {"type": "string"},
     },
     "additionalProperties": False,
 }

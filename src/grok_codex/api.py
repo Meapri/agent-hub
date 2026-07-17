@@ -64,3 +64,7 @@ def responses_create(body: Dict[str, Any], *, timeout: float = 120.0, session_id
     body.pop("reasoningEffort", None)
     body.pop("reasoning_effort", None)
     return http_json("POST", url, auth_headers(session_id=session_id), body, timeout)
+
+
+def images_generate(body: Dict[str, Any], *, timeout: float = 180.0) -> Dict[str, Any]:
+    return http_json("POST", f"{base_url()}/images/generations", auth_headers(), body, timeout)
