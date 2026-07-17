@@ -25,6 +25,16 @@ MCP 클라이언트에는 `agent_hub_*` 이름이 붙은 도구 26개만 나타�
 - Grok: `model`, `temperature`, `max_tokens`, `api_mode`
 - Gemini: `model`, `transport`, `profile`, `temperature`, `max_tokens`
 
+자동 계획 모드는 저장된 기본값과 별도로 각 단계의 추론 강도를 `low`, `medium`, `high` 중에서 고릅니다. 같은 값이라도 모델 서비스에 전달되는 형식은 다릅니다.
+
+| 모델 서비스 | 실제 요청 값 |
+|-------------|--------------|
+| Claude | `output_config.effort`, Opus 4.8은 adaptive thinking 함께 사용 |
+| Grok | Responses API의 `reasoning.effort` |
+| Gemini | `thinking_level` |
+
+설정한 모델이 이 기능을 받지 못하면 값을 조용히 버리지 않고 요청을 실패로 처리합니다.
+
 Claude와 Grok의 자체 검색, Grok의 이미지 생성은 계정에 별도 API 권한이 있어야 동작할 수 있습니다. `provider=auto`로 두고 모델을 적지 않으면 Claude를 씁니다.
 
 ## 시작하기 전에 준비할 것
@@ -101,6 +111,8 @@ Google Antigravity:
 
 doctor는 규칙 동기화, Python 패키지, basic-memory, MCP 실행 파일, 메모리 저장소를 확인합니다. 모델별 동의와 로그인 상태는 MCP를 연결한 뒤 `agent_hub_status`로 봅니다.
 
+`agent_hub_status`에서 실시간 확인을 요청하면 Gemini의 저장된 액세스 토큰이 만료됐을 때 갱신 토큰으로 먼저 갱신한 뒤, 같은 응답에서 새 인증 상태를 보여 줍니다. 갱신 토큰까지 없거나 갱신이 실패하면 준비 완료로 표시하지 않습니다.
+
 ## 앱에 플러그인 연결하기
 
 MCP 클라이언트에 Agent Hub를 플러그인으로 등록합니다. `<REPO_ROOT>`는 clone한 저장소 경로로 바꿔 주세요.
@@ -147,8 +159,44 @@ claude plugin list
 - 서로 계속 기다리는 단계나 결과에 연결되지 않은 단계가 없는지
 - 마지막 결과를 만드는 단계가 하나인지
 - 설정한 최대 호출 횟수를 넘지 않는지
+- 단계별 추론 강도와 코드 조사 깊이가 허용된 값인지
 
 필요한 앞 단계가 모두 끝난 작업만 동시에 실행합니다. 한 모델이 실패하면 계획에 적힌 대체 모델을 시도하고, 그마저 모두 실패하면 그 결과가 필요한 뒤 작업은 시작하지 않습니다. 검사를 통과한 plan에는 `plan_sha256`이 붙습니다. 같은 plan을 실행에 넘기면 계획 모델을 다시 부르지 않습니다.
+
+### 코드베이스를 읽고 문서 쓰기
+
+프로젝트 전체를 설명하는 README나 기술 문서는 코드 조사부터 맡기는 편이 안전합니다. 자동 계획 모드는 로컬 저장소 조사에 `inspect_codebase`를 사용합니다. `agent_hub_search`는 웹 자료를 찾는 기능이라 로컬 코드 조사 대신 쓰지 않습니다.
+
+`inspect_codebase`에는 세 가지 조사 깊이가 있습니다.
+
+| 값 | 살펴보는 범위 |
+|----|---------------|
+| `shallow` | 작은 수정이나 한 기능을 확인할 때 필요한 핵심 파일 |
+| `standard` | 주요 진입점, 설정, 구현, 대표 테스트 |
+| `deep` | 저장소 전체 구조를 훑은 뒤 관련성이 높은 핵심 파일의 전문 또는 관련 함수 구간까지 재확인 |
+
+planner는 작업 범위와 불확실성을 보고 조사 깊이와 `reasoning_effort`를 단계마다 정합니다. 조사 요청에 나온 파일명, 함수명, 기능을 바탕으로 관련 파일을 다시 고르고, 작은 핵심 파일은 전문을 읽습니다. 큰 파일은 관련 함수 주변을 여러 구간으로 나눠 읽습니다. 모든 코드 조각에는 원본 줄 번호와 `complete` 또는 `partial` 표시가 붙으므로, 모델이 보지 않은 뒷부분을 본 것처럼 쓰지 못합니다.
+
+조사 결과에는 전체 후보 수, 실제로 읽은 파일, 전문을 읽은 파일, 일부만 읽은 파일과 줄 범위가 남습니다. 저장소 전체 파일 수와 문맥 길이에는 단계별 상한이 있으며, `deep`도 무제한으로 파일을 전송하지 않습니다.
+
+문서 작업을 계획할 때는 아래 값을 함께 넘기면 됩니다.
+
+```json
+{
+  "workflow_id": "adaptive",
+  "prompt": "코드 근거를 빠짐없이 확인한 뒤 자연스러운 한국어 README를 작성해 줘",
+  "project_root": "/absolute/path/to/repository",
+  "policy_mode": "required",
+  "max_steps": 6,
+  "models": {
+    "claude": "claude-opus-4-8",
+    "grok": "grok-4.5",
+    "gemini": "gemini-3.1-pro-high"
+  }
+}
+```
+
+`agent_hub_plan_workflow`로 plan을 확인한 다음 그대로 `agent_hub_run_workflow`에 넘깁니다. 실행할 때 `max_leaf_calls`는 plan의 `expected_max_calls` 이상으로 잡아야 합니다. 더 작게 주면 모델을 부르기 전에 로컬 검사가 실행을 거부합니다.
 
 아래 값으로 한 작업에서 사용할 모델 호출 범위를 제한합니다.
 
@@ -158,6 +206,12 @@ claude plugin list
 | `max_leaf_calls` | 한 작업에서 모델을 부르는 최대 횟수 |
 | `per_call_timeout` | 한 번의 호출을 기다리는 시간 |
 | `max_tokens` | 응답 길이 제한 |
+
+`reasoning_effort`의 뜻은 다음과 같습니다.
+
+- `low`: 형식 변환이나 짧은 확인처럼 판단이 적은 단계
+- `medium`: 일반적인 분석과 작성
+- `high`: 구조가 복잡한 코드 조사, 어려운 검토, 여러 조사 결과의 최종 정리
 
 ## 합의 검사(Consistency Gate)
 
@@ -255,6 +309,7 @@ basic-memory는 보조 검색 기능입니다. 기본 설정은 임베딩 검색
 ./scripts/check-sync.sh
 ./scripts/test-phase1.sh
 ./scripts/doctor.sh
+./.venv/bin/python -m orchestrate_codex.document_quality README.md
 ./.venv/bin/python -m build
 ```
 

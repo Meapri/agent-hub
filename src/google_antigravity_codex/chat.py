@@ -255,6 +255,14 @@ def _thinking_level_from_model(model: str) -> str:
     return ""
 
 
+def supports_thinking_level(model: str) -> bool:
+    normalized = str(model or "").strip().removeprefix("models/").lower()
+    return normalized.startswith("gemini-3") or normalized in {
+        "gemini-pro-agent",
+        "gemini-flash-agent",
+    }
+
+
 def _effective_max_tokens(model: str, max_tokens: Optional[int]) -> Optional[int]:
     if not isinstance(max_tokens, int) or max_tokens <= 0:
         return None
@@ -451,6 +459,11 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         task=task_hint if task_hint in model_prefs.TASK_KEYS else "chat",
         fallback=DEFAULT_MODEL,
     ) or DEFAULT_MODEL
+    requested_thinking = str(arguments.get("thinking_level") or "").strip().lower()
+    if requested_thinking and requested_thinking not in {"minimal", "low", "medium", "high"}:
+        raise ValueError("thinking_level must be minimal, low, medium, or high")
+    if requested_thinking and not supports_thinking_level(model):
+        raise ValueError(f"thinking_level is not supported by model: {model}")
     messages = arguments.get("messages")
     if not isinstance(messages, list):
         prompt = str(arguments.get("prompt") or "").strip()
@@ -471,7 +484,7 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         temperature=arguments.get("temperature"),
         max_tokens=arguments.get("max_tokens") or DEFAULT_MAX_TOKENS,
         top_p=arguments.get("top_p"),
-        thinking_level=str(arguments.get("thinking_level") or ""),
+        thinking_level=requested_thinking,
         grounding=grounding,
         tools=tools,
     )
@@ -541,11 +554,12 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
             retry_sleep_cap_seconds=retry_cap,
         )
 
-    diagnostics = (
+    diagnostics = dict(
         payload.get("_antigravity_diagnostics")
         if isinstance(payload.get("_antigravity_diagnostics"), dict)
         else {}
     )
+    diagnostics["thinking_level"] = requested_thinking or None
     backend = str(diagnostics.get("backend") or "agy-session")
     extracted = extract_response_text(payload)
     warnings: List[str] = []

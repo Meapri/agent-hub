@@ -1,24 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
+
+from orchestrate_codex.document_quality import review_natural_korean
 
 
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "README.md"
-
-TRANSLATION_LIKE_PHRASES = (
-    "이전 이름은 지원하지 않습니다",
-    "정상입니다",
-    "끝난 것입니다",
-    "별개로 보면 됩니다",
-    "실패하는 것이 정상입니다",
-    "호출 예산",
-    "정본",
-    "이를 통해",
-    "활용할 수 있습니다",
-    "dependency frontier",
-)
 
 REQUIRED_COMMANDS = (
     "./.venv/bin/pip install -e '.[dev]'",
@@ -37,9 +26,7 @@ REQUIRED_COMMANDS = (
 
 def test_readme_avoids_translation_like_copy() -> None:
     text = README.read_text(encoding="utf-8")
-
-    for phrase in TRANSLATION_LIKE_PHRASES:
-        assert phrase not in text
+    assert review_natural_korean(text) == []
 
     placeholders = set(re.findall(r"<([A-Z][A-Z0-9_]*)>", text))
     assert placeholders <= {"REPO_ROOT"}
@@ -50,3 +37,8 @@ def test_readme_keeps_copyable_setup_commands() -> None:
 
     for command in REQUIRED_COMMANDS:
         assert command in text
+
+
+def test_document_quality_check_catches_process_narration() -> None:
+    warnings = review_natural_korean("먼저 저장소 구조를 살펴보겠습니다.")
+    assert any("process_narration" in warning for warning in warnings)

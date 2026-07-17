@@ -417,7 +417,10 @@ def list_models() -> List[Dict[str, Any]]:
 
 
 def status(*, probe: bool = False) -> Dict[str, Any]:
-    auth_state = agy_auth.status(probe=False)
+    # A live readiness probe may renew an expired plugin token. Keep a plain
+    # status call read-only, but make probe=True useful immediately after an
+    # app restart instead of requiring a separate manual refresh call.
+    auth_state = agy_auth.status(probe=probe)
     state: Dict[str, Any] = {
         "configured": auth_state.get("enabled") is True and auth_state.get("token_file_present") is True,
         "provider": "agy-oauth",

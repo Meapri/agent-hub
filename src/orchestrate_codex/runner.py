@@ -138,6 +138,9 @@ def _enrich_chat_args(
         args["model"] = model
     if user_args.get("system"):
         args["system"] = user_args["system"]
+    effort = user_args.get("reasoning_effort") or step.get("reasoning_effort")
+    if effort:
+        args["reasoning_effort"] = effort
     return args
 
 
@@ -176,6 +179,8 @@ def _enrich_write_args(
     for key in recipes.WRITE_PASSTHROUGH:
         if user_args.get(key) not in (None, ""):
             args[key] = user_args[key]
+    if "reasoning_effort" not in args and step.get("reasoning_effort"):
+        args["reasoning_effort"] = step["reasoning_effort"]
     # Give the writer enough room for a full structured document — the leaf's default
     # is small and silently truncated long READMEs mid-section. Caller can override.
     if user_args.get("max_tokens"):

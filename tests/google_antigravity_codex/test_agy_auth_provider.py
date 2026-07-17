@@ -134,6 +134,25 @@ def test_provider_not_configured_without_token(tmp_path, monkeypatch):
     assert raised.value.code == "provider_not_configured"
 
 
+def test_live_status_probe_allows_plugin_token_refresh():
+    auth_state = {
+        "enabled": True,
+        "token_file_present": True,
+        "credentials_readable": True,
+        "expired": False,
+    }
+    with patch.object(
+        antigravity_api.agy_auth,
+        "status",
+        return_value=auth_state,
+    ) as status_call, patch.object(antigravity_api, "list_models", return_value=[]):
+        state = antigravity_api.status(probe=True)
+
+    status_call.assert_called_once_with(probe=True)
+    assert state["configured"] is True
+    assert state["healthy"] is True
+
+
 def test_direct_transport_uses_token_in_memory_and_maps_default_model():
     credentials = agy_auth.AgyCredentials(
         access_token="access-secret",

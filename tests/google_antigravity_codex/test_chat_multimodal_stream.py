@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from google_antigravity_codex import chat
 
 
@@ -85,6 +87,22 @@ def test_openai_function_tools_map_to_function_declarations():
     )
     assert "functionDeclarations" in request["tools"][0]
     assert request["tools"][0]["functionDeclarations"][0]["name"] == "search"
+
+
+def test_build_request_maps_thinking_level():
+    request = chat.build_request(
+        messages=[{"role": "user", "content": "inspect"}],
+        model="gemini-3.1-pro-high",
+        thinking_level="high",
+    )
+    assert request["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "high"}
+
+
+def test_run_chat_rejects_thinking_level_for_unsupported_model():
+    with pytest.raises(ValueError, match="not supported"):
+        chat.run_chat(
+            {"prompt": "inspect", "model": "gemini-2.5-flash", "thinking_level": "high"}
+        )
 
 
 def test_merge_stream_chunks_assembles_text():

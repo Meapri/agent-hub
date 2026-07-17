@@ -272,8 +272,10 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
             }
         else:
             consent = google_security.consent_status()
-            login = google_oauth.login_status()
             provider_state = google_provider.status(probe=probe)
+            # A live provider probe can refresh an expired plugin token. Read the
+            # token state afterward so this same status call reflects the refresh.
+            login = google_oauth.login_status()
             authenticated = bool(
                 login.get("credentials_readable") and login.get("expired") is not True
             )
@@ -433,6 +435,7 @@ _BASIC_CHAT_KEYS = {
     "api_mode",
     "session_id",
     "tools",
+    "reasoning_effort",
 }
 
 
@@ -494,6 +497,8 @@ def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
             "grok_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
         )
     else:
+        if call_args.get("reasoning_effort") is not None:
+            call_args["thinking_level"] = call_args.pop("reasoning_effort")
         raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
     result = dict(raw)
     existing = result.get("consistency") if isinstance(result.get("consistency"), dict) else {}
@@ -530,6 +535,7 @@ def _write(args: Dict[str, Any]) -> Dict[str, Any]:
             "model": args.get("model"),
             "temperature": args.get("temperature", 0.35),
             "max_tokens": args.get("max_tokens"),
+            "reasoning_effort": args.get("reasoning_effort"),
             "timeout_sec": args.get("timeout_sec") or 180,
             "project_root": args.get("project_root"),
             "policy_mode": args.get("policy_mode"),
@@ -644,6 +650,7 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 "model": model,
                 "temperature": args.get("temperature", 0.2),
                 "max_tokens": args.get("max_tokens"),
+                "reasoning_effort": args.get("reasoning_effort"),
                 "timeout_sec": args.get("timeout_sec") or 180,
                 "project_root": project_root if (gate_enabled or args.get("project_root")) else None,
                 "policy_mode": policy_mode,
@@ -825,6 +832,7 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
             "model": args.get("model"),
             "temperature": args.get("temperature", 0.2),
             "max_tokens": args.get("max_tokens"),
+            "reasoning_effort": args.get("reasoning_effort"),
             "timeout_sec": args.get("timeout_sec") or 180,
             "project_root": str(repo),
             "policy_mode": args.get("policy_mode") or "auto",
@@ -892,6 +900,7 @@ def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
             ),
             "model": args.get("model"),
             "max_tokens": args.get("max_tokens"),
+            "reasoning_effort": args.get("reasoning_effort"),
             "timeout_sec": args.get("timeout_sec") or 180,
             "project_root": str(args.get("repo") or "."),
             "policy_mode": args.get("policy_mode") or "auto",
@@ -1173,6 +1182,9 @@ def _adaptive_context(
             "do not announce, request, or defer future file or tool inspection."
         ),
     ]
+    if step.get("investigation_depth"):
+        parts.append(f"Required investigation depth: {step['investigation_depth']}")
+    parts.append(f"Reasoning effort selected by planner: {step.get('reasoning_effort', 'medium')}")
     for step_id, result in dependencies.items():
         parts.append(f"Dependency output — {step_id}:\n{str(result.get('text') or '')[:24000]}")
     return "\n\n".join(parts)
@@ -1199,6 +1211,7 @@ def _adaptive_step_call(
         "provider": provider,
         "model": selected_model,
         "max_tokens": args.get("max_tokens"),
+        "reasoning_effort": step.get("reasoning_effort") or "medium",
         "timeout_sec": args.get("per_call_timeout") or 180,
         "project_root": root,
         **policy_args,
@@ -1206,8 +1219,39 @@ def _adaptive_step_call(
     capability = step["capability"]
     if capability == "chat":
         return _chat({**common, "prompt": context})
+    if capability == "inspect_codebase":
+        depth = str(step.get("investigation_depth") or "standard")
+        code_context = gather.gather_code_context(
+            root,
+            depth=depth,
+            focus=f"{goal}\n{step.get('instruction') or ''}",
+        )
+        durable_facts = gather.gather_durable_facts(root)
+        evidence = (
+            f"{context}\n\n"
+            "Repository evidence follows. Use only this evidence for repository claims. "
+            "Cite exact file:line ranges from the numbered excerpts for important claims. "
+            "A complete marker means the whole file is present; never infer from unshown portions of "
+            "a partial file. State what the bounded context could not prove.\n\n"
+            f"{durable_facts.get('text') or ''}\n\n{code_context.get('text') or ''}"
+        )
+        result = _chat({**common, "prompt": evidence})
+        result.setdefault("data", {}).setdefault("inspection", {})
+        result["data"]["inspection"].update(
+            {
+                "depth": depth,
+                "file_count": code_context.get("file_count"),
+                "candidate_count": code_context.get("candidate_count"),
+                "files": code_context.get("files"),
+                "complete_files": code_context.get("complete_files"),
+                "partial_files": code_context.get("partial_files"),
+                "evidence_segments": code_context.get("evidence_segments"),
+                "focus_applied": code_context.get("focus_applied"),
+            }
+        )
+        return result
     if capability == "search":
-        return _search(
+        searched = _search(
             {
                 "provider": provider,
                 "model": selected_model,
@@ -1216,6 +1260,11 @@ def _adaptive_step_call(
                 "timeout_sec": args.get("per_call_timeout") or 180,
             }
         )
+        searched["warnings"].append("reasoning_effort_not_configurable_for_search")
+        searched["data"].setdefault("warnings", []).append(
+            "reasoning_effort_not_configurable_for_search"
+        )
+        return searched
     if capability == "write":
         source = "\n\n".join(str(result.get("text") or "") for result in dependencies.values())
         return _write(
@@ -1262,6 +1311,7 @@ def _adaptive_step_call(
                 "max_concurrency": args.get("max_concurrency") or 3,
                 "consistency": gate,
                 "max_tokens": args.get("max_tokens"),
+                "reasoning_effort": step.get("reasoning_effort") or "medium",
                 "timeout_sec": args.get("per_call_timeout") or 180,
                 **policy_args,
             }
@@ -1550,6 +1600,15 @@ POLICY_CONTROL_SCHEMA = {
         "default": consistency_gate.DEFAULT_MAX_POLICY_CHARS,
     },
 }
+REASONING_EFFORT_SCHEMA = {
+    "reasoning_effort": {
+        "type": "string",
+        "enum": list(orchestrator.REASONING_EFFORTS),
+        "description": (
+            "Provider-neutral reasoning depth. Unsupported provider/model combinations fail closed."
+        ),
+    }
+}
 
 
 CHAT_SCHEMA = _operation_schema(
@@ -1563,6 +1622,7 @@ CHAT_SCHEMA = _operation_schema(
         "workspace_root": {"type": "string"},
         "project_root": {"type": "string"},
         "api_mode": {"type": "string", "enum": ["chat", "responses"]},
+        **REASONING_EFFORT_SCHEMA,
         **POLICY_CONTROL_SCHEMA,
     },
 )
@@ -1578,7 +1638,10 @@ SEARCH_SCHEMA = _operation_schema(
         "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072},
     },
 )
-WRITING_SCHEMA = _operation_schema(google_mcp.WRITING_SCHEMA, POLICY_CONTROL_SCHEMA)
+WRITING_SCHEMA = _operation_schema(
+    google_mcp.WRITING_SCHEMA,
+    {**REASONING_EFFORT_SCHEMA, **POLICY_CONTROL_SCHEMA},
+)
 IMAGE_SCHEMA = _operation_schema(
     google_mcp.IMAGE_SCHEMA,
     {
@@ -1598,6 +1661,7 @@ COMPARE_SCHEMA = _operation_schema(
         },
         "system": {"type": "string"},
         "project_root": {"type": "string"},
+        **REASONING_EFFORT_SCHEMA,
         **POLICY_CONTROL_SCHEMA,
         "execution": {
             "type": "string",
@@ -1632,7 +1696,10 @@ COMPARE_SCHEMA = _operation_schema(
         },
     },
 )
-REVIEW_DIFF_SCHEMA = _operation_schema(google_mcp.REVIEW_DIFF_SCHEMA, POLICY_CONTROL_SCHEMA)
+REVIEW_DIFF_SCHEMA = _operation_schema(
+    google_mcp.REVIEW_DIFF_SCHEMA,
+    {**REASONING_EFFORT_SCHEMA, **POLICY_CONTROL_SCHEMA},
+)
 REVIEW_DIFF_SCHEMA["properties"]["require_complete"] = {
     "type": "boolean",
     "default": False,
@@ -1646,7 +1713,8 @@ REVIEW_DIFF_SCHEMA["properties"]["include_untracked"] = {
     ),
 }
 RELEASE_DRAFT_SCHEMA = _operation_schema(
-    google_mcp.RELEASE_DRAFT_SCHEMA, POLICY_CONTROL_SCHEMA
+    google_mcp.RELEASE_DRAFT_SCHEMA,
+    {**REASONING_EFFORT_SCHEMA, **POLICY_CONTROL_SCHEMA},
 )
 WORKFLOW_BASE = {
     "workflow_id": {"type": "string"},

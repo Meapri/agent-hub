@@ -20,6 +20,7 @@ _FENCED_JSON_RE = re.compile(r"\A```(?:json)?\s*\n?(.*?)\n?```\s*\Z", re.I | re.
 
 CAPABILITY_PROVIDERS: Dict[str, Sequence[str]] = {
     "chat": ("claude", "grok", "gemini"),
+    "inspect_codebase": ("claude", "grok", "gemini"),
     "search": ("claude", "grok", "gemini"),
     "write": ("claude", "grok", "gemini"),
     "review_diff": ("claude", "grok", "gemini"),
@@ -30,6 +31,7 @@ CAPABILITY_PROVIDERS: Dict[str, Sequence[str]] = {
 }
 _PROVIDER_CAPABILITY = {
     "chat": "chat",
+    "inspect_codebase": "chat",
     "search": "search",
     "write": "write",
     "review_diff": "review_diff",
@@ -46,7 +48,11 @@ _STEP_KEYS = {
     "final",
     "participants",
     "decision_labels",
+    "reasoning_effort",
+    "investigation_depth",
 }
+REASONING_EFFORTS = ("low", "medium", "high")
+INVESTIGATION_DEPTHS = ("shallow", "standard", "deep")
 
 
 def capability_manifest() -> Dict[str, Any]:
@@ -82,6 +88,8 @@ Contract:
       "depends_on": ["step ids whose outputs are required"],
       "fallback_providers": ["compatible alternatives, if useful"],
       "instruction": "specific task for this step",
+      "reasoning_effort": "low | medium | high",
+      "investigation_depth": "shallow | standard | deep (inspect_codebase only)",
       "final": false,
       "participants": ["only for compare: 2-3 model providers"],
       "decision_labels": ["only for a closed decision compare: 2-20 labels"]
@@ -92,6 +100,14 @@ Contract:
 Rules:
 - Create at most {max_steps} steps, usually 2-6. Do not add ceremonial steps.
 - Do not invent capabilities, providers, tools, files, or facts.
+- Use inspect_codebase for local repository understanding. Use search only for external/web facts.
+- Choose reasoning_effort per step. Use low for mechanical work, medium for normal analysis, and high
+  for ambiguous architecture, broad codebase investigation, difficult review, or final synthesis.
+- Choose investigation_depth only for inspect_codebase. Use deep when a durable repository document
+  must cover entry points, public schemas, configuration, tests, generated docs, and Git state.
+- Make inspect_codebase instructions name the relevant subsystems, paths, commands, or symbols that
+  must be proven. The gatherer uses those details for a broad scan followed by focused deep reads.
+- Require file:line evidence for repository claims and distinguish complete files from partial excerpts.
 - Express true data dependencies only. Independent steps must have the same dependency frontier so
   the scheduler can run them concurrently. Do not encode an arbitrary provider order.
 - Every non-final step must feed, directly or transitively, the one final step.
@@ -191,6 +207,23 @@ def validate_plan(
         instruction = str(raw.get("instruction") or "").strip()
         if not instruction or len(instruction) > MAX_INSTRUCTION_CHARS:
             raise ValueError(f"{step_id}.instruction must be 1..{MAX_INSTRUCTION_CHARS} chars")
+        reasoning_effort = str(raw.get("reasoning_effort") or "medium").strip().lower()
+        if reasoning_effort not in REASONING_EFFORTS:
+            raise ValueError(
+                f"{step_id}.reasoning_effort must be one of: {', '.join(REASONING_EFFORTS)}"
+            )
+        investigation_depth = str(raw.get("investigation_depth") or "").strip().lower()
+        if capability == "inspect_codebase":
+            investigation_depth = investigation_depth or "standard"
+            if investigation_depth not in INVESTIGATION_DEPTHS:
+                raise ValueError(
+                    f"{step_id}.investigation_depth must be one of: "
+                    f"{', '.join(INVESTIGATION_DEPTHS)}"
+                )
+        elif investigation_depth:
+            raise ValueError(
+                f"{step_id}.investigation_depth is only valid for inspect_codebase"
+            )
 
         participants: List[str] = []
         decision_labels: List[str] = []
@@ -216,6 +249,12 @@ def validate_plan(
                 "depends_on": dependencies,
                 "fallback_providers": fallbacks,
                 "instruction": instruction,
+                "reasoning_effort": reasoning_effort,
+                **(
+                    {"investigation_depth": investigation_depth}
+                    if investigation_depth
+                    else {}
+                ),
                 "final": bool(raw.get("final", False)),
                 **({"participants": participants} if participants else {}),
                 **({"decision_labels": decision_labels} if decision_labels else {}),

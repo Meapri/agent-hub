@@ -15,7 +15,7 @@ _USER_RECIPES_ENV = "ORCHESTRATE_CODEX_RECIPES"
 # Optional user args forwarded verbatim to the Antigravity `write` leaf (WRITING_SCHEMA).
 WRITE_PASSTHROUGH = (
     "source_text", "source_file", "workspace_root", "context", "profile", "tone",
-    "audience", "target_language", "length", "model",
+    "audience", "target_language", "length", "model", "reasoning_effort",
 )
 
 DEFAULT_BINDINGS = {
@@ -214,10 +214,12 @@ RECIPES["deep_readme"] = {
         },
         {
             "id": "gather_code", "kind": "gather", "capability": "local_code", "tool": None,
+            "investigation_depth": "deep",
             "instruction": "Collect source text for the LLM analysts to read.",
         },
         {
             "id": "investigate_arch", "kind": "generate", "capability": "chat", "binding": "chat",
+            "reasoning_effort": "high",
             "instruction": (
                 "You are a senior code analyst. From the CODE CONTEXT, explain this project's "
                 "architecture: modules, responsibilities, data flow, key abstractions. "
@@ -226,6 +228,7 @@ RECIPES["deep_readme"] = {
         },
         {
             "id": "investigate_usage", "kind": "generate", "capability": "chat", "binding": "chat_alt",
+            "reasoning_effort": "high",
             "instruction": (
                 "You are a senior code analyst. From the CODE CONTEXT, explain how a user installs "
                 "and uses this project: install commands, entry points, MCP tools and what each does, "
@@ -235,6 +238,7 @@ RECIPES["deep_readme"] = {
         {
             "id": "draft", "kind": "write", "capability": "write", "binding": "write_ag",
             "write_task": "readme",
+            "reasoning_effort": "high",
             "instruction": (
                 "Synthesize a complete README from the analysts' FINDINGS and the durable fact pack. "
                 "Include overview, features, install, quick start, MCP tool reference, auth/consent, "

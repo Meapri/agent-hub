@@ -56,6 +56,31 @@ def test_validator_accepts_llm_chosen_dag():
     assert plan["final_step"] == "synthesize"
     assert plan["expected_max_calls"] == 6
     assert plan["plan_sha256"]
+    assert all(step["reasoning_effort"] == "medium" for step in plan["steps"])
+
+
+def test_validator_accepts_codebase_depth_and_rejects_invalid_effort():
+    plan = _plan()
+    plan["steps"][0].update(
+        {
+            "capability": "inspect_codebase",
+            "reasoning_effort": "high",
+            "investigation_depth": "deep",
+        }
+    )
+    normalized = orchestrator.validate_plan(plan)
+    first = normalized["steps"][0]
+    assert first["reasoning_effort"] == "high"
+    assert first["investigation_depth"] == "deep"
+
+    plan["steps"][0]["reasoning_effort"] = "maximum"
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        orchestrator.validate_plan(plan)
+
+    plan = _plan()
+    plan["steps"][0]["investigation_depth"] = "deep"
+    with pytest.raises(ValueError, match="only valid for inspect_codebase"):
+        orchestrator.validate_plan(plan)
 
 
 def test_validator_rejects_hallucinated_capability_from_planner():
@@ -367,6 +392,65 @@ def test_adaptive_step_uses_explicit_provider_model_map(tmp_path, monkeypatch):
     assert result["success"] is True
     assert captured["model"] == "claude-opus-4-8"
     assert captured["max_tokens"] == 65536
+    assert captured["reasoning_effort"] == "medium"
+
+
+def test_adaptive_inspection_uses_bounded_local_code_evidence(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+
+    monkeypatch.setattr(
+        operations.gather,
+        "gather_code_context",
+        lambda _root, depth, focus: {
+            "text": "CODE CONTEXT\n===== FILE: src/main.py =====\nVALUE = 1",
+            "file_count": 1,
+            "candidate_count": 1,
+            "files": ["src/main.py"],
+            "complete_files": ["src/main.py"],
+            "partial_files": [],
+            "evidence_segments": [
+                {"path": "src/main.py", "mode": "complete", "start_line": 1, "end_line": 1}
+            ],
+            "focus_applied": bool(focus),
+        },
+    )
+    monkeypatch.setattr(
+        operations.gather,
+        "gather_durable_facts",
+        lambda _root: {"text": "DURABLE FACT PACK"},
+    )
+
+    def fake_chat(arguments):
+        captured.update(arguments)
+        return operations.envelope(
+            "chat", {"success": True, "text": "src/main.py defines VALUE."}, provider="claude"
+        )
+
+    monkeypatch.setattr(operations, "_chat", fake_chat)
+    result = operations._adaptive_step_call(
+        {
+            "id": "inspect_repo",
+            "capability": "inspect_codebase",
+            "provider": "claude",
+            "depends_on": [],
+            "fallback_providers": [],
+            "instruction": "Inspect the repository.",
+            "reasoning_effort": "high",
+            "investigation_depth": "deep",
+            "final": False,
+        },
+        "claude",
+        {},
+        args={"project_root": root, "models": {"claude": "claude-opus-4-8"}},
+        goal="Write complete repository documentation.",
+    )
+
+    assert "src/main.py" in captured["prompt"]
+    assert captured["reasoning_effort"] == "high"
+    assert result["data"]["inspection"]["depth"] == "deep"
+    assert result["data"]["inspection"]["complete_files"] == ["src/main.py"]
+    assert result["data"]["inspection"]["focus_applied"] is True
 
 
 def test_adaptive_compare_maps_models_to_participants(tmp_path, monkeypatch):

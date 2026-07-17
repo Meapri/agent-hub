@@ -39,8 +39,8 @@ def test_hub_plugins_register_only_unified_agent_hub_and_memory():
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():
     codex = _json(HUBS / "codex/.codex-plugin/plugin.json")
     claude = _json(HUBS / "claude-code/.claude-plugin/plugin.json")
-    assert codex["version"] == "1.2.0"
-    assert claude["version"] == "1.2.0"
+    assert codex["version"] == "1.3.0"
+    assert claude["version"] == "1.3.0"
     assert codex["mcpServers"] == "./.mcp.json"
     assert "adaptive" in codex["description"].lower()
     assert "adaptive" in claude["description"].lower()
@@ -58,4 +58,4 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["name"] == "agent-hub"
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
-    assert claude["plugins"][0]["version"] == "1.2.0"
+    assert claude["plugins"][0]["version"] == "1.3.0"

@@ -11,7 +11,47 @@
 
 - **현재 단계**
 
-  **[2026-07-17 Adaptive orchestration·Consistency Gate·앱 플러그인 — 이 블록이 최신]**
+  **[2026-07-17 코드 조사·능동 추론·자연스러운 문서 작성 통합 — 이 블록이 최신]**
+
+  Codex 재시작 뒤 1.3 live workflow를 다시 돌렸다. Opus 4.8 planner가 deep/high 조사, Claude·Gemini 병렬
+  평가, 세 provider Consistency Gate, Claude 최종 정리의 5단계 DAG를 만들었고 4 wave로 완료했다. 세 모델은
+  `partially_supported`에 3/3 합의했다. 이 과정에서 기존 deep 수집기가 파일마다 앞 5천 자만 보내
+  `gather.py` 뒤쪽 구현을 놓치는 문제가 확인됐다.
+
+  수집기는 이제 저장소를 넓게 확인하는 1단계와 핵심 파일을 깊게 읽는 2단계로 동작한다. 조사 요청에 나온
+  파일명·함수명·기능으로 핵심 파일을 다시 고르고, 작은 파일은 전문을, 큰 파일은 관련 구간 여러 곳을 읽는다.
+  모든 조각에는 원본 줄 번호와 `complete`·`partial` 상태가 붙으며 결과에도 전문 파일·부분 파일·줄 범위를
+  남긴다. 같은 저장소 재현에서 후보 250개 중 57개를 확인했고 `gather.py`, `document_quality.py`, `verify.py`
+  등 핵심 파일 4개는 전문이 들어갔다.
+
+  첫 live status에서 만료된 Gemini 토큰 때문에 `2/3 ready`가 나온 문제도 고쳤다. `probe=true`는 저장된
+  갱신 토큰으로 인증을 갱신한 뒤 같은 status 응답에서 새 상태를 읽는다. 전체 자동 검사는 Ruff, pytest
+  `270 passed, 11 skipped`, Ruler·Hub skill sync, Phase 1 fixture, 문서 검사를 통과했다. 현재 MCP 프로세스는
+  수정 전 코드를 이미 적재했으므로 새 수집기의 live 재검증에는 앱 재시작이 한 번 더 필요하다.
+
+  adaptive planner가 로컬 저장소 조사에 provider 웹 검색을 잘못 쓰던 빈틈을 막았다. 새
+  `inspect_codebase` capability는 `shallow`·`standard`·`deep` 범위에 따라 실제 코드, 공개 스키마, 설정,
+  테스트, 생성 문서 동기화와 Git 상태를 모은다. plan의 각 LLM 단계에는 `reasoning_effort=low|medium|high`가
+  들어가며 Claude Opus 4.8, Grok 4.5, Gemini 3.x의 실제 요청 필드로 전달된다. 지원하지 않는 모델은
+  명시적 오류로 끝난다.
+
+  README와 장기 문서 작성 규칙은 `instructions/.ruler/30-documents.md`에 추가했다. 생성된 `AGENTS.md`와
+  `CLAUDE.md`, Codex·Claude Code의 공통 adaptive 스킬까지 동기화했다. 번역투와 작업 중계 문장은
+  `src/orchestrate_codex/document_quality.py`에서 검사하며 README 테스트와 local verify가 같은 규칙을 쓴다.
+
+  실제 dogfood에서 Opus 4.8 planner가 deep/high 코드 조사 뒤 high 작성 단계로 이어지는 2단계 DAG를
+  만들었다. 후보 250개 중 30개 파일을 읽고 2 wave·2 leaf call로 완료했다. Grok 4.5의 Responses
+  `reasoning.effort=high`와 Gemini 3.1 Pro High의 `thinking_level=high`도 짧은 실호출로 확인했다. 자동 검사는
+  Ruff, pytest `265 passed, 11 skipped`, Ruler sync, Hub plugin sync, README 문체 검사, diff-check까지 통과했다.
+
+  Agent Hub 버전은 `1.3.0`으로 올렸다. 자세한 실행 근거는 [`RUN-REPORT.md`](./RUN-REPORT.md) 맨 위 1.3
+  항목에 있다. 새 코드를 적재한 앱 재시작 뒤 live workflow 재검증이 남아 있다.
+
+  **다음 한 걸음:** Codex를 재시작하고 같은 deep workflow를 다시 실행한다.
+
+  ---
+
+  **[2026-07-17 Adaptive orchestration·Consistency Gate·앱 플러그인 — 이전 기록]**
 
   원래 목표였던 모델 간 일관성을 두 층으로 나눠 완성했다. Ruler는 동일한 프로젝트 규칙을 Codex와 Claude
   Code에 배포하고, Agent Hub는 실제 provider 호출 때 정본 정책을 다시 주입해 `policy_sha256`과
@@ -21,7 +61,7 @@
 
   `workflow_id=adaptive`는 고정된 Claude→Grok→Gemini 순서를 사용하지 않는다. planner LLM이 단계, provider,
   의존 관계, fallback과 마지막 결과 단계를 고른다. 로컬 validator가 capability/provider allowlist, cycle,
-  orphan, 단일 final sink, 단계·호출 예산을 검사하고, scheduler가 의존성이 해결된 frontier를 동시에 실행한다.
+  orphan, 단일 final sink, 단계 수와 최대 호출 횟수를 검사하고, scheduler가 시작할 수 있는 단계를 동시에 실행한다.
   검토된 plan을 다시 넘기면 planner 호출 없이 validate-only 경로로 실행한다. 실패한 단계는 선언된 fallback을
   사용하고 모두 실패하면 의존 단계를 막은 채 fail-closed로 끝낸다.
 

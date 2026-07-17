@@ -21,6 +21,10 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
    - `project_root=<절대경로>`
    - `policy_mode="required"`
 4. 반환된 `agent_hub_plan_v1`을 확인한다. 단계·provider·`depends_on`은 planner LLM이 정한다.
+   코드베이스 이해가 필요한 단계는 `inspect_codebase`인지, 범위에 맞는 `investigation_depth`를 골랐는지,
+   각 LLM 단계의 `reasoning_effort`가 `low`·`medium`·`high` 중 알맞은 값인지 함께 확인한다.
+   조사 instruction에는 확인할 하위 시스템, 파일명, 명령이나 심볼을 구체적으로 남긴다. `deep` 결과에서는
+   핵심 파일이 `complete`인지 `partial`인지, 필요한 함수와 줄 범위가 실제 근거에 들어왔는지도 본다.
    로컬 validator가 거부한 capability나 순환 의존성을 호스트가 임의로 우회하지 않는다.
 5. 계획 검토만 요청한 경우 여기서 멈춘다. 실행까지 요청받았다면 검토된 `plan`을 그대로
    `agent_hub_run_workflow`에 전달한다. `max_concurrency`와 `max_leaf_calls`는 작업 규모에 맞게 제한한다.
@@ -29,7 +33,7 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
 7. `human_review=true`, `consistency_gate_human_review`, 실패 step 또는 blocked step이 있으면 성공으로
    포장하지 않는다. 합의된 내용과 이견, 미실행 단계를 사용자에게 분리해 보여 준다.
 8. 최종 보고에는 planner provider/model, `plan_sha256`, `policy_sha256`, 실행 wave, 실제 사용 provider,
-   검증 결과를 남긴다.
+   단계별 조사 깊이·추론 강도, 검증 결과를 남긴다.
 
 ## 경계
 
@@ -37,4 +41,10 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
 - 독립 단계만 병렬로 실행한다. 조사 결과를 받아 작성하는 단계처럼 실제 의존성이 있으면 기다린다.
 - 열린 질문에 문자열 유사도를 붙여 가짜 합의 점수를 만들지 않는다. 닫힌 label 계약이 있을 때만
   `decision_v1` Consistency Gate를 쓴다.
+- 로컬 저장소 조사를 provider의 웹 `search`로 대신하지 않는다. `inspect_codebase`가 모은 실제 파일·스키마·
+  설정·테스트·Git 근거를 작성 단계에 넘긴다.
+- 코드 주장은 번호가 붙은 실제 줄을 `파일:줄`로 인용한다. `partial` 파일의 보이지 않는 앞뒤 내용을
+  추측하거나, 줄 번호가 없는 요약을 소스 확인처럼 포장하지 않는다.
+- `reasoning_effort`는 지원되는 provider 요청으로 실제 전달된다. 미지원 모델에서 조용히 무시하거나
+  프롬프트 문구만으로 지원되는 것처럼 보이게 만들지 않는다.
 - 모델 호출은 구독·API 사용량을 소모한다. 불필요한 단계나 무제한 재계획을 만들지 않는다.

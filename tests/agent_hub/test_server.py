@@ -236,6 +236,45 @@ def test_gemini_status_treats_unprobed_configured_session_as_ready(monkeypatch):
     assert state["warnings"] == []
 
 
+def test_gemini_status_probe_reports_token_refreshed_during_same_call(monkeypatch):
+    refreshed = {"value": False}
+
+    monkeypatch.setattr(
+        operations.google_security,
+        "consent_status",
+        lambda: {"user_consent": True, "agy_session_enabled": True},
+    )
+
+    def provider_status(*, probe=False):
+        assert probe is True
+        refreshed["value"] = True
+        return {
+            "configured": True,
+            "healthy": True,
+            "auth_method": "plugin_oauth_login",
+        }
+
+    monkeypatch.setattr(operations.google_provider, "status", provider_status)
+    monkeypatch.setattr(
+        operations.google_oauth,
+        "login_status",
+        lambda: {
+            "credentials_readable": True,
+            "expired": not refreshed["value"],
+        },
+    )
+
+    result = operations.dispatch_tool(
+        "agent_hub_status",
+        {"provider": "gemini", "probe": True},
+    )
+
+    state = result["data"]["providers"]["gemini"]
+    assert state["authenticated"] is True
+    assert state["ready"] is True
+    assert state["warnings"] == []
+
+
 def test_unknown_tool_errors():
     resp = _call(server, "does_not_exist", {})
     assert resp["error"]["code"] == -32602

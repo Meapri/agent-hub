@@ -19,6 +19,11 @@ from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
 DEFAULT_MAX_TOKENS = 65536
+REASONING_EFFORTS = {"low", "medium", "high"}
+
+
+def supports_reasoning_effort(model: str) -> bool:
+    return "grok-4.5" in str(model or "").strip().lower()
 
 
 def _normalize_messages(arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -170,11 +175,18 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     model = str(arguments.get("model") or os.getenv("GROK_CODEX_MODEL") or DEFAULT_MODEL).strip()
     max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature")
+    reasoning_effort = str(arguments.get("reasoning_effort") or "").strip().lower()
+    if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError("reasoning_effort must be low, medium, or high")
+    if reasoning_effort and not supports_reasoning_effort(model):
+        raise ValueError(f"reasoning_effort is not supported by Grok model: {model}")
     timeout = float(arguments.get("timeout_sec") or 120)
     session_id = str(arguments.get("session_id") or "").strip() or str(uuid4())
     api_mode = str(arguments.get("api_mode") or os.getenv("GROK_CODEX_API_MODE") or "chat").strip().lower()
     messages = _normalize_messages(arguments)
     if _has_images(messages):
+        api_mode = "responses"
+    if reasoning_effort:
         api_mode = "responses"
 
     if api_mode in {"responses", "response"}:
@@ -185,6 +197,8 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "input": _responses_messages(messages),
             "max_output_tokens": max(1, max_tokens),
         }
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
         payload = api.responses_create(body, timeout=timeout, session_id=session_id)
         text = _extract_responses_text(payload)
         auth_ctx = auth.resolve_auth()
@@ -231,6 +245,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "api_mode": api_mode,
                 "session_id": session_id,
                 "auth_mode": auth_ctx.get("mode"),
+                "reasoning_effort": reasoning_effort or None,
             },
         ),
     }

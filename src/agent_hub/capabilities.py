@@ -13,7 +13,7 @@ from typing import Any, Dict
 
 CAPABILITIES: Dict[str, Dict[str, Dict[str, Any]]] = {
     "claude": {
-        "chat": {"supported": True},
+        "chat": {"supported": True, "reasoning_effort": ["low", "medium", "high"]},
         "vision": {"supported": True},
         "search": {"supported": True, "native": True, "auth_note": "API entitlement required"},
         "write": {"supported": True},
@@ -24,7 +24,7 @@ CAPABILITIES: Dict[str, Dict[str, Dict[str, Any]]] = {
         "settings": {"supported": True, "scope": ["model", "temperature", "max_tokens"]},
     },
     "grok": {
-        "chat": {"supported": True},
+        "chat": {"supported": True, "reasoning_effort": ["low", "medium", "high"]},
         "vision": {"supported": True},
         "search": {"supported": True, "native": True, "auth_note": "API entitlement required"},
         "write": {"supported": True},
@@ -38,7 +38,7 @@ CAPABILITIES: Dict[str, Dict[str, Dict[str, Any]]] = {
         },
     },
     "gemini": {
-        "chat": {"supported": True},
+        "chat": {"supported": True, "reasoning_effort": ["low", "medium", "high"]},
         "vision": {"supported": True},
         "search": {"supported": True, "native": True},
         "write": {"supported": True},
@@ -71,4 +71,3 @@ def require(provider: str, capability: str) -> None:
     detail = CAPABILITIES.get(provider, {}).get(capability, {})
     reason = str(detail.get("reason") or "adapter does not implement this capability")
     raise ValueError(f"{provider} does not support {capability}: {reason}")
-

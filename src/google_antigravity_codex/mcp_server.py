@@ -331,6 +331,11 @@ WRITING_SCHEMA: Dict[str, Any] = {
         "max_project_context_chars": {"type": "integer", "minimum": 1000, "maximum": 50000},
         "model": {"type": "string", "default": writing.DEFAULT_MODEL},
         "temperature": {"type": "number"},
+        "reasoning_effort": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+            "description": "Maps to Gemini 3 thinking_level; unsupported models fail closed.",
+        },
         "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072, "default": chat.DEFAULT_MAX_TOKENS},
         "timeout_sec": {"type": "integer", "minimum": 20, "maximum": 600},
         "retry_count": {"type": "integer", "minimum": 0, "maximum": 5, "default": 1},

@@ -74,6 +74,34 @@ def test_chat_marks_max_token_response_incomplete(monkeypatch, tmp_path):
     assert "incomplete_finish_reason:max_tokens" in result["warnings"]
 
 
+def test_chat_maps_reasoning_effort_to_adaptive_thinking(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
+    seen = {}
+
+    def fake_request(method, url, headers, body, timeout):
+        seen.update(body)
+        return chat_fake_response(body)
+
+    with patch.object(chat.api, "http_json", side_effect=fake_request):
+        chat.run_chat(
+            {"prompt": "inspect", "model": "claude-opus-4-8", "reasoning_effort": "high"}
+        )
+
+    assert seen["output_config"] == {"effort": "high"}
+    assert seen["thinking"] == {"type": "adaptive"}
+
+
+def test_chat_rejects_reasoning_effort_for_unsupported_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    with pytest.raises(ValueError, match="not supported"):
+        chat.run_chat(
+            {"prompt": "inspect", "model": "claude-haiku-3", "reasoning_effort": "high"}
+        )
+
+
 def test_chat_marks_unexecuted_tool_use_incomplete(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")

@@ -441,10 +441,110 @@ def test_gather_durable_facts(tmp_path):
     assert "DURABLE FACT PACK" in facts["text"]
 
 
+def test_deep_code_context_covers_interfaces_tests_and_git_state(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n', encoding="utf-8")
+    src = tmp_path / "src" / "pkg"
+    src.mkdir(parents=True)
+    (src / "mcp_server.py").write_text("TOOL = 'x'\n", encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_public.py").write_text("def test_public():\n    assert True\n", encoding="utf-8")
+
+    context = gather.gather_code_context(tmp_path, depth="deep")
+
+    assert context["depth"] == "deep"
+    assert "src/pkg/mcp_server.py" in context["files"]
+    assert "tests/test_public.py" in context["files"]
+    assert "Coverage checklist" in context["text"]
+    assert "Git state" in context["text"]
+    assert "     1 |" in context["text"]
+
+
+def test_deep_code_context_reads_a_focused_key_file_completely(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    lines = [f"VALUE_{index} = {index}" for index in range(1, 420)]
+    lines[380] = "def gather_code_context():"
+    lines[381] = "    return 'late implementation'"
+    target = src / "gather.py"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+    context = gather.gather_code_context(
+        tmp_path,
+        depth="deep",
+        focus="Inspect src/gather.py and gather_code_context before writing docs.",
+    )
+
+    assert "src/gather.py" in context["complete_files"]
+    assert "   381 | def gather_code_context():" in context["text"]
+    assert any(
+        segment["path"] == "src/gather.py" and segment["mode"] == "complete"
+        for segment in context["evidence_segments"]
+    )
+
+
+def test_deep_code_context_uses_late_symbol_windows_for_very_large_files(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    lines = [f"entry_{index} = '{'x' * 48}'" for index in range(1, 1_401)]
+    lines[1_250] = "def critical_symbol_for_docs():"
+    lines[1_251] = "    return 'keep this evidence'"
+    target = src / "large_worker.py"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    context = gather.gather_code_context(
+        tmp_path,
+        depth="deep",
+        focus="Review large_worker.py critical_symbol_for_docs.",
+    )
+
+    assert "src/large_worker.py" in context["partial_files"]
+    assert "  1251 | def critical_symbol_for_docs():" in context["text"]
+    assert any(
+        segment["path"] == "src/large_worker.py"
+        and segment["mode"] == "focused_window"
+        and segment["start_line"] <= 1_251 <= segment["end_line"]
+        for segment in context["evidence_segments"]
+    )
+
+
+def test_focused_windows_prioritize_named_symbols_over_frequent_generic_matches(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    lines = [f"GEMINI_VALUE_{index} = '{'x' * 48}'" for index in range(1, 1_901)]
+    lines[1_800] = "def status(*, probe: bool = False):"
+    lines[1_801] = "    return agy_auth.status(probe=probe)"
+    target = src / "antigravity_api.py"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    context = gather.gather_code_context(
+        tmp_path,
+        depth="deep",
+        focus="Verify Gemini status refresh.",
+        max_chars=12_000,
+    )
+
+    assert "  1801 | def status(*, probe: bool = False):" in context["text"]
+    assert "  1802 |     return agy_auth.status(probe=probe)" in context["text"]
+
+
 def test_verify_flags_recency():
     result = verify.verify_text("today we fixed HTTP 400 in this session", doc_class="durable")
     assert result["warning_count"] >= 1
     assert any("recency" in w for w in result["warnings"])
+
+
+def test_verify_blocks_known_korean_translationese():
+    result = verify.verify_text(
+        "# 안내\n\n이전 이름은 지원하지 않습니다.",
+        doc_class="durable",
+    )
+    assert result["ok"] is False
+    assert any(w.startswith("korean_style:translation_like") for w in result["warnings"])
 
 
 def test_start_run_auto_gather_and_next_leaf(tmp_path):

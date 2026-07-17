@@ -402,6 +402,7 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "task": "writing",
             "temperature": arguments.get("temperature", 0.35),
             "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
+            "thinking_level": arguments.get("reasoning_effort"),
             "timeout_sec": arguments.get("timeout_sec") or 180,
             "retry_count": arguments.get("retry_count", 1),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),

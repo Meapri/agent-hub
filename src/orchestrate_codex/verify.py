@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from . import catalog
+from . import catalog, document_quality
 
 # Recency/session-diary TONE, not vocabulary — "session diary" as a bare noun is dropped
 # because durable docs that describe the policy legitimately mention it.
@@ -62,6 +62,8 @@ def verify_text(
         for pat in RECENCY_PATTERNS:
             if re.search(pat, body, re.I):
                 warnings.append(f"recency_language:{pat}")
+        if re.search(r"[가-힣]", body):
+            warnings.extend(document_quality.review_natural_korean(body))
     if doc_class == "durable":
         if re.search(r"\b(git log|diff --stat|HEAD~)\b", body, re.I):
             warnings.append("git_internals_in_durable_doc")
@@ -85,7 +87,7 @@ def verify_text(
             for t in unknown:
                 warnings.append(f"tool_not_in_fact_pack:{t}")
     warnings.extend(_completeness_warnings(body))
-    blocking = ("empty", "recency", "unclosed_code_fence", "truncated")
+    blocking = ("empty", "recency", "korean_style", "unclosed_code_fence", "truncated")
     return {
         "ok": not any(w.startswith(blocking) for w in warnings),
         "warnings": warnings,

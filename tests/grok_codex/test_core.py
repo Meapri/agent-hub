@@ -73,6 +73,34 @@ def test_chat_marks_length_response_incomplete(monkeypatch, tmp_path):
     assert "incomplete_finish_reason:length" in result["warnings"]
 
 
+def test_chat_maps_reasoning_effort_to_responses(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
+    seen = {}
+
+    def fake_request(method, url, headers, body, timeout):
+        seen["url"] = url
+        seen["body"] = body
+        return {"model": "grok-4.5", "status": "completed", "output_text": "done"}
+
+    with patch.object(chat.api, "http_json", side_effect=fake_request):
+        result = chat.run_chat(
+            {"prompt": "inspect", "model": "grok-4.5", "reasoning_effort": "high"}
+        )
+
+    assert seen["url"].endswith("/responses")
+    assert seen["body"]["reasoning"] == {"effort": "high"}
+    assert result["diagnostics"]["reasoning_effort"] == "high"
+
+
+def test_chat_rejects_reasoning_effort_for_unsupported_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    with pytest.raises(ValueError, match="not supported"):
+        chat.run_chat({"prompt": "inspect", "model": "grok-4", "reasoning_effort": "high"})
+
+
 def test_mcp_initialize_and_tools_list():
     init = handle_request(
         {

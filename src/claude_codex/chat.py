@@ -16,6 +16,24 @@ from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
 DEFAULT_MAX_TOKENS = 65536
+REASONING_EFFORTS = {"low", "medium", "high"}
+_EFFORT_MODEL_MARKERS = (
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-mythos-preview",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-5",
+)
+_ADAPTIVE_THINKING_MODEL_MARKERS = (
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+)
 
 
 def supports_temperature(model: str) -> bool:
@@ -29,6 +47,16 @@ def supports_temperature(model: str) -> bool:
             "claude-opus-4-8",
         )
     )
+
+
+def supports_reasoning_effort(model: str) -> bool:
+    lowered = str(model or "").strip().lower()
+    return any(marker in lowered for marker in _EFFORT_MODEL_MARKERS)
+
+
+def uses_explicit_adaptive_thinking(model: str) -> bool:
+    lowered = str(model or "").strip().lower()
+    return any(marker in lowered for marker in _ADAPTIVE_THINKING_MODEL_MARKERS)
 
 
 def _content_to_text(content: Any) -> str:
@@ -208,6 +236,11 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     model = str(arguments.get("model") or os.getenv("CLAUDE_CODEX_MODEL") or DEFAULT_MODEL).strip()
     max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature")
+    reasoning_effort = str(arguments.get("reasoning_effort") or "").strip().lower()
+    if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError("reasoning_effort must be low, medium, or high")
+    if reasoning_effort and not supports_reasoning_effort(model):
+        raise ValueError(f"reasoning_effort is not supported by Claude model: {model}")
     timeout = float(arguments.get("timeout_sec") or 120)
     messages = arguments.get("messages")
     if isinstance(messages, list) and messages:
@@ -236,6 +269,10 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     temperature_ignored = temperature is not None and not supports_temperature(model)
     if temperature is not None and not temperature_ignored:
         body["temperature"] = float(temperature)
+    if reasoning_effort:
+        body["output_config"] = {"effort": reasoning_effort}
+        if uses_explicit_adaptive_thinking(model):
+            body["thinking"] = {"type": "adaptive"}
     tools = convert_tools_to_anthropic(arguments.get("tools") if isinstance(arguments.get("tools"), list) else None)
     if tools:
         body["tools"] = tools
@@ -273,6 +310,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "auth_mode": auth_ctx.get("mode"),
                 "auth_source": auth_ctx.get("source"),
                 "subscription_fingerprint": auth_ctx.get("mode") == "subscription_oauth",
+                "reasoning_effort": reasoning_effort or None,
             },
         ),
     }

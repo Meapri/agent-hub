@@ -1,6 +1,103 @@
-# Agent Hub 1.2 adaptive orchestration·일관성 검증 결과
+# Agent Hub 검증 기록
 
 기준일: 2026-07-17
+
+## 1.3 코드 조사·능동 추론·문서 품질 통합
+
+### 재시작 뒤 심층 검증과 조사 방식 보강
+
+Codex를 다시 시작한 뒤 Agent Hub MCP를 실제 호출했다. 첫 live status에서는 Claude와 Grok만 준비됐고
+Gemini 액세스 토큰이 만료돼 `2/3 ready`였다. 수동 refresh 뒤에는 `3/3 ready`가 됐지만, 한 번의
+`probe=true` 호출 안에서 provider probe가 토큰을 갱신하고도 갱신 전 로그인 상태를 반환하는 순서 문제가
+확인됐다. status가 provider probe 뒤 로그인 파일을 다시 읽도록 바꾸고, Antigravity live status도
+`agy_auth.status(probe=true)`로 갱신을 허용했다.
+
+재시작한 MCP에서 Opus 4.8 planner가 만든 검증 plan은 아래 5단계였다.
+
+1. Claude가 `deep`·`high`로 코드 조사
+2. Claude와 Gemini가 조사 결과를 같은 wave에서 병렬 평가
+3. Claude·Grok·Gemini가 `partially_supported` 여부를 병렬 판정
+4. Claude가 모든 결과를 하나의 보고서로 정리
+
+plan hash는 `42751ccc7b6c0def6358bb4c7b7e03d48e8bc2c53b67e9fc721912141d7834a0`, policy hash는
+`ecf4db8227350488e85d01e4d1a3674325cad9741ea3c99ca15a6d21bb752d7a`였다. 실행은 4 wave, adaptive
+step 5개로 끝났고 세 provider의 Consistency Gate는 `partially_supported`에 3/3 합의했다. 합의율과 응답
+충족률은 모두 1.0이었으며 사람 확인으로 넘긴 항목은 없었다.
+
+이 실행에서 기존 `deep` 조사의 한계도 드러났다. 전체 문맥은 18만 자였지만 파일마다 앞부분 5천 자만
+보내서, 14KB인 `gather.py` 뒤쪽의 실제 수집 함수가 조사 모델에게 보이지 않았다. 그래서 수집기를 다음처럼
+바꿨다.
+
+- 1단계에서 entrypoint, 설정, 테스트, 스크립트, 구현 파일을 종류별로 섞어 넓게 확인
+- 2단계에서 조사 요청의 파일명·함수명·기능을 기준으로 핵심 파일을 다시 선택
+- 작은 핵심 파일은 전문을 전달하고, 큰 파일은 관련 함수 주변을 여러 구간으로 전달
+- 모든 코드 조각에 원본 줄 번호와 `complete`·`partial` 상태 기록
+- 결과 메타데이터에 전문 파일, 부분 파일, 실제 줄 범위 저장
+
+같은 저장소와 조사 초점을 새 수집기에 넣은 로컬 재현에서는 후보 250개 중 57개 파일을 읽었다.
+`src/orchestrate_codex/gather.py`, `document_quality.py`, `verify.py`, `catalog.py`는 전문이 들어갔고,
+813줄인 `runner.py`는 관련 구간 4곳이 줄 번호와 함께 들어갔다. 이전 실행에서 보지 못한
+`gather_code_context` 본문도 확인됐다.
+
+보강 뒤 자동 검사는 Ruff, pytest `270 passed, 11 skipped`, Ruler sync, Hub plugin sync, Phase 1 fixture,
+한국어 문서 검사까지 통과했다. 수정된 MCP 코드는 다음 앱 재시작 뒤 live workflow로 한 번 더 확인해야 한다.
+
+README처럼 저장소 전체를 설명하는 글은 문장만 잘 다듬어서는 부족했다. 기존 adaptive planner가 로컬 코드
+조사에 `search`를 고른 실험에서는 provider 웹 검색 경로가 실행돼, 조사 모델이 실제 심볼을 확인하지 못하고
+`<경로 미확인>`을 남겼다. 추론 강도만 높이면 근거 없는 판단이 더 길어질 수 있으므로 로컬 코드 근거를
+먼저 모으는 `inspect_codebase` capability를 추가했다.
+
+planner가 새 plan에서 단계마다 아래 두 값을 고른다.
+
+- `investigation_depth`: `shallow`, `standard`, `deep`
+- `reasoning_effort`: `low`, `medium`, `high`
+
+`deep` 조사는 entrypoint, 공개 도구와 스키마, 설정, 테스트, 생성 문서 동기화, Git 상태를 우선순위에 따라
+수집한다. 조사 결과에는 실제로 읽은 파일과 전체 후보 수가 남는다. 모델별 추론 설정은 공식 API 계약에
+맞춰 Claude `output_config.effort`, Grok Responses `reasoning.effort`, Gemini `thinking_level`로 전달한다.
+지원하지 않는 모델은 값을 버리지 않고 실행을 거부한다. 구현 기준은
+[Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort),
+[xAI reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning),
+[Gemini thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)에서 확인했다.
+
+한국어 문서 규칙은 `instructions/.ruler/30-documents.md`에 넣어 Codex와 Claude Code에 함께 배포한다.
+`orchestrate_codex.document_quality`는 이번에 반복된 번역투와 작업 중계 문장을 결정적으로 검사한다.
+README 전용 테스트도 같은 공용 검사기를 사용하므로 금칙어 목록이 두 군데로 갈라지지 않는다.
+
+### 실제 adaptive 실행
+
+현재 작업 트리의 Agent Hub를 직접 실행했다. Claude Opus 4.8 planner가 아래 DAG를 한 번에 만들었다.
+
+1. `inspect_orchestration`: Claude Opus 4.8, `reasoning_effort=high`, `investigation_depth=deep`
+2. `write_doc`: Claude Opus 4.8, `reasoning_effort=high`, 첫 조사 결과에 의존
+
+plan hash는 `a5c7b3ef41cc665ad281c9bbd20d91bd95e3882dab51befa77c61b5d2ca6c862`다. 두 단계는 의존 관계에
+따라 두 wave로 실행됐고, leaf call 2회로 끝났다. 깊은 조사는 코드 후보 250개 가운데 30개를 읽었다.
+`operations.py`, `orchestrator.py`, 세 provider MCP adapter, Ruler 정본, 대표 adaptive 테스트가 포함됐고
+최종 문서에는 확인한 파일 경로가 근거로 남았다.
+
+provider별 짧은 실호출도 확인했다.
+
+| provider/model | 요청 | 실제 경로 | 결과 |
+|---|---|---|---|
+| Claude Opus 4.8 | `high` | adaptive inspection·write | 성공 |
+| Grok 4.5 | `high` | `xai-responses-oauth`, 진단값 `reasoning_effort=high` | `EFFORT_OK` |
+| Gemini 3.1 Pro High | `high` | `agy-oauth-code-assist`, capacity fallback 없음 | `EFFORT_OK` |
+
+### 자동 검사
+
+- Ruff: 통과
+- Pytest: `270 passed, 11 skipped`
+- Ruler sync: 통과
+- Hub plugin 공통 스킬 sync: 통과
+- README 문체 검사: 통과
+- `git diff --check`: 통과
+
+버전은 `1.3.0`으로 올렸다. 공개 MCP 도구 수는 26개, workflow 수는 5개로 그대로다. 새 capability는
+adaptive plan 내부에서만 사용하므로 공개 도구를 더 늘리지 않았다. 새 코드를 적재한 앱 재시작 뒤 live
+workflow 재검증이 남아 있다.
+
+---
 
 ## 목표
 
@@ -22,7 +119,7 @@ Codex와 Claude Code 플러그인은 같은 Agent Hub MCP를 조작하는 얇은
 
 Gemini 3.5 Flash High planner가 현재 변경 검토를 위해 아래 DAG를 만들었습니다.
 
-1. Claude correctness review와 Grok regression review를 같은 dependency frontier에 배치했습니다.
+1. 서로 의존하지 않는 Claude correctness review와 Grok regression review를 같은 실행 묶음에 배치했습니다.
 2. 두 리뷰가 동시에 실행됐습니다.
 3. Claude가 완료 표식을 내지 않아 해당 결과를 실패로 처리하고 Grok fallback으로 전환했습니다.
 4. 두 완료 결과가 모인 다음 Gemini final synthesis가 실행됐습니다.
