@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify release version fields and an optional Git tag agree."""
+"""Verify Agent Hub package and app-plugin release versions agree."""
 
 from __future__ import annotations
 
@@ -13,8 +13,20 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def versions() -> dict[str, str]:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    package = (ROOT / "google_antigravity_codex" / "__init__.py").read_text(encoding="utf-8")
-    codex = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    package = (ROOT / "src" / "agent_hub" / "__init__.py").read_text(encoding="utf-8")
+    codex = json.loads(
+        (ROOT / "hubs" / "codex" / ".codex-plugin" / "plugin.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    claude = json.loads(
+        (ROOT / "hubs" / "claude-code" / ".claude-plugin" / "plugin.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    claude_marketplace = json.loads(
+        (ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
+    )
     pyproject_match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject)
     package_match = re.search(r'__version__\s*=\s*"([^"]+)"', package)
     if not pyproject_match or not package_match:
@@ -23,6 +35,8 @@ def versions() -> dict[str, str]:
         "pyproject": pyproject_match.group(1),
         "package": package_match.group(1),
         "codex_plugin": str(codex.get("version") or ""),
+        "claude_plugin": str(claude.get("version") or ""),
+        "claude_marketplace": str(claude_marketplace["plugins"][0].get("version") or ""),
     }
 
 

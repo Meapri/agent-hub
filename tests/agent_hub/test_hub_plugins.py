@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import runpy
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,3 +70,16 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
     assert claude["plugins"][0]["version"] == "1.3.1"
+
+
+def test_release_version_check_uses_unified_agent_hub_fields():
+    module = runpy.run_path(str(ROOT / "scripts/check_release_version.py"))
+    found = module["versions"]()
+    assert set(found) == {
+        "pyproject",
+        "package",
+        "codex_plugin",
+        "claude_plugin",
+        "claude_marketplace",
+    }
+    assert set(found.values()) == {"1.3.1"}

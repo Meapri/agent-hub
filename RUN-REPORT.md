@@ -25,7 +25,7 @@ workflow 검증도 `korean_style` 경고를 자동 재작성 조건으로 보지
 
 예전 README는 새 검사에서 설명 없는 `콕핏`, `substrate`, `conductor`, `provider leaf`, `실행 패킷`을 찾아
 실패했다. 현재 Meapri README는 같은 검사를 통과했다. 자동 검사는 Ruff, pytest
-`275 passed, 11 skipped`, Ruler sync, Hub plugin sync, Phase 1 fixture, README 문체 검사와
+`276 passed, 11 skipped`, Ruler sync, Hub plugin sync, Phase 1 fixture, README 문체 검사와
 `git diff --check`까지 통과했다. 버전은 `1.3.1`이다.
 
 커밋 `d864888`을 Meapri 작성자로 `origin/main`에 푸시한 뒤 Codex 플러그인을 제거·재설치하고 Claude Code

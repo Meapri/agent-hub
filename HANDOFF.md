@@ -27,7 +27,7 @@
 
   README 기본 프로필은 자연스러운 존댓말로 바꿨고, 독백체와 설명 없는 내부 용어를 확인하는 검사를 추가했다.
   Codex와 Claude Code에는 같은 `document-write` 스킬을 배포한다. 예전 README는 새 검사에서 실패했고 현재
-  Meapri README는 통과했다. Ruff, pytest `275 passed, 11 skipped`, Ruler·Hub skill sync, Phase 1 fixture,
+  Meapri README는 통과했다. Ruff, pytest `276 passed, 11 skipped`, Ruler·Hub skill sync, Phase 1 fixture,
   README 검사와 diff-check가 모두 통과했다. 버전은 `1.3.1`이다.
 
   Meapri 커밋 `d864888`을 `origin/main`에 푸시했다. Codex 플러그인은 1.3.1로 다시 설치했고 Claude Code도
