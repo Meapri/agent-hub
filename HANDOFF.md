@@ -30,8 +30,13 @@
   Meapri README는 통과했다. Ruff, pytest `275 passed, 11 skipped`, Ruler·Hub skill sync, Phase 1 fixture,
   README 검사와 diff-check가 모두 통과했다. 버전은 `1.3.1`이다.
 
-  **다음 한 걸음:** 1.3.1 플러그인을 다시 설치한 뒤 새 Codex 작업에서 `document-write` 스킬과
-  `quality_gate`가 로드됐는지 확인한다.
+  Meapri 커밋 `d864888`을 `origin/main`에 푸시했다. Codex 플러그인은 1.3.1로 다시 설치했고 Claude Code도
+  1.2.0에서 1.3.1로 갱신했다. 두 설치 캐시에 `document-write`가 있으며 Claude의 component inventory에도
+  표시된다. 새 MCP 프로세스의 직접 호출에서는 `quality_rewrite_attempts=1`, 실패 응답의 `isError=true`,
+  `success=false`, `checker_version=2`를 확인했다.
+
+  **다음 한 걸음:** Codex와 Claude Code를 재시작하고 새 작업에서 `document-write` 스킬이 자동으로 선택되는지
+  확인한다.
 
   ---
 

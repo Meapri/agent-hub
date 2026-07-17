@@ -28,6 +28,12 @@ workflow 검증도 `korean_style` 경고를 자동 재작성 조건으로 보지
 `275 passed, 11 skipped`, Ruler sync, Hub plugin sync, Phase 1 fixture, README 문체 검사와
 `git diff --check`까지 통과했다. 버전은 `1.3.1`이다.
 
+커밋 `d864888`을 Meapri 작성자로 `origin/main`에 푸시한 뒤 Codex 플러그인을 제거·재설치하고 Claude Code
+플러그인을 갱신했다. 두 앱 모두 1.3.1을 설치했으며 각 캐시에 `document-write` 스킬이 들어 있다. 새
+`agent-hub-mcp` 프로세스에 JSON-RPC로 직접 요청한 결과, 쓰기 schema의 재작성 기본값은 1이었고 금지 문구를
+검사한 응답은 `isError=true`, `success=false`, `checker_version=2`를 반환했다. 이미 실행 중인 앱 프로세스에는
+새 스킬과 MCP 코드를 다시 적재해야 하므로 두 앱을 재시작한 새 작업에서 마지막 확인이 필요하다.
+
 ## 1.3 코드 조사·능동 추론·문서 품질 통합
 
 ### 재시작 뒤 심층 검증과 조사 방식 보강
