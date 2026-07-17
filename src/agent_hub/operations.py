@@ -1,9 +1,4 @@
-"""Canonical Agent Hub operations.
-
-The legacy provider tools remain callable for compatibility, but this module is
-the single discoverable contract for new clients. Tool specs and handlers share
-one registry so a listed operation cannot silently lack an execution path.
-"""
+"""Canonical Agent Hub operations and their single public registry."""
 
 from __future__ import annotations
 

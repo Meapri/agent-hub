@@ -32,12 +32,3 @@ def test_inprocess_ok_result_interpreted():
     ok, text = InProcessLeafClient(grok_provider).call_tool("grok_codex_consent_status", {})
     assert ok is True
     assert text
-
-
-def test_orchestrate_run_no_recipe_returns_via_inprocess():
-    # orchestrate_run through the adapter uses the in-process broker (no leaves.json
-    # needed): an unknown recipe id fails cleanly rather than "no leaf servers".
-    from agent_hub.providers.orchestrate import orchestrate_provider
-    res = orchestrate_provider.call("orchestrate_run", {"recipe_id": "___nope___"})
-    assert res["isError"] is True
-    assert "no leaf servers configured" not in (res.get("text") or "")

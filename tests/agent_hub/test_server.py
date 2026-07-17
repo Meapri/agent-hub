@@ -1,10 +1,9 @@
-"""Phase-1 unified server: fan-in multiplexer parity + routing."""
+"""Canonical Agent Hub MCP server contracts."""
 
 from __future__ import annotations
 
 import ast
 import inspect
-import json
 
 from agent_hub import server
 from agent_hub import operations
@@ -16,45 +15,29 @@ from orchestrate_codex import mcp_server as orchestrate
 _OWNERS = [orchestrate, claude, grok, antigravity]
 
 
-def test_tool_surfaces_keep_legacy_callable_without_listing_it(monkeypatch):
-    legacy = set()
-    for mod in _OWNERS:
-        legacy |= {t["name"] for t in mod.tool_definitions()}
+def test_only_canonical_tools_are_public_or_callable():
     canonical = {t["name"] for t in operations.tool_definitions()}
-
-    monkeypatch.delenv("AGENT_HUB_TOOL_SURFACE", raising=False)
     assert {t["name"] for t in server.tool_definitions()} == canonical
     assert len(canonical) == 26
+    assert set(server._REGISTRY) == canonical
 
-    monkeypatch.setenv("AGENT_HUB_TOOL_SURFACE", "legacy")
-    assert {t["name"] for t in server.tool_definitions()} == legacy
-
-    monkeypatch.setenv("AGENT_HUB_TOOL_SURFACE", "all")
-    all_names = {t["name"] for t in server.tool_definitions()}
-    assert all_names == canonical | legacy
-    assert len(server.tool_definitions()) == len(canonical) + len(legacy)
-
-    # Hidden legacy names remain available to existing clients.
-    monkeypatch.setenv("AGENT_HUB_TOOL_SURFACE", "unified")
-    assert "grok_codex_consent_status" not in {t["name"] for t in server.tool_definitions()}
-    assert _call(server, "grok_codex_consent_status", {})["result"]["content"]
+    for old_name in (
+        "orchestrate_list_recipes",
+        "claude_codex_chat",
+        "grok_codex_chat",
+        "google_antigravity_chat",
+    ):
+        assert _call(server, old_name, {})["error"]["code"] == -32602
 
 
-def test_every_tool_routes_to_its_adapter():
-    from agent_hub.providers.grok import grok_provider
-    from agent_hub.providers.claude import claude_provider
-    from agent_hub.providers.orchestrate import orchestrate_provider
-    from agent_hub.providers.antigravity import antigravity_provider
+def test_workflows_resolve_internal_leaf_adapters_without_public_tools():
+    from agent_hub.core.inprocess import make_resolver
 
-    pairs = [
-        (orchestrate, orchestrate_provider),
-        (claude, claude_provider),
-        (grok, grok_provider),
-        (antigravity, antigravity_provider),
-    ]
-    for mod, adapter in pairs:
-        for spec in mod.tool_definitions():
-            assert server._REGISTRY[spec["name"]] is adapter
+    resolve = make_resolver()
+    assert resolve("claude_codex_chat") is not None
+    assert resolve("grok_codex_chat") is not None
+    assert resolve("google_antigravity_chat") is not None
+    assert resolve("orchestrate_list_recipes") is None
 
 
 def test_canonical_tools_share_one_complete_contract():
@@ -111,16 +94,16 @@ def test_modern_protocol_completion_and_discover():
         "io.modelcontextprotocol/clientInfo": {"name": "t"},
         "io.modelcontextprotocol/clientCapabilities": {},
     }
-    # antigravity tool under modern: unified == legacy package (byte-equal)
+    # Canonical tools/call results receive modern completion metadata.
     msg = {
         "jsonrpc": "2.0",
         "id": 5,
         "method": "tools/call",
-        "params": {"name": "google_antigravity_consent_status", "arguments": {}, "_meta": meta},
+        "params": {"name": "agent_hub_list_workflows", "arguments": {}, "_meta": meta},
     }
-    assert json.dumps(server.handle_request(msg), sort_keys=True) == json.dumps(
-        antigravity.handle_request(msg), sort_keys=True
-    )
+    called = server.handle_request(msg)
+    assert called["result"]["resultType"] == "complete"
+    assert called["result"]["structuredContent"]["success"] is True
     # tools/list under modern gets resultType/ttl (server-wide now, not just antigravity)
     lst = server.handle_request(
         {"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {"_meta": meta}}
@@ -167,14 +150,9 @@ def _call(mod_or_server, name, args):
 def test_every_toolscall_result_is_mcp_compliant():
     # Every tool's tools/call result MUST carry content[] — strict clients (Codex
     # under the modern protocol) reject raw payloads with a response-format error.
-    for name in [
-        "agent_hub_list_workflows",
-        "orchestrate_list_recipes",
-        "claude_codex_consent_status",
-        "grok_codex_consent_status",
-        "google_antigravity_consent_status",
-    ]:
-        r = _call(server, name, {})["result"]
+    for name in ["agent_hub_list_workflows", "agent_hub_get_workflow"]:
+        args = {"workflow_id": "repo_document"} if name.endswith("get_workflow") else {}
+        r = _call(server, name, args)["result"]
         assert isinstance(r.get("content"), list) and r["content"], name
         assert r["content"][0].get("type") == "text", name
 
@@ -255,30 +233,6 @@ def test_gemini_status_treats_unprobed_configured_session_as_ready(monkeypatch):
     assert state["authenticated"] is True
     assert state["ready"] is True
     assert state["warnings"] == []
-
-
-def test_leaf_result_wraps_but_preserves_structured_payload():
-    # claude/grok raw payloads are wrapped in content[] but keep their fields on top.
-    for owner, name in [
-        (claude, "claude_codex_consent_status"),
-        (grok, "grok_codex_consent_status"),
-    ]:
-        wrapped = _call(server, name, {})["result"]
-        raw = owner.dispatch_tool(name, {})
-        assert "content" in wrapped
-        for k, v in raw.items():
-            assert wrapped.get(k) == v, f"{name}.{k}"
-
-
-def test_content_having_providers_stay_byte_equal_to_legacy():
-    # orchestrate + antigravity already produced content[]; the adapter path is byte-equal.
-    for owner, name in [
-        (orchestrate, "orchestrate_list_recipes"),
-        (antigravity, "google_antigravity_consent_status"),
-    ]:
-        assert json.dumps(_call(server, name, {}), sort_keys=True) == json.dumps(
-            _call(owner, name, {}), sort_keys=True
-        ), name
 
 
 def test_unknown_tool_errors():

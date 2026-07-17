@@ -1,12 +1,17 @@
 from __future__ import annotations
-import pytest
-pytestmark = pytest.mark.skip(reason="standalone plugin bundle/release-version consistency is not used in the agent-hub monorepo; distribution + versioning are managed at the monorepo level")
-
 
 import json
 from pathlib import Path
 import subprocess
 import sys
+
+import pytest
+
+
+pytestmark = pytest.mark.skip(
+    reason="standalone plugin bundle/release-version consistency is not used in the agent-hub monorepo; "
+    "distribution + versioning are managed at the monorepo level"
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -1,29 +1,16 @@
-"""Unified single MCP server.
-
-One JSON-RPC/stdio process exposes every tool from the co-located stack through
-provider adapters (agent_hub.providers). Protocol mechanics that only the
-antigravity leaf used to have — the stateless modern protocol, the streaming
-side-channel, and server/discover — now live in agent_hub.core.mcp and apply
-server-wide, so every provider is a peer (any tool can stream and is reachable
-under the modern protocol). Tool names keep their prefixes (byte-stable).
-"""
+"""Unified single MCP server exposing only the canonical Agent Hub API."""
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .core import mcp as _mcp
 from .core.rpc import RpcError
-from .providers.antigravity import antigravity_provider
 from .providers.base import Provider
-from .providers.claude import claude_provider
-from .providers.grok import grok_provider
 from .providers.hub import hub_provider
-from .providers.orchestrate import orchestrate_provider
 
 from orchestrate_codex import mcp_server as _orchestrate  # for prompts/resources delegation
 
@@ -33,14 +20,7 @@ DEFAULT_PROTOCOL_VERSION = _mcp.DEFAULT_PROTOCOL_VERSION
 LEGACY_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 SUPPORTED_PROTOCOL_VERSIONS = (_mcp.MODERN_PROTOCOL_VERSION, *LEGACY_PROTOCOL_VERSIONS)
 
-_LEGACY_OWNERS: List[Provider] = [
-    orchestrate_provider,
-    claude_provider,
-    grok_provider,
-    antigravity_provider,
-]
-_PUBLIC_OWNERS: List[Provider] = [hub_provider]
-_OWNERS: List[Provider] = [*_PUBLIC_OWNERS, *_LEGACY_OWNERS]
+_OWNERS: List[Provider] = [hub_provider]
 _ORCHESTRATE = _orchestrate
 
 
@@ -59,16 +39,8 @@ _REGISTRY: Dict[str, Provider] = _build_registry()
 
 
 def tool_definitions() -> List[Dict[str, Any]]:
-    surface = os.getenv("AGENT_HUB_TOOL_SURFACE", "unified").strip().lower()
-    if surface not in {"unified", "legacy", "all"}:
-        raise ValueError("AGENT_HUB_TOOL_SURFACE must be unified, legacy, or all")
-    owners = {
-        "unified": _PUBLIC_OWNERS,
-        "legacy": _LEGACY_OWNERS,
-        "all": _OWNERS,
-    }[surface]
     merged: List[Dict[str, Any]] = []
-    for owner in owners:
+    for owner in _OWNERS:
         merged.extend(owner.tool_specs())
     return merged
 
@@ -81,9 +53,7 @@ def _discovery_result() -> Dict[str, Any]:
         "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         "instructions": (
             "Use the agent_hub_* tools for the stable cross-provider API. "
-            "Existing orchestrate_*, claude_codex_*, grok_codex_*, and "
-            "google_antigravity_* names remain callable for compatibility. "
-            "Set AGENT_HUB_TOOL_SURFACE=legacy or all only for migration and debugging."
+            "Provider-specific leaf tools are internal implementation details."
         ),
         "ttlMs": _mcp.DISCOVERY_TTL_MS,
         "cacheScope": "public",
@@ -107,7 +77,9 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         elif method == "initialize":
             params = message.get("params") or {}
             requested = str(params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION)
-            selected = requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+            selected = (
+                requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+            )
             result = {
                 "protocolVersion": selected,
                 "capabilities": {
@@ -127,7 +99,9 @@ def handle_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             owner = _REGISTRY.get(name)
             if owner is None:
                 raise RpcError(-32602, f"unknown tool: {name}")
-            result = owner.call(name, params.get("arguments") or {}, progress=_mcp.emit_notification)
+            result = owner.call(
+                name, params.get("arguments") or {}, progress=_mcp.emit_notification
+            )
         elif method in ("prompts/list", "prompts/get", "resources/list", "resources/read"):
             return _ORCHESTRATE.handle_request(message)
         else:

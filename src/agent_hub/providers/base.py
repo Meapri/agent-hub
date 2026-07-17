@@ -1,11 +1,4 @@
-"""Common provider-adapter interface.
-
-An adapter exposes its tool specs and a ``call(name, arguments)`` that returns
-the tools/call *result* exactly as that provider assembles it (leaves return the
-raw dispatch payload; the orchestrate adapter wraps content[]+isError+spread).
-The unified server routes an owned tool name to ``call`` and wraps it in the
-JSON-RPC response, byte-identical to the legacy per-package handle_request.
-"""
+"""Common interface for canonical and internal provider adapters."""
 
 from __future__ import annotations
 
@@ -21,7 +14,7 @@ def text_content_result(payload: Dict[str, Any]) -> Dict[str, Any]:
     Leaf dispatch payloads are raw structured dicts with no ``content[]`` — which
     strict MCP clients (e.g. Codex under the modern protocol) reject as a response
     format error. Add the required content[]+isError while keeping the structured
-    fields spread on top (same shape the orchestrate conductor already used).
+    fields spread on top for the internal workflow transport.
     """
     text = payload.get("text")
     if not isinstance(text, str):

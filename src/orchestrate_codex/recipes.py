@@ -261,10 +261,8 @@ RECIPES["direct_chat"] = {
 }
 
 
-# Public workflow catalog for the unified Agent Hub API. Legacy one-stage recipes
-# remain callable below, but they are operations/presets rather than independent
-# multi-stage workflows. Keeping this catalog separate lets the new API be small
-# without breaking old recipe ids.
+# Public workflow catalog for the unified Agent Hub API. One-stage recipes remain
+# internal building blocks and are exposed as direct Agent Hub operations instead.
 WORKFLOW_TEMPLATES: Dict[str, Dict[str, Any]] = {
     "repo_document": {
         "id": "repo_document",
@@ -298,17 +296,6 @@ WORKFLOW_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "default_preset": "default",
     },
 }
-
-LEGACY_RECIPE_ALIASES = {
-    "research_then_write": "research_brief",
-}
-
-DIRECT_OPERATION_RECIPES = {
-    "translate_doc", "polish_text", "rewrite_text", "summarize_text",
-    "announcement", "blog_post", "email_draft", "product_copy",
-    "direct_chat", "generate_image", "compare_models", "review_diff", "release_draft",
-}
-
 
 def _user_recipe_file() -> Path:
     override = os.environ.get(_USER_RECIPES_ENV)
@@ -387,9 +374,8 @@ def list_workflows() -> List[Dict[str, Any]]:
 
 
 def resolve_workflow(workflow_id: str, preset: str = "") -> Dict[str, Any]:
-    """Resolve a unified workflow/preset or a legacy multi-stage recipe id."""
+    """Resolve one of the public workflow templates and its preset."""
     key = str(workflow_id or "").strip()
-    key = LEGACY_RECIPE_ALIASES.get(key, key)
     if key in WORKFLOW_TEMPLATES:
         template = WORKFLOW_TEMPLATES[key]
         chosen = str(preset or template["default_preset"]).strip()
@@ -406,21 +392,6 @@ def resolve_workflow(workflow_id: str, preset: str = "") -> Dict[str, Any]:
             "template": deepcopy(template),
         }
 
-    # Accept old multi-stage ids while callers migrate. One-stage recipes are
-    # deliberately excluded from the workflow API and remain legacy operations.
-    registry = all_recipes()
-    if key in registry and key not in DIRECT_OPERATION_RECIPES:
-        return {
-            "workflow_id": key,
-            "preset": "legacy",
-            "recipe_id": key,
-            "template": {
-                "id": key,
-                "description": registry[key]["description"],
-                "presets": {"legacy": key},
-                "default_preset": "legacy",
-            },
-        }
     raise ValueError(f"unknown workflow: {workflow_id}. Known: {sorted(WORKFLOW_TEMPLATES)}")
 
 
@@ -433,8 +404,6 @@ def explain_workflow(workflow_id: str, preset: str = "") -> Dict[str, Any]:
 def get_recipe(recipe_id: str) -> Dict[str, Any]:
     key = (recipe_id or "").strip()
     registry = all_recipes()
-    if key not in registry:
-        key = LEGACY_RECIPE_ALIASES.get(key, key)
     if key not in registry:
         raise ValueError(f"unknown recipe: {recipe_id}. Known: {sorted(registry)}")
     return deepcopy(registry[key])

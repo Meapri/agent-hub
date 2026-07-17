@@ -1,106 +1,72 @@
 # Agent Hub
 
-Agent Hub는 Codex와 Claude Code에서 Claude, Grok, Gemini를 함께 사용할 수 있도록 만든 개인용 로컬 AI
-도구입니다. 간단한 작업은 원하는 모델에 바로 맡길 수 있고, 복잡한 작업은 여러 모델이 초안 작성과 검토를
-나눠서 진행할 수 있습니다.
+Claude, Grok, Gemini를 하나의 MCP 서버에서 사용하는 개인용 멀티모델 작업 환경입니다.
 
-`agent-hub-mcp` 하나를 연결하면 아래 기능을 모두 사용할 수 있습니다.
+AI 클라이언트에는 `agent-hub-mcp` 하나만 연결합니다. 단순한 작업은 원하는 모델에 바로 맡기고, 긴 작업은
+여러 모델이 조사·작성·검증을 나눠 맡는 workflow로 실행할 수 있습니다. 규칙과 작업 기록은 특정 AI 앱에
+묶이지 않도록 Git과 로컬 파일에 보관합니다.
 
-- Claude, Grok, Google Antigravity(Gemini) 직접 호출
-- 여러 모델이 역할을 나눠서 작업하는 오케스트레이션
-- Codex와 Claude Code가 함께 사용하는 공통 작업 규칙
-- Git으로 관리하는 로컬 메모리와 작업 인계 문서
+> Agent Hub는 Anthropic, xAI, Google의 공식 제품이 아닙니다. 각 서비스의 계정, 구독, 사용 정책과
+> 사용량 제한은 직접 확인해야 합니다.
 
-중요한 정보는 특정 AI 도구 안에만 남기지 않습니다. 규칙, 결정 사항, 진행 상태를 Git에 보관하므로 사용하는
-AI 클라이언트가 바뀌어도 저장소에서 작업을 이어갈 수 있습니다.
+## 한눈에 보기
 
-> 이 프로젝트는 개인 워크플로를 위해 만든 비공식 도구입니다. Anthropic, xAI, Google의 공식 제품이
-> 아니며, 각 서비스의 계정과 구독, 사용 정책, 사용량 제한은 직접 확인해야 합니다.
+- MCP 서버 1개: `agent-hub-mcp`
+- 공개 도구 26개: 모두 `agent_hub_*` 이름과 같은 결과 형식을 사용합니다.
+- 모델 3종: Claude, Grok, Google Antigravity 기반 Gemini
+- workflow 4개: 저장소 문서, Git 문서, 근거 기반 조사, 멀티모델 README
+- 공통 규칙: Ruler 원본에서 `AGENTS.md`, `CLAUDE.md`와 클라이언트 설정을 생성합니다.
+- 로컬 메모리: basic-memory의 semantic embedding을 끄고 FTS 검색만 사용합니다.
+- 작업 인계: `HANDOFF.md`와 Git으로 다른 AI 클라이언트에서도 이어서 작업할 수 있습니다.
 
-## 구성
+## 구조
 
 ```mermaid
 flowchart LR
-    H["Codex / Claude Code"] --> A["Agent Hub MCP"]
-    H --> M["Local Memory"]
-    A --> O["Orchestrator"]
-    A --> C["Claude"]
-    A --> X["Grok"]
-    A --> G["Gemini / Antigravity"]
-    O --> C
-    O --> X
-    O --> G
-    R["Git: rules · handoff · memory notes"] --> H
+    C["Codex / Claude Code"] --> H["Agent Hub MCP"]
+    H --> A["26개 agent_hub_* 도구"]
+    A --> O["공통 operation registry"]
+    O --> P["Provider adapters"]
+    P --> CL["Claude"]
+    P --> GR["Grok"]
+    P --> GE["Gemini"]
+    O --> W["Workflow engine"]
+    W --> P
+    C --> M["Local memory"]
+    R["Git: rules · handoff · notes"] --> C
 ```
 
-| 구성 요소 | 역할 | 현재 제공하는 기능 |
-|---|---|---|
-| 통합 MCP 서버 | 모델 연결과 오케스트레이션을 한곳에서 처리합니다 | 기본 26개 통합 도구, 단일 stdio 프로세스 |
-| Orchestrator | 작업 분배, 모델 선택, 대체 모델 호출, 결과 검토를 돕습니다 | 4개 workflow와 preset, legacy recipe 호환 |
-| Claude | 대화, 모델 조회, 로그인과 상태 확인을 제공합니다 | 구독 OAuth 우선, API 키 대체 사용 가능 |
-| Grok | 대화, 모델 조회, 로그인과 상태 확인을 제공합니다 | SuperGrok OAuth 우선, API 키 대체 사용 가능 |
-| Gemini | 대화, 웹 검색, 글쓰기, 이미지 생성, diff 검토, 릴리스 문서 작성을 제공합니다 | Google Antigravity OAuth |
-| 공통 규칙 | 여러 AI 클라이언트에 같은 규칙을 적용합니다 | Ruler 기반 단일 원본 |
-| 공통 메모리 | 결정 사항과 교훈을 로컬에서 공유합니다 | basic-memory, FTS 검색 전용 |
-| 작업 인계 | 다른 AI 클라이언트에서 중단 지점부터 이어서 작업할 수 있게 합니다 | Markdown + Git |
+외부에서 보이는 API는 `agent_hub_*` 26개뿐입니다. provider별 도구 이름은 workflow와 adapter가 내부에서
+사용하지만, 통합 MCP의 `tools/list`나 `tools/call`에는 노출하지 않습니다.
 
-## 주요 기능
+## 지원 범위
 
-### 모델을 직접 선택해서 사용할 수 있습니다
+| 작업 | Claude | Grok | Gemini |
+|---|:---:|:---:|:---:|
+| 대화 | ✓ | ✓ | ✓ |
+| 상태·모델 목록·로그인 | ✓ | ✓ | ✓ |
+| 근거가 포함된 검색 |  |  | ✓ |
+| 초안·번역·윤문·요약 |  |  | ✓ |
+| 이미지 생성 |  |  | ✓ |
+| 모델 비교·Git diff 검토 |  |  | ✓ |
+| 릴리스 스냅샷·문서 |  |  | ✓ |
+| 모델·transport·profile 설정 |  |  | ✓ |
 
-간단한 질문이나 한 번이면 끝나는 작업은 원하는 모델에 바로 보낼 수 있습니다.
-
-```text
-agent_hub_chat에서 provider=claude로 이 설계의 위험을 검토해줘.
-agent_hub_chat에서 provider=grok으로 같은 문제를 다른 관점에서 분석해줘.
-agent_hub_write로 이 초안을 읽기 쉬운 한국어 문서로 다듬어줘.
-```
-
-### 여러 모델이 역할을 나눌 수 있습니다
-
-긴 작업은 한 모델에 모두 맡기지 않고 여러 단계로 나눌 수 있습니다. 예를 들어 Claude가 저장소 구조를
-분석하고, Grok이 사용 흐름을 검토한 다음, Gemini가 두 결과를 바탕으로 문서를 작성하도록 구성할 수
-있습니다.
-
-두 가지 실행 방식을 제공합니다.
-
-- **단계별 실행:** Codex나 Claude Code가 한 단계씩 모델을 호출하고 결과를 확인합니다. 진행 과정을 직접
-  살펴보면서 작업하고 싶을 때 적합합니다.
-- **자동 실행:** `agent_hub_run_workflow`가 정해진 workflow를 끝까지 실행합니다. 각 모델에 설정된 동의와 로그인
-  검사는 자동 실행 중에도 그대로 적용됩니다.
-
-### AI 클라이언트가 달라도 같은 규칙을 사용합니다
-
-공통 규칙의 원본은 [`instructions/.ruler/`](./instructions/.ruler/)에 있습니다. `scripts/sync.sh`를 실행하면
-같은 규칙이 `AGENTS.md`, `CLAUDE.md`, Gemini, Cursor 설정에 반영됩니다.
-
-정보의 종류에 따라 저장 위치를 구분합니다.
-
-- 작업 규칙: `instructions/.ruler/`
-- 현재 진행 상태: [`HANDOFF.md`](./HANDOFF.md)
-- 장기적으로 기억할 결정과 교훈: [`memory/data/`](./memory/data/)
-- 코드와 변경 이력: Git
-
-### 긴 답변이 중간에 잘렸는지 확인합니다
-
-Claude, Grok, Gemini 채팅과 오케스트레이션에는 기본 65,536토큰의 출력 예산이 설정되어 있습니다.
-호출할 때 `max_tokens`를 지정하면 해당 값을 우선 사용합니다. Gemini 도구에서는 최대 131,072토큰까지
-지정할 수 있습니다.
-
-모델이 출력 한도에 도달해서 답변이 중간에 끊기면 부분 결과를 정상 완료로 처리하지 않습니다.
-`success=false`와 `incomplete_finish_reason`을 반환하므로 잘린 문서를 그대로 사용하는 일을 막을 수 있습니다.
+`agent_hub_chat`은 `provider=claude|grok|gemini`로 모델을 직접 선택할 수 있습니다. `provider=auto`는 전달한
+모델 이름을 기준으로 경로를 고르며, 모델을 지정하지 않으면 Claude를 사용합니다. 검색, 글쓰기, 이미지처럼
+Gemini 전용인 도구는 입력 schema에서도 `auto`와 `gemini`만 받습니다.
 
 ## 설치
 
 ### 필요한 환경
 
-- Python 3.9 이상
-- Node.js와 `npx`: 공통 규칙 동기화에 필요합니다
-- `uv` 또는 `uvx`: basic-memory 실행에 필요합니다
-- 사용할 모델의 계정과 구독 또는 API 키
+- Python 3.10 이상
+- Node.js와 `npx`: Ruler 규칙 동기화에 사용합니다.
+- `uv` 또는 `uvx`: 로컬 공유 메모리를 사용할 때 필요합니다.
+- 사용할 provider의 계정, 구독 또는 API 키
 
-현재 설정과 일부 로그인 도구는 macOS를 기준으로 확인했습니다. 핵심 Python 패키지에는 별도의 런타임
-의존성이 없지만, 메모리와 규칙 동기화 기능을 사용하려면 위 도구가 필요합니다.
+모델 연결과 일부 로그인 경로는 macOS에서 검증했습니다. basic-memory를 쓰지 않는다면 `uvx` 없이도 핵심
+MCP 서버는 실행할 수 있습니다.
 
 ### 1. 저장소 설치
 
@@ -113,35 +79,30 @@ python3 -m venv .venv
 ./.venv/bin/pytest -q
 ```
 
-설치가 끝나면 `.venv/bin/agent-hub-mcp`가 생성됩니다. 일반적으로는 이 통합 서버 하나만 AI 클라이언트에
-연결하면 됩니다. provider별 실행 파일은 호환성과 문제 진단을 위해 함께 설치됩니다.
+설치가 끝나면 `.venv/bin/agent-hub-mcp`가 생깁니다. provider별 MCP 실행 파일은 설치하지 않습니다.
 
-### 2. 현재 기기에 맞게 경로 수정
+### 2. 로컬 경로 설정
 
-[`instructions/.ruler/ruler.toml`](./instructions/.ruler/ruler.toml)에는 로컬 절대경로가 들어 있습니다.
-아래 세 값을 현재 clone 위치에 맞게 수정해 주세요.
+[`instructions/.ruler/ruler.toml`](./instructions/.ruler/ruler.toml)의 아래 경로를 실제 clone 위치에 맞게
+수정합니다.
 
 - `BASIC_MEMORY_CONFIG_DIR`
 - `BASIC_MEMORY_HOME`
 - `mcp_servers.agent-hub.command`
 
-경로를 수정한 뒤 설정을 생성하고 결과를 확인합니다.
+설정을 반영하고 생성물이 원본과 일치하는지 확인합니다.
 
 ```bash
 ./scripts/sync.sh
 ./scripts/check-sync.sh
 ```
 
-생성된 `.mcp.json`과 `.codex/config.toml`에는 다음 두 서버가 등록됩니다.
+Codex와 Claude Code용 예시는 [`hubs/codex/`](./hubs/codex/)와
+[`hubs/claude-code/`](./hubs/claude-code/)에 있습니다. 두 설정 모두 `agent-hub`와 `memory` 서버만 등록합니다.
 
-- `memory`: 로컬 공유 메모리
-- `agent-hub`: 모델 연결과 오케스트레이션을 제공하는 통합 서버
+### 3. Provider 동의
 
-AI 클라이언트가 실행 중이었다면 종료 후 다시 열어야 새 MCP 설정이 적용됩니다.
-
-### 3. 사용할 모델에 동의
-
-외부 모델을 호출하려면 provider마다 한 번씩 명시적으로 동의해야 합니다.
+외부 모델을 호출하기 전에 사용할 provider에 명시적으로 동의해야 합니다.
 
 ```bash
 ./.venv/bin/claude-codex-consent grant --i-understand-and-consent
@@ -149,189 +110,261 @@ AI 클라이언트가 실행 중이었다면 종료 후 다시 열어야 새 MCP
 ./.venv/bin/google-antigravity-consent grant --i-understand-and-consent
 ```
 
-사용하지 않는 provider에는 동의하거나 로그인할 필요가 없습니다. 동의를 취소하려면 `grant` 대신
-`revoke`를 사용하면 됩니다.
+사용하지 않는 provider에는 동의할 필요가 없습니다. 동의를 취소할 때는 `grant` 대신 `revoke`를 사용합니다.
 
 ### 4. 로그인
 
-#### Claude
+Claude:
 
 ```bash
 claude auth login --claudeai
-./.venv/bin/python scripts/claude_codex_login.py mirror-keychain  # macOS
+./.venv/bin/python scripts/claude_codex_login.py mirror-keychain
 ./.venv/bin/python scripts/claude_codex_login.py status
 ```
 
-Claude Code 구독 OAuth를 우선 사용합니다. `ANTHROPIC_API_KEY`가 설정되어 있으면 API 키도 사용할 수
-있습니다.
-
-#### Grok
+Grok:
 
 ```bash
 ./.venv/bin/python scripts/grok_codex_login.py interactive
 ./.venv/bin/python scripts/grok_codex_login.py status
 ```
 
-SuperGrok device-code OAuth를 우선 사용합니다. 필요한 경우 `XAI_API_KEY`를 사용할 수 있습니다.
-
-#### Google Antigravity
+Google Antigravity:
 
 ```bash
 ./.venv/bin/python scripts/google_antigravity_login.py interactive
 ./.venv/bin/python scripts/google_antigravity_login.py status
 ```
 
-브라우저에서 Google OAuth를 마치면 토큰이 사용자의 로컬 설정 디렉터리에 저장됩니다. 토큰은 저장소에
-커밋하지 않습니다.
+Claude는 구독 OAuth를 우선 사용하며 `ANTHROPIC_API_KEY`를 대체 경로로 사용할 수 있습니다. Grok은
+SuperGrok OAuth를 우선 사용하며 필요하면 `XAI_API_KEY`를 사용할 수 있습니다. Google OAuth 토큰은 로컬
+설정 디렉터리에 저장되며 저장소에는 커밋하지 않습니다.
 
-### 5. 설치 상태 확인
+### 5. 설치 확인
 
 ```bash
 ./scripts/doctor.sh
 ```
 
-이 명령은 공통 규칙의 동기화 상태, Python 패키지, basic-memory, provider별 MCP 실행 파일, 메모리 저장소를
-확인합니다. 로그인과 실행 준비 상태는 `agent_hub_status`로 한 번에 확인할 수 있습니다.
+`doctor.sh`는 규칙 동기화, Python 패키지, basic-memory, 통합 MCP 실행 파일과 메모리 저장소를 확인합니다.
+모델별 동의·로그인·준비 상태는 MCP 연결 후 `agent_hub_status`로 확인합니다.
 
-## Workflow 사용법
+## 사용 예시
 
-### 단계를 직접 확인하면서 실행
-
-```text
-먼저 agent_hub_status와 agent_hub_list_models로 사용할 수 있는 모델을 확인해줘.
-그다음 agent_hub_plan_workflow로 실행 단계를 보여주고, 결과는 agent_hub_verify로 확인해줘.
-```
-
-실행 순서는 아래와 같습니다.
-
-1. `agent_hub_plan_workflow`로 단계와 사용할 preset을 확인합니다.
-2. `agent_hub_start_workflow`로 실행을 시작합니다.
-3. 반환된 다음 작업을 실행한 뒤 `agent_hub_continue_workflow`에 결과를 전달합니다.
-4. 완료된 문서는 `agent_hub_verify`로 한 번 더 확인합니다.
-
-### Workflow를 자동으로 실행
+### 원하는 모델에 바로 맡기기
 
 ```text
-agent_hub_run_workflow로 deep_readme workflow를 실행해서 이 저장소의 README 초안을 만들어줘.
-project_root는 현재 저장소의 절대경로를 사용하고, 모델 호출은 최대 8회로 제한해줘.
+agent_hub_chat에서 provider=claude로 이 설계의 실패 가능성을 검토해줘.
+agent_hub_chat에서 provider=grok으로 같은 설계를 다른 관점에서 검토해줘.
+agent_hub_chat에서 provider=gemini로 두 의견을 비교해서 정리해줘.
 ```
 
-기본 workflow는 아래 네 가지입니다. 비슷한 작업은 별도 workflow를 복사하지 않고 preset으로 선택합니다.
+```text
+agent_hub_search로 이 주제의 최신 공식 자료를 찾아줘.
+agent_hub_write로 이 초안을 읽기 쉬운 한국어 기술 문서로 다듬어줘.
+agent_hub_review_diff로 현재 저장소 변경 사항에서 버그와 빠진 테스트를 찾아줘.
+```
 
-| Workflow | Preset | 실제 작업 |
+### Workflow를 계획한 뒤 단계별로 실행하기
+
+```text
+agent_hub_plan_workflow로 repo_document의 readme preset 실행 계획을 보여줘.
+project_root는 현재 저장소의 절대경로를 사용해줘.
+```
+
+1. `agent_hub_start_workflow`로 실행을 시작합니다.
+2. 반환된 다음 작업을 실행합니다.
+3. 결과를 `agent_hub_continue_workflow`에 전달합니다.
+4. 완료 결과를 `agent_hub_verify`로 다시 확인합니다.
+
+이 방식은 모델별 중간 결과를 직접 확인하고 싶을 때 적합합니다. 실행 상태는 메모리와 로컬 파일 저장소에
+보관되므로 MCP 프로세스를 다시 시작한 뒤에도 `agent_hub_get_run`으로 불러올 수 있습니다.
+
+### Workflow를 끝까지 자동 실행하기
+
+```text
+agent_hub_run_workflow로 deep_readme를 실행해줘.
+project_root는 현재 저장소의 절대경로를 사용하고 max_leaf_calls는 8로 제한해줘.
+```
+
+자동 실행도 provider별 동의와 인증 검사를 건너뛰지 않습니다. 여러 모델을 호출할 수 있으므로
+`max_leaf_calls`, `per_call_timeout`, `max_tokens`를 작업 규모에 맞게 지정하는 편이 좋습니다.
+
+## 기본 Workflow
+
+| Workflow | Preset | 처리 흐름 |
 |---|---|---|
-| `repo_document` | `readme`, `technical-doc`, `proposal` | 저장소 조사, 문서 작성, 검증 |
-| `git_document` | `pr-description`, `release-notes` | Git 변경 수집과 변경 문서 작성 |
-| `research_brief` | `default` | 웹 검색, 근거 기반 요약, 검증 |
-| `deep_readme` | `default` | 여러 모델이 분석과 검토를 나눠 맡는 README 작성 |
+| `repo_document` | `readme` | 저장소 사실 수집 → README 작성 → 검증 |
+| `repo_document` | `technical-doc` | 저장소 사실 수집 → 기술 문서 작성 → 검증 |
+| `repo_document` | `proposal` | 저장소 사실 수집 → 제안서 작성 → 검증 |
+| `git_document` | `pr-description` | Git 변경 수집 → PR 설명 작성 |
+| `git_document` | `release-notes` | Git 변경 수집 → 릴리스 노트 작성 |
+| `research_brief` | `default` | 근거 검색 → 출처 기반 요약 → 검증 |
+| `deep_readme` | `default` | Claude 구조 분석 → Grok 사용성 분석 → Gemini 작성 → 검증 |
 
-번역, 교정, 요약, 이미지 생성처럼 한 번의 모델 호출로 끝나는 기능은 workflow가 아니라
-`agent_hub_write`, `agent_hub_generate_image` 같은 직접 도구로 제공합니다. 예전 `research_then_write`는
-`research_brief`의 호환 alias로 계속 사용할 수 있습니다.
+번역, 윤문, 요약, 이미지 생성처럼 한 번의 모델 호출로 끝나는 기능은 workflow로 감싸지 않고 직접 도구로
+제공합니다.
 
-## 제공하는 도구
+## 공개 도구 26개
 
-기본 `tools/list`에는 아래 26개 통합 도구만 표시됩니다. 모든 도구가 같은 결과 형식을 사용하므로 provider가
-달라져도 `success`, `text`, `error`, `usage`, `data`를 같은 방식으로 확인할 수 있습니다.
+### Provider와 인증
 
-| 구분 | 개수 | 주요 기능 |
-|---|---:|---|
-| Provider와 로그인 | 6 | `status`, `list_models`, 로그인 시작·완료·갱신·로그아웃 |
-| 직접 작업 | 8 | 대화, 검색, 글쓰기, 이미지, 모델 비교, diff 검토, 릴리스 문서 |
-| 설정 | 3 | 모델·transport·profile 설정 조회, 변경, 초기화 |
-| Workflow | 9 | 목록, 설명, 계획, 단계 실행, 자동 실행, 결과 검증 |
+| 도구 | 용도 |
+|---|---|
+| `agent_hub_status` | 동의, 인증, 준비 상태와 기본 모델 확인 |
+| `agent_hub_list_models` | 모델 목록 조회와 선택적 live probe |
+| `agent_hub_auth_start` | provider별 로그인 시작 |
+| `agent_hub_auth_complete` | 브라우저·device-code 로그인 완료 |
+| `agent_hub_auth_refresh` | OAuth 토큰 갱신 또는 검증 |
+| `agent_hub_auth_logout` | 로컬 OAuth 정보 삭제 |
 
-도구 이름에는 모두 `agent_hub_` prefix가 붙습니다. 예전 60개 `orchestrate_*`, `claude_codex_*`,
-`grok_codex_*`, `google_antigravity_*` 이름도 기존 자동화가 깨지지 않도록 계속 호출할 수 있지만 기본 목록에는
-표시하지 않습니다.
+### 직접 작업
 
-마이그레이션이나 문제 진단 때문에 예전 목록이 필요하면 서버 환경변수를 바꿀 수 있습니다.
+| 도구 | 용도 |
+|---|---|
+| `agent_hub_chat` | Claude, Grok, Gemini 대화 |
+| `agent_hub_search` | 출처가 포함된 검색 |
+| `agent_hub_write` | 초안, 번역, 윤문, 재작성, 요약 |
+| `agent_hub_generate_image` | 이미지 생성과 로컬 캐시 저장 |
+| `agent_hub_compare_models` | 같은 입력을 여러 모델로 비교 |
+| `agent_hub_review_diff` | Git diff 수집과 코드 리뷰 |
+| `agent_hub_release_snapshot` | 모델 호출 없이 로컬 릴리스 정보 수집 |
+| `agent_hub_release_draft` | PR 설명이나 릴리스 문서 작성 |
 
-```bash
-AGENT_HUB_TOOL_SURFACE=legacy agent-hub-mcp  # 예전 60개만 표시
-AGENT_HUB_TOOL_SURFACE=all agent-hub-mcp     # 통합 26개와 예전 60개 모두 표시
+### 설정
+
+| 도구 | 용도 |
+|---|---|
+| `agent_hub_get_settings` | Gemini 모델, transport, profile 설정 조회 |
+| `agent_hub_update_settings` | 설정 변경 |
+| `agent_hub_reset_settings` | 설정 일부 또는 전체 초기화 |
+
+### Workflow
+
+| 도구 | 용도 |
+|---|---|
+| `agent_hub_list_workflows` | workflow와 preset 목록 조회 |
+| `agent_hub_get_workflow` | 단계, context policy, binding 설명 |
+| `agent_hub_plan_workflow` | 실행하지 않고 구체적인 단계 생성 |
+| `agent_hub_start_workflow` | 단계별 실행 시작 |
+| `agent_hub_continue_workflow` | 한 단계의 결과를 전달하고 다음 단계 진행 |
+| `agent_hub_get_run` | 저장된 실행 상태 조회 |
+| `agent_hub_run_workflow` | in-process adapter로 끝까지 자동 실행 |
+| `agent_hub_delegate` | capability, context, fallback을 포함한 단일 호출 준비 |
+| `agent_hub_verify` | 문서 정책과 저장소 사실을 기준으로 결과 검증 |
+
+## 공통 결과 형식
+
+모든 통합 도구는 MCP의 `content[]`, `isError`, `structuredContent`를 반환합니다. `structuredContent` 안에서는
+아래 필드를 공통으로 사용할 수 있습니다.
+
+```json
+{
+  "success": true,
+  "operation": "chat",
+  "provider": "gemini",
+  "model": "selected-model",
+  "text": "result text",
+  "finish_reason": "stop",
+  "usage": {},
+  "warnings": [],
+  "error": null,
+  "artifacts": [],
+  "data": {}
+}
 ```
 
-통합 서버는 legacy MCP 초기화 방식과 stateless modern protocol을 모두 지원합니다. `tools/list`,
-`tools/call`, streaming notification, `server/discover`를 서버 하나에서 처리합니다.
+모델이 출력 한도에 도달하면 잘린 결과를 정상 완료로 처리하지 않습니다. `success=false`와
+`incomplete_finish_reason` warning을 확인할 수 있습니다.
+
+## 규칙, 메모리, 작업 인계
+
+| 정보 | 저장 위치 | 역할 |
+|---|---|---|
+| 공통 AI 규칙 | [`instructions/.ruler/`](./instructions/.ruler/) | 여러 클라이언트에 같은 규칙 배포 |
+| 생성된 규칙 | `AGENTS.md`, `CLAUDE.md` | Codex, Claude Code, Gemini, Cursor가 읽는 결과물 |
+| 진행 상태 | [`HANDOFF.md`](./HANDOFF.md) | 중단 지점과 다음 작업 기록 |
+| 장기 메모리 | [`memory/data/`](./memory/data/) | 결정과 반복해서 피해야 할 실수 기록 |
+| 코드와 변경 이력 | Git | 실제 상태의 정본 |
+
+basic-memory는 검색을 돕는 보조 계층입니다. 코드 상태나 현재 진행 상황을 대신하지 않으며, 기본 설정에서는
+semantic embedding을 사용하지 않습니다.
+
+## 보안
+
+- 각 provider는 별도의 명시적 동의를 확인합니다.
+- OAuth 토큰과 API 키는 사용자 설정 디렉터리, Keychain 또는 환경변수에만 둡니다.
+- source file, Git diff, 저장소 사실을 읽는 도구에는 대상 workspace의 절대경로를 명시합니다.
+- 홈 디렉터리 전체, 파일시스템 루트, 민감한 인증 경로는 workspace root로 사용할 수 없습니다.
+- 자동 workflow와 모델 비교는 여러 번의 외부 호출을 만들 수 있습니다.
+- 테스트 성공은 실시간 구독 한도나 모델 응답 품질까지 보장하지 않습니다.
+
+Antigravity의 파일·인증 경계는
+[`plugins/antigravity-codex/SECURITY.md`](./plugins/antigravity-codex/SECURITY.md)에 자세히 정리되어 있습니다.
+
+## 이전 이름은 지원하지 않습니다
+
+통합 전 사용하던 `orchestrate_*`, `claude_codex_*`, `grok_codex_*`, `google_antigravity_*` 이름은
+`agent-hub-mcp`에 등록되지 않습니다. 호출하면 `unknown tool` 오류가 반환됩니다. 새 설정에서는 반드시
+`agent_hub_*` 도구를 사용해야 합니다.
+
+provider 패키지 안의 leaf 구현은 내부 workflow 실행을 위해 남아 있지만 별도 MCP console script로
+설치하거나 외부 API로 공개하지 않습니다.
 
 ## 저장소 구조
 
 ```text
 agent-hub/
-├── src/agent_hub/                 # 통합 MCP 서버와 공통 protocol 코드
-├── src/orchestrate_codex/         # 작업 분배, recipe, broker, 결과 검토
-├── src/claude_codex/              # Claude 연결
-├── src/grok_codex/                # Grok 연결
-├── src/google_antigravity_codex/  # Gemini/Antigravity 연결
-├── tests/                         # 단위, 통합, protocol 테스트
+├── src/agent_hub/                 # 공개 operation registry와 통합 MCP 서버
+│   ├── operations.py              # 26개 도구의 schema, handler, 공통 결과 형식
+│   ├── server.py                  # MCP protocol과 tools/list, tools/call
+│   ├── core/                      # protocol, in-process transport, 공통 보안 유틸리티
+│   └── providers/                 # 내부 provider adapters
+├── src/orchestrate_codex/         # workflow, broker, 상태 저장, 검증
+├── src/claude_codex/              # Claude 내부 provider 구현
+├── src/grok_codex/                # Grok 내부 provider 구현
+├── src/google_antigravity_codex/  # Gemini 내부 provider 구현
+├── tests/                         # 단위, 통합, protocol 계약 테스트
 ├── instructions/.ruler/           # 공통 AI 규칙의 원본
-├── memory/data/                   # Git으로 관리하는 결정과 교훈
+├── memory/data/                   # Git으로 관리하는 로컬 메모리
 ├── handoff/                       # 작업 인계 템플릿과 예시
-├── plugins/                       # provider별 플러그인 배포 정보
-├── hubs/                          # Codex와 Claude Code 연결 설정
-├── scripts/                       # 인증, 동기화, 점검 도구
+├── hubs/                          # Codex와 Claude Code 연결 예시
+├── scripts/                       # 로그인, 동기화, 진단, 검증 도구
+├── plugins/                       # 통합 전 자료와 provider 보안 참고 문서
 ├── model-access/                  # 통합된 코드의 출처와 실행 근거
-├── BUILD-SPEC.md                  # 설계 배경과 원칙
-├── EXECUTION-PLAN.md              # 구축 과정과 검증 기록
-└── HANDOFF.md                     # 현재 상태와 다음 작업
+└── HANDOFF.md                     # 현재 진행 상태
 ```
 
-`BUILD-SPEC.md`, `EXECUTION-PLAN.md`, 일부 `hubs/` 문서에는 provider가 별도 저장소였던 통합 이전의 내용도
-남아 있습니다. 현재 실행 구조를 확인할 때는 루트 `pyproject.toml`, `src/agent_hub/`, `.mcp.json`을 기준으로
-보면 됩니다.
-
-## 보안과 데이터 저장 범위
-
-- **명시적 동의:** 각 provider는 별도의 동의 상태를 확인합니다. 자동 실행도 이 검사를 건너뛰지 못합니다.
-- **로그인 정보 분리:** OAuth 토큰과 API 키는 사용자 설정, Keychain, 환경변수에만 보관합니다.
-- **로컬 메모리:** 기본 설정에서는 semantic embedding을 끄고 FTS 검색만 사용합니다. 메모리 노트가
-  외부 임베딩 API로 전송되지 않습니다.
-- **저장소 범위 지정:** diff 검토나 프로젝트 정보 수집에는 대상 저장소의 절대경로를 전달합니다.
-- **잘린 출력 거부:** 모델이 토큰 한도에 도달한 결과는 정상 완료로 처리하지 않습니다.
-- **호출 횟수 제한:** 자동 workflow와 모델 비교는 여러 번의 외부 호출을 만들 수 있습니다. 작업에 맞게
-  `max_leaf_calls`, 모델, 출력 토큰을 제한해 주세요.
-
-provider별 자세한 내용은 [`plugins/`](./plugins/)에서 확인할 수 있습니다. Antigravity의 보안 경계는
-[`plugins/antigravity-codex/SECURITY.md`](./plugins/antigravity-codex/SECURITY.md)에 정리되어 있습니다.
-
-## 알아둘 점
-
-- provider의 로그인 방식과 모델 ID는 서비스 변경에 따라 달라질 수 있습니다. `agent_hub_list_models`에서
-  `probe=true`로 실제 사용 가능 여부를 확인해 주세요.
-- workflow 실행 상태는 메모리와 로컬 파일 저장소에 보관됩니다. 오래 유지해야 하는 결정과 작업 맥락은
-  `HANDOFF.md`와 Git에도 함께 기록해 주세요.
-- Ruler와 MCP 설정에 절대경로가 포함되어 있습니다. 다른 기기에서 사용할 때는 경로를 수정하고 설정을
-  다시 동기화해야 합니다.
-- basic-memory는 검색을 돕는 보조 기능입니다. 작업 규칙과 진행 상태, 코드 상태는 각각 원래 저장 위치를
-  기준으로 확인해야 합니다.
-- 테스트가 통과하더라도 provider의 실시간 로그인 상태, 구독 한도, 응답 품질까지 보장되지는 않습니다.
+현재 실행 구조는 `pyproject.toml`, `src/agent_hub/`, 루트 `.mcp.json`을 기준으로 확인합니다.
 
 ## 개발과 검증
 
 ```bash
+./.venv/bin/ruff check src tests
 ./.venv/bin/pytest -q
 ./scripts/check-sync.sh
 ./scripts/test-phase1.sh
 ./scripts/doctor.sh
+./.venv/bin/python -m build
 ```
 
-중요한 변경을 할 때는 아래 항목도 함께 확인해 주세요.
+중요한 변경에서는 다음 계약을 함께 확인합니다.
 
-1. 기본 `tools/list`에 26개 통합 도구만 표시되는지 확인합니다.
-2. 숨겨진 legacy 도구도 기존 이름으로 호출되는지 확인합니다.
-3. 모든 `tools/call` 결과가 MCP `content[]`와 공통 output 형식을 지키는지 확인합니다.
-4. 자동 실행 중에도 provider별 동의 검사가 유지되는지 확인합니다.
-5. legacy와 modern protocol 응답이 모두 유효한지 확인합니다.
-6. 생성된 AI 규칙이 원본과 일치하는지 확인합니다.
+1. `tools/list`와 실행 registry가 같은 26개 도구를 갖는지 확인합니다.
+2. provider별 옛 도구 이름이 통합 서버에서 거부되는지 확인합니다.
+3. workflow가 비공개 leaf adapter를 정상적으로 찾는지 확인합니다.
+4. 모든 결과가 MCP 형식과 공통 output schema를 지키는지 확인합니다.
+5. 직접 호출과 workflow 모두 provider 동의 검사를 유지하는지 확인합니다.
+6. 상태 유지형 MCP protocol과 stateless modern protocol을 모두 확인합니다.
 
 ## 관련 문서
 
-- [`BUILD-SPEC.md`](./BUILD-SPEC.md): 프로젝트를 만든 이유와 설계 원칙
+- [`UNIFIED-API-REVIEW.md`](./UNIFIED-API-REVIEW.md): 통합 전 중복 분석과 최종 재설계 결과
+- [`BUILD-SPEC.md`](./BUILD-SPEC.md): 프로젝트 배경과 초기 설계 원칙
 - [`EXECUTION-PLAN.md`](./EXECUTION-PLAN.md): 구축 과정과 검증 기록
-- [`HANDOFF.md`](./HANDOFF.md): 현재 상태와 남은 작업
-- [`memory/README.md`](./memory/README.md): 로컬 메모리의 저장 위치와 네트워크 사용 범위
-- [`model-access/leaves.manifest.json`](./model-access/leaves.manifest.json): 통합된 provider 코드의 출처
+- [`HANDOFF.md`](./HANDOFF.md): 현재 상태와 다음 작업
+- [`memory/README.md`](./memory/README.md): 로컬 메모리 저장 범위
+- [`model-access/leaves.manifest.json`](./model-access/leaves.manifest.json): provider 코드 출처
 
 ## 라이선스
 

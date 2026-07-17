@@ -1,19 +1,20 @@
-# Agent Hub 도구·워크플로 통합 재설계 검토
+# Agent Hub 도구·워크플로 통합 재설계 검토 기록
 
 검토 기준: `80a6125` (`main`, 2026-07-17)
 
 ## 구현 결과
 
-이 문서 아래의 분석은 재설계 전 상태를 기록한 내용입니다. 검토 뒤 아래 항목을 구현했습니다.
+이 문서 아래의 분석은 재설계 전 상태를 기록한 내용입니다. 당시 제안했던 legacy 호환 계층은 최종 구현에서
+제거했으며, 아래의 호환·단계별 이전 제안은 현재 사용법이 아니라 과거 검토 기록입니다.
 
 - 기본 `tools/list`를 60개 provider별 도구에서 26개 `agent_hub_*` 통합 도구로 바꿨습니다.
-- 기존 60개 이름은 목록에서만 숨기고 `tools/call` 호환 경로는 유지했습니다.
-- `AGENT_HUB_TOOL_SURFACE=legacy|all`로 예전 목록이나 전체 목록을 선택할 수 있습니다.
+- 기존 60개 이름과 `AGENT_HUB_TOOL_SURFACE` 호환 계층을 제거했습니다.
+- 통합 서버의 목록과 호출 registry에는 26개 `agent_hub_*` 도구만 남겼습니다.
 - 상태, 모델 목록, 로그인, 대화, Gemini 전용 작업, 설정, workflow를 공통 결과 형식으로 묶었습니다.
 - 21개 recipe를 새 API에서는 4개 workflow와 preset으로 정리했습니다.
-- `research_then_write`는 `research_brief` alias로 처리했습니다.
+- `research_then_write` alias와 옛 recipe ID를 workflow로 받던 호환 경로도 제거했습니다.
 - 목록에만 있던 Grok 로그인 도구 4개의 실행 경로를 연결했습니다.
-- 모든 공개 도구의 handler, metadata, output schema와 legacy 호출 호환성을 테스트합니다.
+- 모든 공개 도구의 handler, metadata, output schema를 검사하고 제거한 이름이 거부되는지 테스트합니다.
 - 실제 통합 `agent_hub_chat` 경로로 Claude, Grok, Gemini의 짧은 live smoke를 실행했고 세 provider 모두
   성공했습니다. Gemini 결과가 한 번 더 감싸지던 문제와 비탐색 상태의 readiness 판정도 이 과정에서 찾아
   수정했습니다.
@@ -397,7 +398,10 @@ Claude의 `mirror_keychain`처럼 특정 운영체제에만 필요한 기능은 
 
 이 초안은 26개입니다. 기존 60개보다 34개 적고, 클라이언트가 읽어야 하는 도구 설명도 약 57% 줄어듭니다.
 
-## 기존 도구와의 호환 방법
+## 검토 당시 호환안 (최종 미적용)
+
+> 아래 호환안은 구현 후 제거했습니다. 현재 통합 서버는 26개 `agent_hub_*` 도구만 등록하며, 옛 이름을
+> 직접 호출하면 `unknown tool` 오류를 반환합니다.
 
 새 도구와 기존 도구를 모두 `tools/list`에 노출하면 일시적으로 도구 수가 더 늘어납니다. 아래 방식이 더
 안전합니다.
@@ -492,7 +496,7 @@ AGENT_HUB_TOOL_SURFACE=all       # 개발과 이전 검증용
 
 - 목록에만 있고 실행되지 않는 도구가 없습니다.
 - 기본 `tools/list`에는 통합 도구만 표시됩니다.
-- 기존 이름은 정해진 기간 동안 call-only alias로 작동합니다.
+- 기존 이름은 통합 서버에서 거부됩니다.
 - provider별 공통 동작이 한곳의 schema와 output 계약을 사용합니다.
 - recipe는 workflow, preset, alias로 명확히 구분됩니다.
 - 중복 단계 graph가 코드에 복사되어 있지 않습니다.

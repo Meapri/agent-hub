@@ -141,19 +141,19 @@ def test_list_recipes():
     assert "change_pr" in ids
 
 
-def test_unified_workflows_group_presets_and_keep_legacy_alias():
+def test_unified_workflows_group_presets_without_legacy_aliases():
     workflows = recipes.list_workflows()
     assert {item["id"] for item in workflows} == {
         "repo_document", "git_document", "research_brief", "deep_readme"
     }
     readme = recipes.resolve_workflow("repo_document", "readme")
     assert readme["recipe_id"] == "durable_readme"
-    alias = recipes.resolve_workflow("research_then_write")
-    assert alias["workflow_id"] == "research_brief"
-    assert alias["recipe_id"] == "research_brief"
-    assert "research_then_write" not in {item["id"] for item in recipes.list_recipes()}
-    legacy_run = runner.start_run("research_then_write", args={"prompt": "q"})
-    assert legacy_run["recipe_id"] == "research_brief"
+    with pytest.raises(ValueError, match="unknown workflow"):
+        recipes.resolve_workflow("research_then_write")
+    with pytest.raises(ValueError, match="unknown recipe"):
+        runner.start_run("research_then_write", args={"prompt": "q"})
+    with pytest.raises(ValueError, match="unknown workflow"):
+        recipes.resolve_workflow("durable_readme")
 
 
 def test_one_stage_recipes_are_not_presented_as_workflows():

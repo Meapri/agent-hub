@@ -1,10 +1,15 @@
 from __future__ import annotations
-import pytest
-pytestmark = pytest.mark.skip(reason="standalone plugin bundle/release-version consistency is not used in the agent-hub monorepo; distribution + versioning are managed at the monorepo level")
-
 
 import importlib.util
 from pathlib import Path
+
+import pytest
+
+
+pytestmark = pytest.mark.skip(
+    reason="standalone plugin bundle/release-version consistency is not used in the agent-hub monorepo; "
+    "distribution + versioning are managed at the monorepo level"
+)
 
 
 def test_release_version_fields_match():

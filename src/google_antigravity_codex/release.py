@@ -13,7 +13,7 @@ import time
 from typing import Any, Dict, List
 import urllib.parse
 
-from . import response, security, writing
+from . import chat, response, security, writing
 
 VERSION_FILE_PATTERNS = (
     ("package.json", re.compile(r'"version"\s*:\s*"([^"]+)"')),

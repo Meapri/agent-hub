@@ -13,17 +13,15 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from orchestrate_codex.leaf_client import _interpret_result
 
-from .rpc import RpcError
-
-
 class InProcessLeafClient:
     """Same call_tool(name, args) -> (ok, text) contract as leaf_client.LeafClient."""
 
     def __init__(self, owner: Any) -> None:
         self._owner = owner
 
-    def call_tool(self, tool: str, arguments: Dict[str, Any], *, timeout: Optional[float] = None
-                  ) -> Tuple[bool, str]:
+    def call_tool(
+        self, tool: str, arguments: Dict[str, Any], *, timeout: Optional[float] = None
+    ) -> Tuple[bool, str]:
         try:
             result = self._owner.call(tool, arguments or {})
         except Exception as exc:  # noqa: BLE001 — a raised tool/consent error maps to (ok=False),
@@ -34,16 +32,24 @@ class InProcessLeafClient:
 def make_resolver() -> Callable[[str], Optional[InProcessLeafClient]]:
     """Resolve a leaf tool name to an in-process client backed by its adapter.
 
-    Deferred import of the server registry avoids a circular import (the server
-    imports the orchestrate adapter, which builds this resolver lazily at call
-    time). Orchestrate's own tools are excluded so the broker only reaches leaves.
+    Leaf names are intentionally kept in a private registry. They are execution
+    details for workflows and are not exposed by the public Agent Hub MCP server.
     """
-    from agent_hub.server import _REGISTRY
-    from agent_hub.providers.orchestrate import orchestrate_provider
+    from agent_hub.providers.antigravity import antigravity_provider
+    from agent_hub.providers.claude import claude_provider
+    from agent_hub.providers.grok import grok_provider
+
+    registry: Dict[str, Any] = {}
+    for owner in (claude_provider, grok_provider, antigravity_provider):
+        for spec in owner.tool_specs():
+            name = str(spec["name"])
+            if name in registry:
+                raise RuntimeError(f"internal leaf tool collision: {name}")
+            registry[name] = owner
 
     def resolve(tool: str) -> Optional[InProcessLeafClient]:
-        owner = _REGISTRY.get(tool)
-        if owner is None or owner is orchestrate_provider:
+        owner = registry.get(tool)
+        if owner is None:
             return None
         return InProcessLeafClient(owner)
 

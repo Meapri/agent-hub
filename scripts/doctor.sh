@@ -2,7 +2,7 @@
 #
 # doctor.sh — agent-hub (통합 monorepo) 건강 점검 (읽기 우선).
 # 검사: (1) Ruler 지시 정합, (2) 통합 프로젝트 설치(4 패키지 import),
-#       (3) basic-memory 기동, (4) MCP console script 4종 존재, (5) 메모리 노트 store.
+#       (3) basic-memory 기동, (4) 통합 MCP console script 존재, (5) 메모리 노트 store.
 # 종료 코드: 하나라도 FAIL이면 1. WARN은 0을 유지한다.
 
 set -uo pipefail
@@ -45,15 +45,11 @@ else
   bad "uvx 없음 — uv 설치 필요"
 fi
 
-echo "[4/5] MCP console script 4종 존재"
-missing=""
-for s in orchestrate-codex-mcp claude-codex-mcp grok-codex-mcp google-antigravity-mcp; do
-  [ -x "${VENV}/bin/${s}" ] || missing="${missing} ${s}"
-done
-if [ -z "${missing}" ]; then
-  pass "orchestrate/claude/grok/antigravity console script 설치됨"
+echo "[4/5] 통합 MCP console script 존재"
+if [ -x "${VENV}/bin/agent-hub-mcp" ]; then
+  pass "agent-hub-mcp 설치됨"
 else
-  bad "누락:${missing} — pip install -e . 재실행"
+  bad "agent-hub-mcp 누락 — pip install -e . 재실행"
 fi
 
 echo "[5/5] 메모리 노트 store (memory/data)"
