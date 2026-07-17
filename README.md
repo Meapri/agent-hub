@@ -305,6 +305,10 @@ basic-memory는 보조 검색 기능입니다. 기본 설정은 임베딩 검색
 - `tests/`: 단위·통합·MCP 형식 테스트.
 - `instructions/.ruler/`, `memory/data/`, `handoff/`, `hubs/`, `scripts/`, `plugins/`, `model-access/`, `HANDOFF.md`.
 
+## 과거 로컬 정책 모델 연구
+
+Gemma 4 E4B와 Qwen 3.5 9B를 오케스트레이션 전용 정책 모델로 사용하려던 실험은 종료했습니다. 현재 Agent Hub의 활성 실행 경로가 아니며, 결과와 중단 근거는 [`LOCAL-ORCHESTRATION-RESEARCH.md`](./LOCAL-ORCHESTRATION-RESEARCH.md)에 보존합니다. Frontier-v4의 sealed holdout 64개는 열지 않았습니다.
+
 ## 개발용 검증 명령
 
 ```bash

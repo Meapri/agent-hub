@@ -11,7 +11,39 @@
 
 - **현재 단계**
 
-  **[2026-07-17 문서 문체 규칙 강제 — 이 블록이 최신]**
+  **[2026-07-17 로컬 LLM 오케스트레이션 연구 문서 재구성 — 이 블록이 최신]**
+
+  Gemma 4 E4B와 Qwen 3.5 9B 로컬 정책 모델 연구를
+  `LOCAL-ORCHESTRATION-RESEARCH.md`에 처음부터 다시 정리했다. 현재 정본에는 예전 학습 트리가 없으므로
+  `/Users/naen/Git/agent-hub-legacy-chanwoo-20260717`을 읽기 전용 근거로 사용했다. 연구 구현 기준은
+  `9d37b59`, 종료 문서 커밋은 `90510db`다. 보존 저장소는 수정하지 않았고 새 provider outcome을 수집하거나
+  Frontier-v4 sealed holdout 64개를 열지 않았다.
+
+  새 문서는 초기 Gemma JSON 계약 파일럿, 이중언어 8-model outcome, Frontier-v1/v2/v3/v4, Qwen LoRA
+  feasibility와 prompt-only coordinator까지 전체 연대기를 담는다. 수치와 해석을 분리하고 평가 방법,
+  타당성 한계, 중단 결정, 재사용 자산과 재개 조건을 함께 기록했다. README에는 현재 비활성 연구라는 짧은
+  안내와 문서 링크만 추가했다.
+
+  Agent Hub 실행 기록:
+  - live status: Claude/Grok/Gemini `3/3 ready`.
+  - 첫 adaptive plan은 조사 루트가 현재 정본이라 보존 자료를 놓칠 위험이 있어 실행하지 않았다.
+  - 보존 저장소를 루트로 둔 첫 재계획은 잘린 JSON으로 validator가 거부했다.
+  - 최종 plan: Gemini 3.5 Flash High, deep/high 조사 → 초안 → 3-provider claim review → 최종 합성,
+    plan SHA `6ce95ce3b3862f3c8f88098017b3422b70cd52c2b27b12792444fecc3ee2adc6`, 최대 9 calls.
+  - end-to-end run은 MCP 전체 300초 상한에서 timeout되어 산출물을 사용하지 않았다.
+  - `agent_hub_write`: Claude Opus 4.8 high, 품질 재작성 1회 뒤 checker v2 통과. 이 초안의 잘못된
+    “Frontier-v1 수치 없음” 주장과 빠진 초기 단계를 로컬 원자료로 교정했다.
+  - 최종 `agent_hub_verify(doc_class=durable,user_facing=true)`: 경고 0건.
+
+  검증: 연구 문서와 README의 `orchestrate_codex.document_quality` 통과, README pytest 3 passed,
+  Ruler sync 통과, Markdown render 통과, `git diff --check` clean. 변경 파일은
+  `LOCAL-ORCHESTRATION-RESEARCH.md`, `README.md`, `HANDOFF.md`다.
+
+  **다음 한 걸음:** Claude Code를 재시작한 새 작업에서 `document-write` 스킬이 자동 선택되는지 한 번 확인한다.
+
+  ---
+
+  **[2026-07-17 문서 문체 규칙 강제 — 이전 기록]**
 
   README 문체 규칙이 다른 세션에서 빠지는 원인을 확인했다. 그 세션은 최신 `agent-hub-mono`가 아니라
   원격이 `Chanwoo-act/agent-hub`인 예전 `/Users/naen/Git/agent-hub` 체크아웃에서 작업했다. 이 체크아웃은
@@ -546,9 +578,4 @@
   - 나머지 설계 금지사항은 `BUILD-SPEC.md` §8을 따를 것.
 
 - **다음 한 걸음**
-  Codex 앱을 재시작한 뒤 ACT-5400 장문 작성 smoke에서 `max_tokens=65536`,
-  `finish_reason=stop`, 요청 길이 충족을 확인한다. 그 다음 기존 사용자 게이트인 R3: `EXECUTION-PLAN.md` R3 절차로 claude-codex 구독
-  plan-lane 실과금 여부를 1회 확인하고(🔒 사용자가 호출 승인 + Anthropic Console 확인), 결과·ToS 수용 여부를
-  `model-access/evidence/EVIDENCE.md`에 기록한다. 판정 전에는 claude-codex leaf 대량 호출을 하지 않는다.
-  (선택) R6 leaf live load: antigravity `list_models` 1회로 Claude Code 실기 로드까지 확인. 로컬 router는
-  read-only 보존(`RESEARCH-CLOSURE.md`).
+  Claude Code를 재시작한 새 작업에서 `document-write` 스킬이 자동 선택되는지 한 번 확인한다.
