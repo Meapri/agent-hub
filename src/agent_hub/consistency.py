@@ -157,10 +157,11 @@ def decision_prompt(prompt: str, labels: Sequence[str]) -> str:
     return (
         f"{prompt.strip()}\n\n"
         "Return exactly one JSON object and no markdown or trailing prose. "
-        "The object must use this contract: "
+        "Prefer the minimal contract so the response cannot be cut off: "
         '{"schema":"decision_v1","label":<one allowed label>,'
-        '"confidence":<number 0..1>,"rationale":<optional short string>,'
-        '"evidence":<optional string array>,"uncertainties":<optional string array>}. '
+        '"confidence":<number 0..1>}. '
+        "Optional allowed fields are rationale (short string), evidence (string array), and "
+        "uncertainties (string array); omit them unless they are necessary. "
         f"Allowed labels (case-sensitive): {allowed}. "
         "Do not create a new label. Keep rationale under 500 characters and each list at 8 items or fewer."
     )

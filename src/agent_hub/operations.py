@@ -1134,6 +1134,9 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
             continue
         try:
             parsed = orchestrator.parse_plan(previous_text)
+            # The planner chooses the DAG, but it may not rewrite or summarize the caller's goal.
+            # Keeping the original goal in the validated plan also binds it to plan_sha256.
+            parsed["goal"] = goal
             plan = orchestrator.validate_plan(parsed, max_steps=max_steps, max_calls=max_calls)
         except ValueError as exc:
             validation_error = str(exc)
@@ -1161,7 +1164,15 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
 def _adaptive_context(
     goal: str, step: Dict[str, Any], dependencies: Dict[str, Dict[str, Any]]
 ) -> str:
-    parts = [f"Overall goal:\n{goal}", f"Current step:\n{step['instruction']}"]
+    parts = [
+        f"Overall goal:\n{goal}",
+        f"Current step:\n{step['instruction']}",
+        (
+            "Execution contract:\nComplete this step in the current response using only the "
+            "provided goal and dependency outputs. Return the finished analysis or artifact now; "
+            "do not announce, request, or defer future file or tool inspection."
+        ),
+    ]
     for step_id, result in dependencies.items():
         parts.append(f"Dependency output — {step_id}:\n{str(result.get('text') or '')[:24000]}")
     return "\n\n".join(parts)
@@ -1176,6 +1187,8 @@ def _adaptive_step_call(
     goal: str,
 ) -> Dict[str, Any]:
     root = str(args.get("project_root") or ".")
+    model_map = args.get("models") if isinstance(args.get("models"), dict) else {}
+    selected_model = str(model_map.get(provider) or "").strip() or None
     policy_args = {
         "policy_mode": args.get("policy_mode") or "required",
         "policy_file": args.get("policy_file"),
@@ -1184,7 +1197,7 @@ def _adaptive_step_call(
     context = _adaptive_context(goal, step, dependencies)
     common = {
         "provider": provider,
-        "model": None,
+        "model": selected_model,
         "max_tokens": args.get("max_tokens"),
         "timeout_sec": args.get("per_call_timeout") or 180,
         "project_root": root,
@@ -1197,6 +1210,7 @@ def _adaptive_step_call(
         return _search(
             {
                 "provider": provider,
+                "model": selected_model,
                 "query": context,
                 "max_tokens": args.get("max_tokens"),
                 "timeout_sec": args.get("per_call_timeout") or 180,
@@ -1224,6 +1238,10 @@ def _adaptive_step_call(
             }
         )
     if capability == "compare":
+        participants = step.get("participants") or ["claude", "grok", "gemini"]
+        participant_models = [
+            str(model_map.get(participant) or "").strip() for participant in participants
+        ]
         gate = None
         if step.get("decision_labels"):
             gate = {
@@ -1237,7 +1255,8 @@ def _adaptive_step_call(
         return _compare_models(
             {
                 "prompt": context,
-                "providers": step.get("participants") or ["claude", "grok", "gemini"],
+                "providers": participants,
+                "models": participant_models if all(participant_models) else None,
                 "project_root": root,
                 "execution": "parallel",
                 "max_concurrency": args.get("max_concurrency") or 3,
@@ -1635,6 +1654,16 @@ WORKFLOW_BASE = {
     "prompt": {"type": "string"},
     "instruction": {"type": "string"},
     "project_root": {"type": "string", "default": "."},
+    "models": {
+        "type": "object",
+        "properties": {
+            "claude": {"type": "string"},
+            "grok": {"type": "string"},
+            "gemini": {"type": "string"},
+        },
+        "additionalProperties": False,
+        "description": "Optional explicit model id per provider for every adaptive step.",
+    },
     "bindings": {"type": "object", "additionalProperties": {"type": "string"}},
     "plan": {
         "type": "object",

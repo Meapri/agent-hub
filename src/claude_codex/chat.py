@@ -22,7 +22,12 @@ def supports_temperature(model: str) -> bool:
     lowered = model.lower()
     return not any(
         marker in lowered
-        for marker in ("claude-sonnet-5", "claude-fable-5", "claude-mythos-5")
+        for marker in (
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-4-8",
+        )
     )
 
 

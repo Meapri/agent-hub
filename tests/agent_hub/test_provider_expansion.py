@@ -148,6 +148,31 @@ def test_claude_five_ignores_deprecated_temperature(monkeypatch):
     assert "temperature_ignored_by_model" in result["warnings"]
 
 
+def test_claude_opus_48_ignores_deprecated_temperature(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(claude_chat.security, "require_consent", lambda: None)
+    monkeypatch.setattr(
+        claude_chat.auth,
+        "resolve_auth",
+        lambda: {"mode": "api_key", "source": "test"},
+    )
+
+    def fake_messages(body, **_kwargs):
+        captured.update(body)
+        return {
+            "model": "claude-opus-4-8",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}],
+        }
+
+    monkeypatch.setattr(claude_chat.api, "messages_create", fake_messages)
+    result = claude_chat.run_chat(
+        {"prompt": "test", "model": "claude-opus-4-8", "temperature": 0.2}
+    )
+    assert "temperature" not in captured
+    assert "temperature_ignored_by_model" in result["warnings"]
+
+
 def test_grok_images_force_responses_api(tmp_path, monkeypatch):
     frame = tmp_path / "frame.png"
     frame.write_bytes(b"\x89PNG\r\n\x1a\nframe")

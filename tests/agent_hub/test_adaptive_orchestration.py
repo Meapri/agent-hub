@@ -156,6 +156,42 @@ def test_adaptive_plan_uses_llm_then_local_validator(tmp_path, monkeypatch):
     assert result["data"]["dynamic"] is True
     assert result["data"]["plan"]["planner"]["provider"] == "gemini"
     assert result["data"]["plan"]["planner"]["policy_sha256"] == "policy-hash"
+    assert result["data"]["plan"]["goal"] == "Analyze and synthesize"
+
+
+def test_adaptive_planner_cannot_shorten_the_reviewed_goal(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    shortened = _plan()
+    shortened["goal"] = "short summary"
+    monkeypatch.setattr(
+        operations,
+        "_chat_raw",
+        lambda *_args, **_kwargs: {"success": True, "text": json.dumps(shortened)},
+    )
+
+    original = "Rewrite README with every supplied repository fact and installation command."
+    result = operations.dispatch_tool(
+        "agent_hub_plan_workflow",
+        {
+            "workflow_id": "adaptive",
+            "prompt": original,
+            "project_root": root,
+        },
+    )
+
+    assert result["success"] is True
+    assert result["data"]["plan"]["goal"] == original
+
+
+def test_adaptive_context_requires_a_completed_current_response():
+    context = operations._adaptive_context(
+        "Write the README.",
+        {"instruction": "Review its structure."},
+        {},
+    )
+
+    assert "Complete this step in the current response" in context
+    assert "do not announce, request, or defer" in context
 
 
 def test_adaptive_planner_repairs_one_invalid_plan(tmp_path, monkeypatch):
@@ -230,6 +266,7 @@ def test_workflow_catalog_and_schema_expose_adaptive_mode():
     )
     assert planned["annotations"]["readOnlyHint"] is False
     assert "planner_provider" in planned["inputSchema"]["properties"]
+    assert "models" in planned["inputSchema"]["properties"]
     assert len(operations.tool_definitions()) == 26
 
 
@@ -292,3 +329,79 @@ def test_adaptive_review_requires_a_completed_result(tmp_path, monkeypatch):
     )
     assert complete["success"] is True
     assert complete["text"] == "No findings in new.py."
+
+
+def test_adaptive_step_uses_explicit_provider_model_map(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+
+    def fake_chat(arguments):
+        captured.update(arguments)
+        return operations.envelope(
+            "chat",
+            {"success": True, "text": "ok", "model": arguments.get("model")},
+            provider=arguments["provider"],
+        )
+
+    monkeypatch.setattr(operations, "_chat", fake_chat)
+    result = operations._adaptive_step_call(
+        {
+            "id": "frontier_review",
+            "capability": "chat",
+            "provider": "claude",
+            "depends_on": [],
+            "fallback_providers": [],
+            "instruction": "Review the evidence.",
+            "final": True,
+        },
+        "claude",
+        {},
+        args={
+            "project_root": root,
+            "models": {"claude": "claude-opus-4-8"},
+            "max_tokens": 65536,
+        },
+        goal="Produce a review.",
+    )
+
+    assert result["success"] is True
+    assert captured["model"] == "claude-opus-4-8"
+    assert captured["max_tokens"] == 65536
+
+
+def test_adaptive_compare_maps_models_to_participants(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+
+    def fake_compare(arguments):
+        captured.update(arguments)
+        return operations.envelope(
+            "compare_models", {"success": True, "text": "agreed"}, provider="multiple"
+        )
+
+    monkeypatch.setattr(operations, "_compare_models", fake_compare)
+    operations._adaptive_step_call(
+        {
+            "id": "frontier_compare",
+            "capability": "compare",
+            "provider": "multiple",
+            "depends_on": [],
+            "fallback_providers": [],
+            "instruction": "Compare the README findings.",
+            "final": True,
+            "participants": ["claude", "gemini"],
+        },
+        "multiple",
+        {},
+        args={
+            "project_root": root,
+            "models": {
+                "claude": "claude-opus-4-8",
+                "gemini": "gemini-3.1-pro-high",
+            },
+        },
+        goal="Compare findings.",
+    )
+
+    assert captured["providers"] == ["claude", "gemini"]
+    assert captured["models"] == ["claude-opus-4-8", "gemini-3.1-pro-high"]

@@ -67,6 +67,14 @@ def test_decision_v1_parser_is_strict():
         )
 
 
+def test_decision_prompt_prefers_the_minimal_complete_contract():
+    prompt = consistency.decision_prompt("Review this.", ["ACCEPT", "REJECT"])
+
+    assert '"confidence":<number 0..1>}' in prompt
+    assert "Prefer the minimal contract" in prompt
+    assert '"uncertainties":<optional' not in prompt
+
+
 def test_decision_evaluation_passes_only_a_real_consensus():
     agreed = [
         {"success": True, "decision": {"label": "ACCEPT"}},
