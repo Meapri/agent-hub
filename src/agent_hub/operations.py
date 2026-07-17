@@ -524,13 +524,17 @@ def _search(args: Dict[str, Any]) -> Dict[str, Any]:
     return envelope("search", raw, provider=provider)
 
 
-def _write(args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = _operation_provider(args, "write", default="gemini")
-    built = google_writing.build_prompt(args)
-    raw_chat = _chat_raw(
+def _write_call(
+    provider: str,
+    args: Dict[str, Any],
+    built: Dict[str, Any],
+    *,
+    prompt: str,
+) -> Dict[str, Any]:
+    return _chat_raw(
         provider,
         {
-            "prompt": built["prompt"],
+            "prompt": prompt,
             "system": built["system"],
             "model": args.get("model"),
             "temperature": args.get("temperature", 0.35),
@@ -543,21 +547,93 @@ def _write(args: Dict[str, Any]) -> Dict[str, Any]:
             "max_policy_chars": args.get("max_policy_chars"),
         },
     )
+
+
+def _write_verification(text: str, built: Dict[str, Any]) -> Dict[str, Any]:
+    return verify.verify_text(
+        text,
+        doc_class=str(built.get("doc_class") or "transform"),
+        fact_pack=built.get("fact_pack") if isinstance(built.get("fact_pack"), dict) else None,
+        user_facing=built.get("task") == "readme",
+    )
+
+
+def _rewrite_prompt(built: Dict[str, Any], text: str, warnings: List[str]) -> str:
+    findings = "\n".join(f"- {item}" for item in warnings)
+    return (
+        f"{built['prompt']}\n\n"
+        "The following draft failed Agent Hub's document quality gate. Rewrite the complete "
+        "document, not just the flagged sentences. Preserve every verified fact, command, "
+        "constraint, and useful section. For Korean user-facing documentation, use natural "
+        "polite prose that a Korean developer would actually write; avoid translated English "
+        "structure, unexplained internal jargon, process narration, and repeated '-한다/-이다' "
+        "endings. Return only the corrected final document.\n\n"
+        f"Quality findings:\n{findings}\n\n"
+        f"Draft to replace:\n{text}"
+    )
+
+
+def _write(args: Dict[str, Any]) -> Dict[str, Any]:
+    provider = _operation_provider(args, "write", default="gemini")
+    built = google_writing.build_prompt(args)
+    raw_chat = _write_call(provider, args, built, prompt=str(built["prompt"]))
     text = str(raw_chat.get("text") or "").strip()
+    verification = _write_verification(text, built)
+    rewrite_limit = max(0, min(int(args.get("quality_rewrite_attempts", 1)), 2))
+    rewrite_attempts = 0
+    while (
+        bool(raw_chat.get("success", not raw_chat.get("error")))
+        and not verification.get("ok")
+        and rewrite_attempts < rewrite_limit
+    ):
+        rewrite_attempts += 1
+        raw_chat = _write_call(
+            provider,
+            args,
+            built,
+            prompt=_rewrite_prompt(built, text, list(verification.get("warnings") or [])),
+        )
+        text = str(raw_chat.get("text") or "").strip()
+        verification = _write_verification(text, built)
     warnings = google_writing.review_text(text, durable=bool(built.get("durable")))
     warnings.extend(
         str(item) for item in raw_chat.get("warnings") or [] if str(item) not in warnings
     )
+    warnings.extend(
+        str(item) for item in verification.get("warnings") or [] if str(item) not in warnings
+    )
+    if rewrite_attempts:
+        warnings.append(f"quality_rewrite_applied:{rewrite_attempts}")
+    provider_success = bool(raw_chat.get("success", not raw_chat.get("error")))
+    quality_passed = bool(verification.get("ok"))
     raw = {
         **raw_chat,
+        "success": provider_success and quality_passed,
         "text": text,
         "task": built["task"],
         "profiles": built["profiles"],
         "doc_class": built.get("doc_class"),
         "project_context_used": built.get("project_context_used"),
         "fact_pack_used": built.get("fact_pack_used"),
+        "quality_gate": {
+            "applied": True,
+            "passed": quality_passed,
+            "checker_version": verification.get("checker_version"),
+            "rewrite_attempts": rewrite_attempts,
+            "warnings": list(verification.get("warnings") or []),
+            "policy_source": (
+                raw_chat.get("consistency", {}).get("policy_source")
+                if isinstance(raw_chat.get("consistency"), dict)
+                else None
+            ),
+        },
         "warnings": warnings,
     }
+    if provider_success and not quality_passed:
+        raw["error"] = {
+            "type": "document_quality_failed",
+            "message": "Document quality verification failed after bounded rewriting.",
+        }
     return envelope("write", raw, provider=provider)
 
 
@@ -1561,8 +1637,9 @@ def _verify(args: Dict[str, Any]) -> Dict[str, Any]:
         str(args.get("text") or ""),
         doc_class=str(args.get("doc_class") or "durable"),
         fact_pack=fact_pack if isinstance(fact_pack, dict) else None,
+        user_facing=bool(args.get("user_facing", False)),
     )
-    return envelope("verify", result, success=True)
+    return envelope("verify", result, success=bool(result.get("ok")))
 
 
 PROVIDER_SCHEMA = {
@@ -1640,7 +1717,20 @@ SEARCH_SCHEMA = _operation_schema(
 )
 WRITING_SCHEMA = _operation_schema(
     google_mcp.WRITING_SCHEMA,
-    {**REASONING_EFFORT_SCHEMA, **POLICY_CONTROL_SCHEMA},
+    {
+        **REASONING_EFFORT_SCHEMA,
+        **POLICY_CONTROL_SCHEMA,
+        "quality_rewrite_attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 1,
+            "description": (
+                "Bounded full-document rewrites after the mandatory local quality gate fails. "
+                "Zero disables rewriting but not verification or fail-closed behavior."
+            ),
+        },
+    },
 )
 IMAGE_SCHEMA = _operation_schema(
     google_mcp.IMAGE_SCHEMA,
@@ -2089,6 +2179,11 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                     "default": "durable",
                 },
                 "project_root": {"type": "string", "default": "."},
+                "user_facing": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Apply stricter natural-language checks for a public README.",
+                },
             },
             required=("text",),
         ),

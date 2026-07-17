@@ -53,6 +53,14 @@ PROFILE_TEXT = {
         "Write in formal, polite Korean appropriate for business email, official "
         "announcements, and reports. Use precise terminology and a respectful tone."
     ),
+    "natural-doc-ko": (
+        "Write Korean documentation in a warm, clear, polite style that sounds like a skilled "
+        "Korean developer explaining the product to another person. Prefer familiar Korean words "
+        "and short concrete sentences. Do not imitate English sentence structure, stack abstract "
+        "nouns, narrate the writing process, or repeatedly end prose with plain-form '-한다/-이다'. "
+        "Keep commands and official technical names unchanged, but explain unfamiliar jargon the "
+        "first time it appears. Preserve every important feature, constraint, and setup step."
+    ),
     "github-release": (
         "Write concise, actionable release notes. Group bullets by user-impacting "
         "changes, fixes, and breaking changes. Keep claims source-grounded."
@@ -75,8 +83,8 @@ DEFAULT_PROFILES = {
     "proposal": ["professional-ko"],
     "pr-description": ["github-release"],
     "release-notes": ["github-release"],
-    "readme": ["professional-ko"],
-    "technical-doc": ["professional-ko"],
+    "readme": ["natural-doc-ko"],
+    "technical-doc": ["natural-doc-ko"],
     "polish": ["chanwoo-ko"],
     "rewrite": ["chanwoo-ko"],
     "translate": ["chanwoo-ko"],
@@ -100,6 +108,8 @@ TASK_GUIDANCE = {
         "Use only the durable fact pack and provided source. Never describe session "
         "work, 'today we fixed', git logs, or debug notes as product features. "
         "Do not invent MCP tools, env vars, or install commands."
+        " For Korean output, use natural polite prose rather than repeated '-한다/-이다' endings, "
+        "and replace internal English jargon with words a new user can understand."
     ),
     "proposal": "Explain the problem, solution, benefits, and next steps.",
     "product-copy": "Highlight user benefit in active, direct language.",
@@ -370,6 +380,7 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "project_context_used": bool(project_context),
         "durable": durable,
         "fact_pack_used": bool(durable_ctx.get("used")),
+        "fact_pack": durable_ctx.get("facts"),
         "doc_class": "durable" if durable else ("change" if task in CHANGE_TASKS else "transform"),
     }
 

@@ -246,9 +246,35 @@ def test_revision_budget_zero_disables_loop(tmp_path):
         run_id=state["run_id"], stage_id="draft",
         result_text="today we changed things this session", success=True,
     )
-    assert out["status"] == "completed"  # no rewind when budget is 0
+    assert out["status"] == "failed"  # a blocking quality failure cannot be accepted
     assert out["revisions"] == 0
     assert any("recency" in w for w in out.get("warnings", []))  # still surfaced as a warning
+
+
+def test_korean_style_failure_triggers_revision_then_fails_closed(tmp_path):
+    state = runner.start_run(
+        "durable_readme",
+        args={"prompt": "README를 작성해 주세요."},
+        project_root=str(tmp_path),
+    )
+    first = runner.continue_run(
+        run_id=state["run_id"],
+        stage_id="draft",
+        result_text="# 안내\n\n이전 이름은 지원하지 않습니다.",
+        success=True,
+    )
+    assert first["status"] == "running"
+    assert first["next_action"]["stage_id"] == "draft"
+    assert first["revisions"] == 1
+
+    second = runner.continue_run(
+        run_id=state["run_id"],
+        stage_id="draft",
+        result_text="# 안내\n\n이전 이름은 지원하지 않습니다.",
+        success=True,
+    )
+    assert second["status"] == "failed"
+    assert "document_quality_failed" in second["error"]
 
 
 def test_verify_allows_cli_commands(tmp_path):
@@ -545,6 +571,22 @@ def test_verify_blocks_known_korean_translationese():
     )
     assert result["ok"] is False
     assert any(w.startswith("korean_style:translation_like") for w in result["warnings"])
+
+
+def test_verify_flags_stiff_user_facing_readme_style():
+    result = verify.verify_text(
+        "# 안내\n\n"
+        "이 시스템은 콕핏을 제공한다.\n"
+        "작업을 실행한다.\n"
+        "결과를 저장한다.\n"
+        "설정을 관리한다.",
+        doc_class="durable",
+        user_facing=True,
+    )
+
+    assert result["ok"] is False
+    assert any("unexplained_jargon" in warning for warning in result["warnings"])
+    assert any("declarative_monologue_density" in warning for warning in result["warnings"])
 
 
 def test_start_run_auto_gather_and_next_leaf(tmp_path):

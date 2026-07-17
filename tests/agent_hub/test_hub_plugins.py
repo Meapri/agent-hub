@@ -12,19 +12,29 @@ def _json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_codex_and_claude_plugins_share_one_adaptive_skill_contract():
-    canonical = (HUBS / "shared/skills/adaptive-orchestrate/SKILL.md").read_text(
+def test_codex_and_claude_plugins_share_all_skill_contracts():
+    shared = sorted((HUBS / "shared/skills").glob("*/SKILL.md"))
+    assert {path.parent.name for path in shared} == {"adaptive-orchestrate", "document-write"}
+    for canonical_path in shared:
+        canonical = canonical_path.read_text(encoding="utf-8")
+        for hub in ("codex", "claude-code"):
+            installed = (
+                HUBS / hub / "skills" / canonical_path.parent.name / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            assert installed == canonical
+
+    adaptive = (HUBS / "shared/skills/adaptive-orchestrate/SKILL.md").read_text(
         encoding="utf-8"
     )
-    for hub in ("codex", "claude-code"):
-        installed = (HUBS / hub / "skills/adaptive-orchestrate/SKILL.md").read_text(
-            encoding="utf-8"
-        )
-        assert installed == canonical
-        assert 'workflow_id="adaptive"' in installed
-        assert "agent_hub_plan_workflow" in installed
-        assert "agent_hub_run_workflow" in installed
-        assert "순서를\n직접 하드코딩하지 않는다" in installed
+    assert 'workflow_id="adaptive"' in adaptive
+    assert "agent_hub_plan_workflow" in adaptive
+    assert "agent_hub_run_workflow" in adaptive
+    assert "순서를\n직접 하드코딩하지 않는다" in adaptive
+
+    document = (HUBS / "shared/skills/document-write/SKILL.md").read_text(encoding="utf-8")
+    assert "quality_gate.passed" in document
+    assert "user_facing=true" in document
+    assert "독백체" in document
 
 
 def test_hub_plugins_register_only_unified_agent_hub_and_memory():
@@ -39,8 +49,8 @@ def test_hub_plugins_register_only_unified_agent_hub_and_memory():
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():
     codex = _json(HUBS / "codex/.codex-plugin/plugin.json")
     claude = _json(HUBS / "claude-code/.claude-plugin/plugin.json")
-    assert codex["version"] == "1.3.0"
-    assert claude["version"] == "1.3.0"
+    assert codex["version"] == "1.3.1"
+    assert claude["version"] == "1.3.1"
     assert codex["mcpServers"] == "./.mcp.json"
     assert "adaptive" in codex["description"].lower()
     assert "adaptive" in claude["description"].lower()
@@ -58,4 +68,4 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["name"] == "agent-hub"
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
-    assert claude["plugins"][0]["version"] == "1.3.0"
+    assert claude["plugins"][0]["version"] == "1.3.1"

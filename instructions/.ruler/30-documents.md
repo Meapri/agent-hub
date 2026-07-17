@@ -4,6 +4,7 @@
 - 코드베이스 조사가 필요한 복잡한 문서 작업은 Agent Hub의 adaptive 계획에서 `inspect_codebase`를 사용한다. 범위가 넓거나 구조가 불명확하면 `investigation_depth=deep`, `reasoning_effort=high`를 우선 검토한다. provider 순서와 병렬 실행 여부는 planner가 의존 관계에 따라 정하게 둔다.
 - `inspect_codebase` 단계에는 확인해야 할 하위 시스템, 파일명, 명령이나 심볼을 구체적으로 적는다. `deep` 조사는 저장소를 넓게 훑은 뒤 관련성이 높은 핵심 파일의 전문 또는 관련 함수 구간을 줄 번호와 함께 다시 읽는다. `partial`로 표시된 파일의 보이지 않는 부분은 근거로 삼지 않는다.
 - 최종 문서는 조사 결과와 결정적으로 수집한 fact pack에 있는 내용만 사실로 쓴다. 확인하지 못한 기능, 명령, 환경변수, 버전, 테스트 결과는 추측해 채우지 않는다.
-- 자연스러운 한국어로 쓴다. 영어 원문을 문장 구조까지 옮긴 표현, 지나치게 격식적인 선언, "먼저 살펴보겠습니다" 같은 작업 중계 문장은 빼고 사용자가 실제로 알아야 할 내용을 바로 설명한다.
+- 한국 개발자가 다른 사람에게 설명하듯 자연스럽고 단정한 존댓말로 쓴다. 영어 원문을 문장 구조까지 옮긴 표현, 지나치게 격식적인 선언, "먼저 살펴보겠습니다" 같은 작업 중계 문장은 빼고 사용자가 실제로 알아야 할 내용을 바로 설명한다.
+- README 본문을 `~한다`, `~이다`로 계속 끝내는 독백체는 피한다. 공식 명칭과 코드 식별자는 유지하되 `콕핏`, `substrate`, `conductor`, `provider leaf` 같은 내부 용어는 쉬운 말로 바꾸거나 처음 나올 때 역할을 설명한다.
 - 표현을 그럴듯하게 만드는 일보다 빠진 기능·제약·설치 단계가 없는지 확인하는 일을 먼저 한다. 짧게 줄이더라도 중요한 사실과 실행 가능한 명령은 남긴다.
-- README나 한국어 장기 문서를 바꾼 뒤에는 `./.venv/bin/python -m orchestrate_codex.document_quality <문서 경로>`와 관련 pytest, `./scripts/check-sync.sh`를 실행한다.
+- README나 한국어 장기 문서를 바꾼 뒤에는 `agent_hub_verify`의 `user_facing=true` 검증과 `./.venv/bin/python -m orchestrate_codex.document_quality <문서 경로>`, 관련 pytest, `./scripts/check-sync.sh`를 실행한다. 품질 검사를 통과하지 못한 결과를 완성본으로 저장하지 않는다.

@@ -2,6 +2,32 @@
 
 기준일: 2026-07-17
 
+## 1.3.1 문서 문체 규칙 강제
+
+다른 작업에서 예전 `Chanwoo-act/agent-hub` 체크아웃의 README를 다시 작성하면서 최신 문체 규칙이 적용되지
+않는 문제를 재현했다. 최신 MCP는 `Meapri/agent-hub`의 `agent-hub-mono`에서 실행됐지만, 작성 대상 저장소의
+규칙은 예전 `AGENTS.md`에서 읽었다. 여기에 직접 쓰기 도구가 자연스러운 한국어 검사기를 호출하지 않고,
+workflow 검증도 `korean_style` 경고를 자동 재작성 조건으로 보지 않는 문제가 겹쳤다.
+
+예전 체크아웃은 로컬 커밋 3개를 잃지 않도록 `/Users/naen/Git/agent-hub-legacy-chanwoo-20260717`과
+`/Users/naen/Git/agent-hub-legacy-chanwoo-20260717.bundle`에 보존했다. 기존 `/Users/naen/Git/agent-hub`
+경로는 `agent-hub-mono`를 가리키므로, 예전 경로로 새 작업을 열어도 Meapri 정본을 사용한다.
+
+다음 경로를 함께 고쳤다.
+
+- `agent_hub_write`가 모든 결과를 로컬 품질 검사에 통과시킨 뒤 반환
+- 실패한 문서는 기본 1회, 최대 2회까지 전체를 다시 작성하고 남은 문제가 있으면 실패로 반환
+- `quality_gate`에 통과 여부, 검사기 버전, 재작성 횟수, 정책 파일 기록
+- `agent_hub_verify`의 내부 `ok=false`를 MCP 실패 신호로 전달
+- workflow가 `korean_style`과 잘림 경고를 재작성 사유로 사용하고, 재작성 뒤에도 실패하면 run 중단
+- README용 자연스러운 존댓말 프로필과 Codex·Claude Code 공용 `document-write` 스킬 추가
+- 공용 스킬 동기화 스크립트를 특정 스킬 하나가 아니라 전체 스킬에 적용
+
+예전 README는 새 검사에서 설명 없는 `콕핏`, `substrate`, `conductor`, `provider leaf`, `실행 패킷`을 찾아
+실패했다. 현재 Meapri README는 같은 검사를 통과했다. 자동 검사는 Ruff, pytest
+`275 passed, 11 skipped`, Ruler sync, Hub plugin sync, Phase 1 fixture, README 문체 검사와
+`git diff --check`까지 통과했다. 버전은 `1.3.1`이다.
+
 ## 1.3 코드 조사·능동 추론·문서 품질 통합
 
 ### 재시작 뒤 심층 검증과 조사 방식 보강

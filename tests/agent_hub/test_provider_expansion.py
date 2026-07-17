@@ -31,6 +31,9 @@ def test_public_schemas_expose_real_provider_capabilities():
     assert "provider" not in _spec("agent_hub_release_snapshot")["inputSchema"]["properties"]
     assert capabilities.supports("claude", "vision")
     assert not capabilities.supports("claude", "image_generation")
+    assert _spec("agent_hub_write")["inputSchema"]["properties"][
+        "quality_rewrite_attempts"
+    ]["default"] == 1
 
 
 def test_write_routes_common_prompt_to_claude(monkeypatch):
@@ -50,6 +53,89 @@ def test_write_routes_common_prompt_to_claude(monkeypatch):
     assert result["text"] == "다듬은 글"
     assert seen["provider"] == "claude"
     assert "Source text:\n초안" in seen["arguments"]["prompt"]
+
+
+def test_readme_write_rewrites_failed_korean_quality_once(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_chat(provider, arguments):
+        calls.append(arguments["prompt"])
+        text = (
+            "# 안내\n\n이전 이름은 지원하지 않습니다."
+            if len(calls) == 1
+            else "# 안내\n\n새 이름만 사용할 수 있습니다. 설치 방법은 아래에서 확인하세요."
+        )
+        return {"success": True, "text": text, "model": "claude-test", "warnings": []}
+
+    monkeypatch.setattr(operations, "_chat_raw", fake_chat)
+    result = operations.dispatch_tool(
+        "agent_hub_write",
+        {
+            "provider": "claude",
+            "task": "readme",
+            "instruction": "간단한 안내를 작성해 주세요.",
+            "project_root": str(tmp_path),
+        },
+    )
+
+    assert result["success"] is True
+    assert len(calls) == 2
+    assert result["data"]["quality_gate"] == {
+        "applied": True,
+        "passed": True,
+        "checker_version": "2",
+        "rewrite_attempts": 1,
+        "warnings": [],
+        "policy_source": None,
+    }
+    assert "quality_rewrite_applied:1" in result["warnings"]
+    assert "Draft to replace" in calls[1]
+
+
+def test_readme_write_fails_closed_when_rewrite_still_fails(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_chat(provider, arguments):
+        calls.append(arguments["prompt"])
+        return {
+            "success": True,
+            "text": "# 안내\n\n이전 이름은 지원하지 않습니다.",
+            "model": "claude-test",
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(operations, "_chat_raw", fake_chat)
+    result = operations.dispatch_tool(
+        "agent_hub_write",
+        {
+            "provider": "claude",
+            "task": "readme",
+            "instruction": "안내를 작성해 주세요.",
+            "project_root": str(tmp_path),
+            "quality_rewrite_attempts": 1,
+        },
+    )
+
+    assert len(calls) == 2
+    assert result["success"] is False
+    assert result["error"]["type"] == "document_quality_failed"
+    assert result["data"]["quality_gate"]["passed"] is False
+
+
+def test_verify_tool_exposes_failed_quality_as_operation_failure(tmp_path):
+    result = operations.dispatch_tool(
+        "agent_hub_verify",
+        {
+            "text": "# 안내\n\n이전 이름은 지원하지 않습니다.",
+            "project_root": str(tmp_path),
+            "doc_class": "durable",
+            "user_facing": True,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["data"]["ok"] is False
+    assert result["data"]["checker_version"] == "2"
 
 
 def test_compare_defaults_to_three_providers(monkeypatch):

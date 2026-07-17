@@ -12,6 +12,9 @@ import re
 from typing import Iterable, Sequence
 
 
+CHECKER_VERSION = "2"
+
+
 TRANSLATION_LIKE_PHRASES = (
     "이전 이름은 지원하지 않습니다",
     "끝난 것입니다",
@@ -31,8 +34,20 @@ PROCESS_NARRATION_PATTERNS = (
     re.compile(r"(?:이 문서|이 글)에서는.{0,40}(?:살펴봅니다|알아봅니다)"),
 )
 
+USER_FACING_JARGON = (
+    "콕핏",
+    "substrate",
+    "conductor",
+    "provider leaf",
+    "실행 패킷",
+)
 
-def review_natural_korean(text: str) -> list[str]:
+PLAIN_NARRATIVE_ENDINGS = re.compile(
+    r"(?:한다|이다|된다|있다|없다|않는다|쓴다|본다|둔다|만든다|남긴다|처리한다|사용한다)[.!?]?$"
+)
+
+
+def review_natural_korean(text: str, *, user_facing: bool = False) -> list[str]:
     """Return stable warning codes for known translationese and process narration."""
 
     warnings: list[str] = []
@@ -43,6 +58,22 @@ def review_natural_korean(text: str) -> list[str]:
         match = pattern.search(text)
         if match:
             warnings.append(f"korean_style:process_narration:{index}:{match.group(0)}")
+    if user_facing:
+        for phrase in USER_FACING_JARGON:
+            if phrase.lower() in text.lower():
+                warnings.append(f"korean_style:unexplained_jargon:{phrase}")
+        prose_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+            and not line.lstrip().startswith(("#", "-", "*", ">", "```", "|"))
+            and "|" not in line
+        ]
+        plain_lines = [line for line in prose_lines if PLAIN_NARRATIVE_ENDINGS.search(line)]
+        if len(plain_lines) >= 3 and len(plain_lines) / max(len(prose_lines), 1) >= 0.3:
+            warnings.append(
+                f"korean_style:declarative_monologue_density:{len(plain_lines)}/{len(prose_lines)}"
+            )
     return warnings
 
 
@@ -54,7 +85,13 @@ def review_paths(paths: Iterable[Path]) -> list[str]:
         except OSError as exc:
             findings.append(f"{path}:read_error:{exc}")
             continue
-        findings.extend(f"{path}:{warning}" for warning in review_natural_korean(text))
+        findings.extend(
+            f"{path}:{warning}"
+            for warning in review_natural_korean(
+                text,
+                user_facing=path.name.lower() == "readme.md",
+            )
+        )
     return findings
 
 

@@ -519,6 +519,10 @@ def _run_local_step(state: Dict[str, Any], step: Dict[str, Any]) -> None:
                 text,
                 doc_class=str(state.get("doc_class") or "durable"),
                 fact_pack=artifacts.get("facts") if isinstance(artifacts.get("facts"), dict) else None,
+                user_facing=(
+                    state.get("recipe_id") == "durable_readme"
+                    or (state.get("user_args") or {}).get("task") == "readme"
+                ),
             )
             step["status"] = "completed"
             step["result_text"] = result.get("text") or ""
@@ -526,7 +530,16 @@ def _run_local_step(state: Dict[str, Any], step: Dict[str, Any]) -> None:
             if result.get("warnings"):
                 state.setdefault("warnings", [])
                 state["warnings"].extend(result["warnings"])
-            _maybe_schedule_revision(state, step, result.get("warnings") or [])
+            revision_scheduled = _maybe_schedule_revision(
+                state,
+                step,
+                result.get("warnings") or [],
+            )
+            if not result.get("ok") and not revision_scheduled:
+                step["status"] = "failed"
+                step["error"] = "document_quality_failed: " + "; ".join(
+                    str(item) for item in result.get("warnings") or []
+                )
             return
         step["status"] = "completed"
         step["result_text"] = ""
@@ -536,23 +549,34 @@ def _run_local_step(state: Dict[str, Any], step: Dict[str, Any]) -> None:
 
 
 # Warning prefixes worth re-drafting for (vs. purely informational ones).
-_ACTIONABLE_WARNINGS = ("recency_language", "tool_not_in_fact_pack", "git_internals")
+_ACTIONABLE_WARNINGS = (
+    "recency_language",
+    "tool_not_in_fact_pack",
+    "git_internals",
+    "korean_style",
+    "unclosed_code_fence",
+    "truncated",
+)
 DEFAULT_REVISION_BUDGET = 1
 
 
-def _maybe_schedule_revision(state: Dict[str, Any], verify_step: Dict[str, Any], warnings: List[str]) -> None:
+def _maybe_schedule_revision(
+    state: Dict[str, Any],
+    verify_step: Dict[str, Any],
+    warnings: List[str],
+) -> bool:
     """Turn verify from advisory into a control loop: on actionable warnings, rewind
     to the draft stage with correction notes, up to a bounded revision budget."""
     actionable = [w for w in warnings if w.startswith(_ACTIONABLE_WARNINGS)]
     if not actionable:
-        return
+        return False
     budget = int(state.get("revision_budget", DEFAULT_REVISION_BUDGET))
     used = int(state.get("revisions", 0))
     if used >= budget:
-        return
+        return False
     draft_idx = next((i for i, s in enumerate(state["steps"]) if s.get("id") == "draft"), None)
     if draft_idx is None:
-        return
+        return False
     state["revisions"] = used + 1
     draft = state["steps"][draft_idx]
     draft["status"] = "pending"
@@ -560,6 +584,7 @@ def _maybe_schedule_revision(state: Dict[str, Any], verify_step: Dict[str, Any],
     draft["revise_notes"] = actionable
     verify_step["status"] = "pending"  # re-verify the revised draft
     state["_revise_to"] = draft_idx
+    return True
 
 
 def _advance_cursor(state: Dict[str, Any]) -> None:

@@ -51,6 +51,7 @@ def verify_text(
     *,
     doc_class: str = "durable",
     fact_pack: Optional[Dict[str, Any]] = None,
+    user_facing: bool = False,
 ) -> Dict[str, Any]:
     warnings: List[str] = []
     body = text or ""
@@ -63,7 +64,9 @@ def verify_text(
             if re.search(pat, body, re.I):
                 warnings.append(f"recency_language:{pat}")
         if re.search(r"[가-힣]", body):
-            warnings.extend(document_quality.review_natural_korean(body))
+            warnings.extend(
+                document_quality.review_natural_korean(body, user_facing=user_facing)
+            )
     if doc_class == "durable":
         if re.search(r"\b(git log|diff --stat|HEAD~)\b", body, re.I):
             warnings.append("git_internals_in_durable_doc")
@@ -92,6 +95,7 @@ def verify_text(
         "ok": not any(w.startswith(blocking) for w in warnings),
         "warnings": warnings,
         "warning_count": len(warnings),
+        "checker_version": document_quality.CHECKER_VERSION,
         "text": (
             "verify ok"
             if not warnings
@@ -112,7 +116,7 @@ def _completeness_warnings(body: str) -> List[str]:
         return out
     if text.count("```") % 2 == 1:
         out.append("unclosed_code_fence")
-    terminal = ".!?:)]`\"'”』」…"
+    terminal = ".!?:)]}`\"'”』」…"
     # A trailing heading with no body, or a short unpunctuated fragment under it = cut section.
     headings = [m.start() for m in re.finditer(r"(?m)^#{1,6}\s", text)]
     if headings:

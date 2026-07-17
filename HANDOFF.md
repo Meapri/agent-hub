@@ -11,7 +11,31 @@
 
 - **현재 단계**
 
-  **[2026-07-17 코드 조사·능동 추론·자연스러운 문서 작성 통합 — 이 블록이 최신]**
+  **[2026-07-17 문서 문체 규칙 강제 — 이 블록이 최신]**
+
+  README 문체 규칙이 다른 세션에서 빠지는 원인을 확인했다. 그 세션은 최신 `agent-hub-mono`가 아니라
+  원격이 `Chanwoo-act/agent-hub`인 예전 `/Users/naen/Git/agent-hub` 체크아웃에서 작업했다. 이 체크아웃은
+  `/Users/naen/Git/agent-hub-legacy-chanwoo-20260717`과 같은 이름의 `.bundle`로 보존했고, 원래 경로는
+  `agent-hub-mono`를 가리키는 symlink로 바꿨다. 최신 저장소의
+  한국어 규칙은 예전 체크아웃의 `AGENTS.md`에 없었고, MCP 직접 쓰기 경로도 문체 검사를 자동 실행하지 않았다.
+
+  `agent_hub_write`는 이제 로컬 문서 품질 검사를 반드시 거친다. 실패하면 기본 한 번 전체 문서를 다시 쓰고,
+  그래도 통과하지 못하면 `success=false`와 `document_quality_failed`를 반환한다. 응답의 `quality_gate`에는
+  검사 적용·통과 여부, 검사기 버전, 재작성 횟수와 정책 출처가 남는다. `agent_hub_verify`도 내부 실패를 MCP
+  성공으로 감싸지 않는다. 고정 workflow는 `korean_style`과 잘림 경고를 자동 재작성 사유로 사용하며,
+  재작성 횟수를 다 쓴 뒤에는 run을 실패로 끝낸다.
+
+  README 기본 프로필은 자연스러운 존댓말로 바꿨고, 독백체와 설명 없는 내부 용어를 확인하는 검사를 추가했다.
+  Codex와 Claude Code에는 같은 `document-write` 스킬을 배포한다. 예전 README는 새 검사에서 실패했고 현재
+  Meapri README는 통과했다. Ruff, pytest `275 passed, 11 skipped`, Ruler·Hub skill sync, Phase 1 fixture,
+  README 검사와 diff-check가 모두 통과했다. 버전은 `1.3.1`이다.
+
+  **다음 한 걸음:** 1.3.1 플러그인을 다시 설치한 뒤 새 Codex 작업에서 `document-write` 스킬과
+  `quality_gate`가 로드됐는지 확인한다.
+
+  ---
+
+  **[2026-07-17 코드 조사·능동 추론·자연스러운 문서 작성 통합 — 이전 기록]**
 
   Codex 재시작 뒤 1.3 live workflow를 다시 돌렸다. Opus 4.8 planner가 deep/high 조사, Claude·Gemini 병렬
   평가, 세 provider Consistency Gate, Claude 최종 정리의 5단계 DAG를 만들었고 4 wave로 완료했다. 세 모델은
