@@ -467,6 +467,31 @@ def test_gather_durable_facts(tmp_path):
     assert "DURABLE FACT PACK" in facts["text"]
 
 
+def test_durable_manifest_includes_non_ignored_untracked_files(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "new_runtime.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("local\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", ".gitignore", "tracked.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    facts = gather.gather_durable_facts(tmp_path)
+
+    assert facts["repository_manifest_complete"] is True
+    assert set(facts["repository_files"]) == {
+        ".gitignore",
+        "new_runtime.py",
+        "tracked.py",
+    }
+
+
 def test_deep_code_context_covers_interfaces_tests_and_git_state(tmp_path):
     import subprocess
 

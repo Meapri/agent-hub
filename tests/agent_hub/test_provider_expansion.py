@@ -83,7 +83,7 @@ def test_readme_write_rewrites_failed_korean_quality_once(tmp_path, monkeypatch)
     assert result["data"]["quality_gate"] == {
         "applied": True,
         "passed": True,
-        "checker_version": "2",
+        "checker_version": "3",
         "rewrite_attempts": 1,
         "warnings": [],
         "policy_source": None,
@@ -122,6 +122,96 @@ def test_readme_write_fails_closed_when_rewrite_still_fails(tmp_path, monkeypatc
     assert result["data"]["quality_gate"]["passed"] is False
 
 
+@pytest.mark.parametrize(
+    ("draft", "warning_prefix"),
+    [
+        (
+            "# Setup\n\n[설치 버전 확인 필요 — placeholder]\n",
+            "placeholder_in_final_document:",
+        ),
+        (
+            "# Setup\n\nTODO: add the real install command later.\n",
+            "placeholder_in_final_document:",
+        ),
+        (
+            "# Layout\n\nUse `src/missing_runtime.py` to start the service.\n",
+            "repository_path_not_found:src/missing_runtime.py",
+        ),
+        (
+            "# Layout\n\n```text\nrepo/\n├── src/\n│   └── ghost.py\n```\n",
+            "repository_path_not_found:src/ghost.py",
+        ),
+    ],
+)
+def test_readme_quality_blocks_placeholders_and_missing_repository_paths(
+    tmp_path, monkeypatch, draft, warning_prefix
+):
+    (tmp_path / "README.md").write_text("old\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real_runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        operations,
+        "_chat_raw",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "text": draft,
+            "model": "claude-test",
+            "warnings": [],
+        },
+    )
+    result = operations.dispatch_tool(
+        "agent_hub_write",
+        {
+            "provider": "claude",
+            "task": "readme",
+            "instruction": "Write a final README.",
+            "project_root": str(tmp_path),
+            "quality_rewrite_attempts": 0,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["type"] == "document_quality_failed"
+    assert any(
+        warning.startswith(warning_prefix)
+        for warning in result["data"]["quality_gate"]["warnings"]
+    )
+
+
+def test_readme_quality_accepts_existing_repository_path(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        operations,
+        "_chat_raw",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "text": (
+                "# Setup\n\nRun `src/runtime.py` after configuring "
+                "`.gemini/settings.json`.\n"
+            ),
+            "model": "claude-test",
+            "warnings": [],
+        },
+    )
+
+    result = operations.dispatch_tool(
+        "agent_hub_write",
+        {
+            "provider": "claude",
+            "task": "readme",
+            "instruction": "Write a final README.",
+            "project_root": str(tmp_path),
+            "quality_rewrite_attempts": 0,
+        },
+    )
+
+    assert result["success"] is True
+
+
 def test_verify_tool_exposes_failed_quality_as_operation_failure(tmp_path):
     result = operations.dispatch_tool(
         "agent_hub_verify",
@@ -135,7 +225,7 @@ def test_verify_tool_exposes_failed_quality_as_operation_failure(tmp_path):
 
     assert result["success"] is False
     assert result["data"]["ok"] is False
-    assert result["data"]["checker_version"] == "2"
+    assert result["data"]["checker_version"] == "3"
 
 
 def test_compare_defaults_to_three_providers(monkeypatch):

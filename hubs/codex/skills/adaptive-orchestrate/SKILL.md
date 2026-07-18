@@ -27,11 +27,16 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
    핵심 파일이 `complete`인지 `partial`인지, 필요한 함수와 줄 범위가 실제 근거에 들어왔는지도 본다.
    로컬 validator가 거부한 capability나 순환 의존성을 호스트가 임의로 우회하지 않는다.
 5. 계획 검토만 요청한 경우 여기서 멈춘다. 실행까지 요청받았다면 검토된 `plan`을 그대로
-   `agent_hub_run_workflow`에 전달한다. `max_concurrency`와 `max_leaf_calls`는 작업 규모에 맞게 제한한다.
+   짧고 wave가 적은 plan은 `agent_hub_run_workflow`에 전달한다. `max_concurrency`, `max_leaf_calls`,
+   `workflow_timeout`은 작업 규모와 MCP 클라이언트의 호출 제한 안에서 정한다. dependency wave가 여러 개인
+   긴 plan은 검토한 plan을 `agent_hub_start_workflow`에 넘기고, 반환된 `run_id`로
+   `agent_hub_continue_workflow`를 반복한다. continue는 기본 한 wave를 실행하고 상태를 파일에 저장한다.
 6. 실행기는 현재 dependency frontier의 ready step을 병렬로 호출한다. 배열 순서나 provider 이름 순서를
    작업 순서로 해석하지 않는다.
 7. `human_review=true`, `consistency_gate_human_review`, 실패 step 또는 blocked step이 있으면 성공으로
-   포장하지 않는다. 합의된 내용과 이견, 미실행 단계를 사용자에게 분리해 보여 준다.
+   포장하지 않는다. end-to-end run의 `timed_out`과 `workflow_timeout_exceeded`도 완성은 아니지만,
+   `resumable=true`와 `run_id`가 있으면 완료된 앞 단계를 버리지 말고 continue로 이어간다. 재개 상태가
+   없을 때만 새 plan을 만든다. 합의된 내용과 이견, 미실행 단계를 사용자에게 분리해 보여 준다.
 8. 최종 보고에는 planner provider/model, `plan_sha256`, `policy_sha256`, 실행 wave, 실제 사용 provider,
    단계별 조사 깊이·추론 강도, 검증 결과를 남긴다.
 

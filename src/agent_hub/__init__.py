@@ -8,4 +8,4 @@ one server. Later phases dedupe shared infra into `agent_hub.core` and turn each
 package into a thin `agent_hub.providers` adapter without changing tool names.
 """
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"

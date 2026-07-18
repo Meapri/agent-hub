@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "1.3.1"
+version = "1.3.2"
 description = "Unified personal multi-model coding hub: instruction consistency, cross-harness handoff, shared memory, and the orchestrate-codex conductor + provider leaf model-access stack in one project."
 readme = "README.md"
 requires-python = ">=3.10"

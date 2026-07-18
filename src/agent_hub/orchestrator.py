@@ -6,6 +6,7 @@ from graphlib import CycleError, TopologicalSorter
 from hashlib import sha256
 import json
 import re
+import time
 from typing import Any, Callable, Dict, List, Mapping, Sequence
 
 from agent_hub import capabilities, consistency
@@ -333,20 +334,44 @@ def execute_plan(
     invoke: StepInvoker,
     max_concurrency: int = 3,
     max_calls: int = 24,
+    max_elapsed_seconds: float | None = None,
+    initial_results: Mapping[str, Mapping[str, Any]] | None = None,
+    initial_waves: Sequence[Mapping[str, Any]] | None = None,
+    initial_call_count: int = 0,
+    max_waves: int | None = None,
 ) -> Dict[str, Any]:
-    """Execute every dependency-ready frontier concurrently; provider order is not a workflow."""
+    """Execute dependency-ready frontiers, optionally resuming a prior slice."""
 
     normalized = validate_plan(plan, max_calls=max_calls)
     steps = {step["id"]: step for step in normalized["steps"]}
-    pending = set(steps)
-    results: Dict[str, Dict[str, Any]] = {}
-    waves: List[Dict[str, Any]] = []
-    call_count = 0
+    results: Dict[str, Dict[str, Any]] = {
+        str(step_id): dict(result)
+        for step_id, result in (initial_results or {}).items()
+        if str(step_id) in steps
+        and isinstance(result, Mapping)
+        and bool(result.get("success"))
+    }
+    pending = set(steps) - set(results)
+    waves: List[Dict[str, Any]] = [dict(wave) for wave in (initial_waves or [])]
+    call_count = max(0, int(initial_call_count))
+    slice_wave_count = 0
+    started = time.monotonic()
+
+    def timed_out() -> bool:
+        return bool(
+            max_elapsed_seconds is not None
+            and time.monotonic() - started >= float(max_elapsed_seconds)
+        )
 
     def run_step(step: Mapping[str, Any]) -> Dict[str, Any]:
         dependency_results = {dep: results[dep] for dep in step["depends_on"]}
         attempts: List[Dict[str, Any]] = []
         for provider in [step["provider"], *step["fallback_providers"]]:
+            if timed_out():
+                attempts.append(
+                    {"provider": provider, "success": False, "error": "workflow_timeout_exceeded"}
+                )
+                break
             try:
                 response = invoke(step, provider, dependency_results)
                 ok = bool(response.get("success", not response.get("error")))
@@ -376,6 +401,29 @@ def execute_plan(
         }
 
     while pending:
+        if max_waves is not None and slice_wave_count >= max(1, int(max_waves)):
+            return {
+                "success": True,
+                "status": "paused",
+                "text": "Adaptive workflow slice completed; continue the persisted run.",
+                "pending_steps": sorted(pending),
+                "plan": normalized,
+                "results": results,
+                "waves": waves,
+                "leaf_calls": call_count,
+            }
+        if timed_out():
+            return {
+                "success": False,
+                "status": "timed_out",
+                "text": "Adaptive workflow exhausted its end-to-end time budget.",
+                "error": "workflow_timeout_exceeded",
+                "blocked_steps": sorted(pending),
+                "plan": normalized,
+                "results": results,
+                "waves": waves,
+                "leaf_calls": call_count,
+            }
         ready = [
             step_id
             for step_id in pending
@@ -422,13 +470,27 @@ def execute_plan(
             if not result.get("success"):
                 failed.append(step_id)
         waves.append({"ready_steps": ready, "results": wave_results})
+        slice_wave_count += 1
         if failed:
             blocked = sorted(pending)
+            timeout_failure = any(
+                any(
+                    attempt.get("error") == "workflow_timeout_exceeded"
+                    for attempt in results[step_id].get("attempts") or []
+                )
+                for step_id in failed
+            )
             return {
                 "success": False,
-                "status": "failed",
-                "text": f"Adaptive workflow failed at: {', '.join(failed)}",
-                "error": "adaptive_step_failed",
+                "status": "timed_out" if timeout_failure else "failed",
+                "text": (
+                    "Adaptive workflow exhausted its end-to-end time budget."
+                    if timeout_failure
+                    else f"Adaptive workflow failed at: {', '.join(failed)}"
+                ),
+                "error": (
+                    "workflow_timeout_exceeded" if timeout_failure else "adaptive_step_failed"
+                ),
                 "failed_steps": failed,
                 "blocked_steps": blocked,
                 "plan": normalized,

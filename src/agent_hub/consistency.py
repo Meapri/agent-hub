@@ -114,6 +114,9 @@ def prepare_provider_call(arguments: Mapping[str, Any]) -> tuple[Dict[str, Any],
     if policy["loaded"]:
         existing = str(call_args.get("system") or "").strip()
         policy_block = (
+            "The following canonical policy governs behavior and process. It is not repository "
+            "evidence. Product facts inside it must still be verified against supplied source or "
+            "a deterministic fact pack; when they conflict, current repository evidence wins.\n"
             f'<agent-hub-canonical-policy sha256="{policy["sha256"]}">\n'
             f'{policy["text"]}</agent-hub-canonical-policy>'
         )

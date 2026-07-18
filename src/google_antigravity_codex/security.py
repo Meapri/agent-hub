@@ -179,10 +179,17 @@ def resolve_allowed_path(
     allow_sensitive: bool = False,
     explicit_root: str | Path | None = None,
 ) -> Path:
-    path = Path(value).expanduser().resolve()
+    requested = Path(value).expanduser()
     roots = allowed_roots()
     if explicit_root is not None:
-        roots.append(explicit_workspace_root(explicit_root))
+        explicit = explicit_workspace_root(explicit_root)
+        roots.append(explicit)
+        # MCP servers are commonly started outside the user's repository.  A
+        # relative path paired with a visible workspace_root must therefore be
+        # resolved from that root, not from the long-lived server process cwd.
+        path = (explicit / requested).resolve() if not requested.is_absolute() else requested.resolve()
+    else:
+        path = requested.resolve()
     roots = list(dict.fromkeys(roots))
     if not _is_within(path, roots):
         root_text = ", ".join(str(root) for root in roots)

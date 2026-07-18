@@ -1,6 +1,75 @@
 # Agent Hub 검증 기록
 
-기준일: 2026-07-17
+기준일: 2026-07-18
+
+## README 전면 재작성과 resumable workflow 실검증
+
+기존 문장을 다듬는 방식이 아니라 현재 코드·manifest·테스트를 다시 조사해 `README.md`를 처음부터
+작성했다. 제품의 역할, 지원 provider, 설치, 로그인, Codex·Claude Code 연결, 공개 도구 26개,
+고정·adaptive workflow, timeout과 재개, Consistency Gate, handoff·memory, 보안, 검증 명령 순으로
+처음 사용하는 사람도 따라갈 수 있게 구성했다. 공개 schema와 실제 기본값을 대조해 최상위 workflow
+timeout은 실패로 반환되지만 `run_id`로 재개할 수 있다는 점, 상태 저장 위치와 환경 변수, 고정 workflow
+4개의 실제 ID를 명시했다.
+
+작성에는 설치된 Agent Hub의 resumable adaptive 경로를 사용했다. live status는 Claude·Grok·Gemini
+`3/3 ready`였고, Claude Opus 4.8 planner가 아래 3단계 DAG를 만들었다.
+
+1. Claude가 저장소를 `deep`·`high`로 조사
+2. Gemini가 조사 결과와 기존 README를 `deep`·`high`로 검증
+3. Claude가 앞선 두 결과를 바탕으로 README 초안을 작성
+
+plan SHA는 `39bb66effcb7bf80f0ecf62a70fcc4e45d39ed5c386f204775bad3dc79b467ad`, run ID는
+`350b7c2057e4`다. 첫 Opus 조사 호출은 약 281초 뒤 provider timeout으로 중단됐고 완료된 step은 없었다.
+같은 run state에서 조사 모델만 Claude Sonnet 5, `max_tokens=16000`으로 바꿔 재개했으며 약 221초 뒤
+조사를 마쳤다. Gemini 검증은 약 50초, 다시 Opus 4.8로 돌린 최종 작성은 약 62초가 걸렸다. 최종 상태는
+`completed`, 기록된 wave는 timeout 1회를 포함해 4개, checker v3 경고는 0건이었다. 즉 timeout 뒤 새
+계획을 만들지 않고 같은 `run_id`로 이어지는 경로도 실제로 확인했다.
+
+이 실행에서 공통 결함 두 가지를 추가로 고쳤다.
+
+- `.gemini/settings.json` 같은 숨김 경로를 `.lstrip("./")`로 정규화하면서 첫 점까지 지우던 문제를
+  `.removeprefix("./")`로 수정하고 회귀 테스트를 추가
+- 공개 run state를 `continue`에 다시 넘기면 이전 조회 문구 `Run loaded.`가 pause 응답에 남던 문제를
+  상태 저장 전에 제거하고 정확한 pause 안내를 검사
+
+현재 소스를 직접 호출한 `agent_hub_verify`는 README에 대해 `success=true`, checker v3, 경고 0건을
+반환했다. 설치된 MCP 프로세스는 위 두 수정 전에 적재돼 숨김 경로를 계속 경고했으므로, 이를 최신 소스의
+실패로 간주하지 않고 재시작 필요 상태로 기록했다. 자동 검사는 Ruff, pytest `291 passed, 11 skipped`,
+Hub plugin·Ruler sync, Phase 1 fixture, doctor 5개 항목, 릴리스 버전 `1.3.2` 동기화, sdist·wheel build,
+README 문서 품질 검사와 `git diff --check`까지 통과했다. 앱 브라우저의 로컬 `file://` 접근은 보안 정책으로
+차단돼 렌더링 화면 검수는 수행하지 못했다. 이 기록 시점에는 커밋·푸시나 앱 플러그인 재적재를 하지 않았다.
+
+## 1.3.2 문서 사실성·경로·adaptive 시간 예산 보강
+
+실제 저장소 README를 Agent Hub로 다시 쓰는 과정에서 네 가지 공통 결함을 확인했다. 상대 `source_file`은
+사용자가 넘긴 작업 루트가 아니라 장기 실행 중인 MCP 서버의 현재 디렉터리에서 해석됐다. adaptive write는
+작성 목표가 README여도 내부적으로 `custom` task를 강제해 durable 품질 검사를 약하게 적용했다. 기존
+checker는 placeholder와 저장소에 없는 소스 경로를 완성 문서로 통과시켰다. 마지막으로 planner와 여러
+provider 호출의 합계가 MCP 클라이언트 제한을 넘을 때 구조화된 timeout 없이 연결 수준 오류로 끝났다.
+
+수정은 특정 저장소나 파일 이름을 조건문에 넣지 않고 아래 공통 계약으로 구현했다.
+
+- 명시한 `workspace_root` 또는 `project_root`가 있으면 모든 상대 `source_file`을 그 아래에서 해석
+- Git 추적 파일과 ignore되지 않은 새 파일을 담는 제한된 repository manifest를 문서 fact pack과 코드 조사에 공동 사용
+- user-facing durable 문서에서 TODO·TBD·placeholder와 존재하지 않는 저장소 파일 주장을 차단
+- 정책 파일은 행동 규칙이며 제품 사실의 증거가 아니라는 우선순위를 Consistency Gate prompt에 명시
+- adaptive write의 task를 목표 기반으로 추론해 README와 기술 문서가 durable 검사로 들어가게 수정
+- 단일 adaptive 호출의 `workflow_timeout` 기본값을 240초에서 270초, 기본 환경 최대값을 270초에서 290초로 확대
+- MCP 호출 제한·반환 여유·기본 예산을 환경 변수로 설정하고 schema 최대값을 그 계산 결과와 동기화
+- 매 provider timeout을 남은 예산으로 제한해 외부 MCP 호출 상한 전에 상태를 반환
+- adaptive start가 plan과 실행 상태를 파일에 저장하고, continue가 기본 한 dependency wave씩 실행하도록 구현
+- 프로세스 재시작 뒤에도 같은 `run_id`로 결과·wave·호출 횟수를 복원해 실행을 계속
+- end-to-end 시간 초과도 완료된 성공 단계만 보존한 resumable run을 만들고 `run_id`와 next action을 반환
+- plan·run·start·continue의 선택 기준을 공용 스킬에 명시
+
+회귀 테스트에는 명시 루트 기준 상대경로, `project_root` fallback, README task 추론, placeholder, 인라인
+허위 경로, 디렉터리 트리 속 허위 경로, 실제 경로 허용, policy/fact 우선순위, planner 이후 남은 시간에
+따른 provider timeout 제한, wave 사이 전체 timeout, 디스크 기반 두 번의 continue 실행, timeout 결과의
+resume run 변환과 공개 schema를 포함했다.
+
+검증 결과는 Ruff 통과, pytest `291 passed, 11 skipped`, Hub plugin·Ruler sync 통과, Phase 1 fixture 통과,
+README 문서 품질 검사 통과, 릴리스 버전 `1.3.2` 동기화 통과, `git diff --check` clean이다. 이 기록 시점에는
+변경을 커밋·푸시하거나 설치된 앱 플러그인을 다시 적재하지 않았다.
 
 ## 1.3.1 문서 문체 규칙 강제
 

@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
+from agent_hub.core.repository_facts import collect_repository_manifest
+
 
 def _read_json(path: Path) -> Any:
     try:
@@ -65,6 +67,7 @@ def collect_durable_facts(project_root: str | Path) -> Dict[str, Any]:
     version = _version_from_tree(root)
     skills = _list_skills(root)
     tools = _mcp_tools(root)
+    manifest = collect_repository_manifest(root)
     has_license = (root / "LICENSE").is_file() or (root / "LICENSE.md").is_file()
     lines = [
         "DURABLE FACT PACK (product facts only — ignore session diary / recent commits)",
@@ -73,6 +76,13 @@ def collect_durable_facts(project_root: str | Path) -> Dict[str, Any]:
         f"License file present: {has_license}",
         f"Skills: {', '.join(skills) if skills else '[none detected]'}",
         f"MCP tools detected: {', '.join(tools) if tools else '[none detected]'}",
+        "Repository files (deterministic bounded manifest):",
+        "\n".join(manifest["repository_files"]) or "[none detected]",
+        (
+            "Repository manifest complete: "
+            f"{manifest['repository_manifest_complete']} "
+            f"({len(manifest['repository_files'])}/{manifest['repository_manifest_total']})"
+        ),
         "Do not invent tools, env vars, install steps, or features not listed here or in source text.",
         "Forbidden tone: today/just fixed/session work/HTTP debug notes as product docs.",
     ]
@@ -83,5 +93,6 @@ def collect_durable_facts(project_root: str | Path) -> Dict[str, Any]:
         "skills": skills,
         "mcp_tools_detected": tools,
         "has_license": has_license,
+        **manifest,
         "text": "\n".join(lines),
     }

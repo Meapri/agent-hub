@@ -12,7 +12,7 @@ import re
 from typing import Iterable, Sequence
 
 
-CHECKER_VERSION = "2"
+CHECKER_VERSION = "3"
 
 
 TRANSLATION_LIKE_PHRASES = (

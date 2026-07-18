@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent_hub.core.repository_facts import collect_repository_manifest
+
 
 def _run(cmd: List[str], cwd: Path, timeout: float = 20.0) -> str:
     try:
@@ -148,6 +150,7 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
         d.name for d in root.iterdir() if d.is_dir() and (d / "__init__.py").is_file()
     )
     skills = _list_skills(root)
+    manifest = collect_repository_manifest(root)
     has_license = (root / "LICENSE").is_file() or (root / "LICENSE.md").is_file()
     readme = root / "README.md"
     readme_preview = ""
@@ -164,6 +167,7 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
         "install_commands": install_commands,
         "packages": packages,
         "has_license": has_license,
+        **manifest,
         "install_hints": install_commands or [
             f'codex plugin marketplace add "{root}"',
         ],
@@ -183,6 +187,9 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
             install_commands=install_commands,
             has_license=has_license,
             readme_preview=readme_preview,
+            repository_files=manifest["repository_files"],
+            repository_manifest_complete=manifest["repository_manifest_complete"],
+            repository_manifest_total=manifest["repository_manifest_total"],
         ),
     }
     return facts
@@ -198,6 +205,9 @@ def _facts_as_text(
     install_commands: List[str],
     has_license: bool,
     readme_preview: str,
+    repository_files: List[str],
+    repository_manifest_complete: bool,
+    repository_manifest_total: int,
 ) -> str:
     lines = [
         "DURABLE FACT PACK (use only these product facts; ignore session diary)",
@@ -208,6 +218,12 @@ def _facts_as_text(
         f"MCP tools detected: {', '.join(tools) if tools else '[none detected in tree]'}",
         f"CLI commands: {', '.join(cli_commands) if cli_commands else '[none detected]'}",
         f"Install commands: {', '.join(install_commands) if install_commands else '[none detected]'}",
+        "Repository files (deterministic bounded manifest):",
+        "\n".join(repository_files) or "[none detected]",
+        (
+            "Repository manifest complete: "
+            f"{repository_manifest_complete} ({len(repository_files)}/{repository_manifest_total})"
+        ),
         "Do not invent tools, env vars, or install commands not listed here or in source_file.",
     ]
     if readme_preview:

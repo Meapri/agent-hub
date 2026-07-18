@@ -153,11 +153,11 @@ def test_scheduler_uses_fallback_and_fails_closed_before_dependents():
 
 def test_adaptive_plan_uses_llm_then_local_validator(tmp_path, monkeypatch):
     root = _policy_root(tmp_path)
+    captured = {}
 
-    monkeypatch.setattr(
-        operations,
-        "_chat_raw",
-        lambda provider, _arguments: {
+    def fake_chat(provider, arguments):
+        captured.update(arguments)
+        return {
             "success": True,
             "model": f"{provider}-planner",
             "text": json.dumps(_plan()),
@@ -166,8 +166,9 @@ def test_adaptive_plan_uses_llm_then_local_validator(tmp_path, monkeypatch):
                 "policy_sha256": "policy-hash",
                 "request_sha256": "request-hash",
             },
-        },
-    )
+        }
+
+    monkeypatch.setattr(operations, "_chat_raw", fake_chat)
     result = operations.dispatch_tool(
         "agent_hub_plan_workflow",
         {
@@ -175,6 +176,8 @@ def test_adaptive_plan_uses_llm_then_local_validator(tmp_path, monkeypatch):
             "prompt": "Analyze and synthesize",
             "project_root": root,
             "planner_provider": "gemini",
+            "per_call_timeout": 600,
+            "workflow_timeout": 290,
         },
     )
     assert result["success"] is True
@@ -182,6 +185,7 @@ def test_adaptive_plan_uses_llm_then_local_validator(tmp_path, monkeypatch):
     assert result["data"]["plan"]["planner"]["provider"] == "gemini"
     assert result["data"]["plan"]["planner"]["policy_sha256"] == "policy-hash"
     assert result["data"]["plan"]["goal"] == "Analyze and synthesize"
+    assert captured["timeout_sec"] == 280
 
 
 def test_adaptive_planner_cannot_shorten_the_reviewed_goal(tmp_path, monkeypatch):
@@ -274,6 +278,219 @@ def test_adaptive_run_executes_supplied_llm_plan(tmp_path, monkeypatch):
     assert result["text"] == "final"
     assert result["data"]["dynamic"] is True
     assert len(result["data"]["waves"]) == 2
+
+
+def test_adaptive_write_infers_durable_task_from_goal(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+
+    def fake_write(arguments):
+        captured.update(arguments)
+        return operations.envelope(
+            "write",
+            {"success": True, "text": "# README\n\nComplete documentation."},
+            provider="claude",
+        )
+
+    monkeypatch.setattr(operations, "_write", fake_write)
+    result = operations._adaptive_step_call(
+        {
+            "id": "write_readme",
+            "capability": "write",
+            "provider": "claude",
+            "depends_on": ["inspect_repo"],
+            "fallback_providers": [],
+            "instruction": "Write the final document.",
+            "reasoning_effort": "high",
+            "final": True,
+        },
+        "claude",
+        {"inspect_repo": {"success": True, "text": "Evidence"}},
+        args={"project_root": root},
+        goal="Rewrite the repository README from verified evidence.",
+    )
+
+    assert result["success"] is True
+    assert captured["task"] == "auto"
+    built = operations.google_writing.build_prompt(captured)
+    assert built["task"] == "readme"
+    assert built["doc_class"] == "durable"
+
+
+def test_scheduler_fails_with_structured_timeout_before_next_wave(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: now[0])
+    plan = _plan()
+    plan["steps"] = [plan["steps"][0], plan["steps"][2]]
+    plan["steps"][1]["depends_on"] = ["analyze_code"]
+
+    def invoke(step, _provider, _dependencies):
+        now[0] = 10.0
+        return {"success": True, "text": step["id"]}
+
+    result = orchestrator.execute_plan(plan, invoke=invoke, max_elapsed_seconds=5)
+
+    assert result["success"] is False
+    assert result["status"] == "timed_out"
+    assert result["error"] == "workflow_timeout_exceeded"
+    assert result["blocked_steps"] == ["synthesize"]
+
+
+def test_adaptive_run_clamps_each_call_to_remaining_workflow_budget(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+    plan = _plan()
+    plan["steps"] = [plan["steps"][2]]
+    plan["steps"][0]["depends_on"] = []
+
+    def fake_step(step, provider, dependencies, **kwargs):
+        captured.update(kwargs["args"])
+        return {"success": True, "provider": provider, "text": "done", "data": {}}
+
+    monkeypatch.setattr(operations, "_adaptive_step_call", fake_step)
+    result = operations.dispatch_tool(
+        "agent_hub_run_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": plan,
+            "project_root": root,
+            "per_call_timeout": 180,
+            "workflow_timeout": 30,
+        },
+    )
+
+    assert result["success"] is True
+    assert 5 <= captured["per_call_timeout"] <= 30
+    assert result["data"]["workflow_timeout"] == 30
+
+
+def test_adaptive_run_schema_exposes_end_to_end_timeout():
+    spec = next(
+        item for item in operations.tool_definitions() if item["name"] == "agent_hub_run_workflow"
+    )
+    timeout = spec["inputSchema"]["properties"]["workflow_timeout"]
+    assert timeout["default"] == 270
+    assert timeout["maximum"] == 290
+
+
+def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    state_dir = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_dir))
+
+    def fake_step(step, provider, dependencies, **_kwargs):
+        return {
+            "success": True,
+            "provider": provider,
+            "text": "final" if step["final"] else step["id"],
+            "data": {"dependencies": sorted(dependencies)},
+        }
+
+    monkeypatch.setattr(operations, "_adaptive_step_call", fake_step)
+    started = operations.dispatch_tool(
+        "agent_hub_start_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": _plan(),
+            "project_root": root,
+            "workflow_timeout": 290,
+        },
+    )
+
+    assert started["success"] is True
+    assert started["data"]["status"] == "paused"
+    run_id = started["data"]["run_id"]
+    assert (state_dir / f"{run_id}.json").is_file()
+
+    loaded_before_continue = operations.dispatch_tool(
+        "agent_hub_get_run", {"run_id": run_id}
+    )
+    first = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"state": loaded_before_continue["data"]},
+    )
+    assert first["success"] is True
+    assert first["text"] == (
+        "Adaptive workflow paused safely; call continue for the next wave."
+    )
+    assert first["data"]["status"] == "paused"
+    assert set(first["data"]["results"]) == {
+        "analyze_code",
+        "challenge_assumptions",
+    }
+    assert first["data"]["pending_steps"] == ["synthesize"]
+
+    second = operations.dispatch_tool(
+        "agent_hub_continue_workflow", {"run_id": run_id}
+    )
+    assert second["success"] is True
+    assert second["data"]["status"] == "completed"
+    assert second["text"] == "final"
+    loaded = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+    assert loaded["data"]["done"] is True
+    assert loaded["data"]["status"] == "completed"
+
+
+def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
+    specs = {item["name"]: item for item in operations.tool_definitions()}
+    start_props = specs["agent_hub_start_workflow"]["inputSchema"]["properties"]
+    continue_props = specs["agent_hub_continue_workflow"]["inputSchema"]["properties"]
+
+    assert start_props["workflow_timeout"]["default"] == 270
+    assert continue_props["workflow_timeout"]["maximum"] == 290
+    assert continue_props["max_waves_per_call"]["default"] == 1
+
+
+def test_end_to_end_timeout_returns_a_persisted_resume_run(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    state_dir = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_plan",
+        lambda *_args, **_kwargs: {
+            "success": False,
+            "status": "timed_out",
+            "error": "workflow_timeout_exceeded",
+            "text": "budget exhausted",
+            "results": {
+                "analyze_code": {
+                    "success": True,
+                    "provider": "claude",
+                    "text": "evidence",
+                }
+            },
+            "waves": [],
+            "leaf_calls": 1,
+        },
+    )
+
+    result = operations.dispatch_tool(
+        "agent_hub_run_workflow",
+        {"workflow_id": "adaptive", "plan": _plan(), "project_root": root},
+    )
+
+    assert result["success"] is False
+    assert result["data"]["resumable"] is True
+    run_id = result["data"]["run_id"]
+    loaded = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+    assert loaded["data"]["status"] == "paused"
+    assert loaded["data"]["pause_reason"] == "workflow_timeout_exceeded"
+    assert set(loaded["data"]["results"]) == {"analyze_code"}
+
+
+def test_adaptive_run_fails_closed_when_resume_state_cannot_be_persisted(monkeypatch):
+    monkeypatch.setattr(operations.store, "save", lambda _state: None)
+    monkeypatch.setattr(operations.store, "load", lambda _run_id: None)
+
+    with pytest.raises(RuntimeError, match="could not be persisted"):
+        operations._save_adaptive_state({"run_id": "unwritable", "plan": _plan()})
 
 
 def test_workflow_catalog_and_schema_expose_adaptive_mode():

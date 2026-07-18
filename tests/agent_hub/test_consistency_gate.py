@@ -31,6 +31,8 @@ def test_policy_injection_and_provenance_are_stable(tmp_path):
     )
     assert "<agent-hub-canonical-policy" in first["system"]
     assert "Preserve facts." in first["system"]
+    assert "governs behavior and process" in first["system"]
+    assert "current repository evidence wins" in first["system"]
     assert first == second
     assert first_meta["policy_sha256"] == second_meta["policy_sha256"]
     assert first_meta["request_sha256"] == second_meta["request_sha256"]

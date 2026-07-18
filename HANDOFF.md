@@ -11,7 +11,37 @@
 
 - **현재 단계**
 
-  **[2026-07-17 로컬 LLM 오케스트레이션 연구 문서 재구성 — 이 블록이 최신]**
+  **[2026-07-18 README 전면 재작성·resumable workflow 검증 — 이 블록이 최신]**
+
+  `README.md`를 현재 구현을 기준으로 처음부터 다시 썼다. 처음 보는 사용자가 제품의 역할부터 설치,
+  provider 로그인, Codex·Claude Code 연결, 공개 도구 26개, 고정·adaptive workflow, timeout과 재개,
+  Consistency Gate, handoff·memory, 보안, 검증까지 순서대로 따라갈 수 있는 구조다. 공개 schema와 manifest,
+  테스트를 대조해 workflow ID, 기본값, 설정 경로, 상태 디렉터리와 환경 변수도 실제 구현에 맞췄다.
+
+  작성 자체도 Agent Hub의 긴 실행 경로로 검증했다. live status는 provider `3/3 ready`였고, Opus 4.8
+  planner가 deep/high 조사 → Gemini deep/high 검증 → Opus 작성의 3단계 DAG를 만들었다. plan SHA는
+  `39bb66effcb7bf80f0ecf62a70fcc4e45d39ed5c386f204775bad3dc79b467ad`, run ID는
+  `350b7c2057e4`다. 첫 Opus 조사가 provider timeout으로 멈췄지만 같은 state에서 Sonnet 5로 바꿔 재개했고,
+  이후 두 step까지 완료했다. 최종 checker v3 경고는 0건이다.
+
+  이 실험에서 숨김 경로 정규화가 `.gemini/settings.json`의 첫 점을 지우던 문제와, 조회한 공개 state를
+  `continue`에 넘겼을 때 `Run loaded.` 문구가 pause 응답에 남던 문제를 추가로 고쳤다. 둘 다 특정 README나
+  저장소 이름에 의존하지 않는 공통 수정이며 기존 회귀 테스트에 사례를 넣었다.
+
+  버전은 `1.3.2`다. Ruff, pytest `291 passed, 11 skipped`, Hub plugin·Ruler sync, Phase 1 fixture,
+  doctor, README 품질 검사, 릴리스 버전 동기화, sdist·wheel build와 `git diff --check`를 통과했다. 현재
+  소스를 직접 부른 README verify도 checker v3 경고 0건이다. 앱 브라우저는 로컬 `file://` 접근을 보안
+  정책으로 차단해 렌더링 화면 검수만 수행하지 못했다.
+
+  아직 커밋·푸시하거나 설치 캐시를 갱신하지 않았다. 실행 중인 MCP 프로세스도 마지막 숨김 경로·pause 문구
+  수정보다 먼저 적재됐으므로 최신 동작 확인에는 앱 재시작이 필요하다.
+
+  **다음 한 걸음:** 전체 diff를 검토해 커밋한 뒤 Codex와 Claude Code 플러그인을 1.3.2로 다시 적재하고,
+  새 작업에서 숨김 `source_file` verify와 timeout 후 `continue` 응답을 한 번씩 live 확인한다.
+
+  ---
+
+  **[2026-07-17 로컬 LLM 오케스트레이션 연구 문서 재구성 — 이전 기록]**
 
   Gemma 4 E4B와 Qwen 3.5 9B 로컬 정책 모델 연구를
   `LOCAL-ORCHESTRATION-RESEARCH.md`에 처음부터 다시 정리했다. 현재 정본에는 예전 학습 트리가 없으므로

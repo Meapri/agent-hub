@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import os
+import time
 from typing import Any, Callable, Dict, Iterable, List
+import uuid
 
 from agent_hub import (
     capabilities,
@@ -38,12 +41,34 @@ from google_antigravity_codex import release as google_release
 from google_antigravity_codex import security as google_security
 from google_antigravity_codex import session_prefs as google_session_prefs
 from google_antigravity_codex import writing as google_writing
-from orchestrate_codex import broker, gather, policy, recipes, runner, verify
+from orchestrate_codex import broker, gather, policy, recipes, runner, store, verify
 
 
 ProviderHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
 
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        return max(1.0, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
 PROVIDERS = ("claude", "grok", "gemini")
+ADAPTIVE_WORKFLOW_TIMEOUT_MIN = 30.0
+ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env("AGENT_HUB_MCP_CALL_TIMEOUT", 300.0)
+ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env(
+    "AGENT_HUB_TIMEOUT_RETURN_MARGIN", 10.0
+)
+ADAPTIVE_WORKFLOW_TIMEOUT_MAX = max(
+    ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
+    ADAPTIVE_MCP_CALL_TIMEOUT - ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+)
+ADAPTIVE_WORKFLOW_TIMEOUT_DEFAULT = min(
+    _positive_float_env("AGENT_HUB_WORKFLOW_TIMEOUT", 270.0),
+    ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
+)
+ADAPTIVE_MAX_WAVES_PER_CALL = 8
 PROVIDER_ALIASES = {
     "anthropic": "claude",
     "xai": "grok",
@@ -1132,6 +1157,108 @@ def _is_adaptive(args: Dict[str, Any]) -> bool:
     }
 
 
+_ADAPTIVE_RUN_OPTION_KEYS = {
+    "project_root",
+    "models",
+    "max_concurrency",
+    "max_leaf_calls",
+    "per_call_timeout",
+    "workflow_timeout",
+    "max_tokens",
+    "policy_mode",
+    "policy_file",
+    "max_policy_chars",
+}
+
+
+def _adaptive_workflow_timeout(value: Any) -> float:
+    requested = float(value or ADAPTIVE_WORKFLOW_TIMEOUT_DEFAULT)
+    return max(
+        ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
+        min(requested, ADAPTIVE_WORKFLOW_TIMEOUT_MAX),
+    )
+
+
+def _adaptive_run_options(
+    args: Dict[str, Any], existing: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
+    options = dict(existing or {})
+    options.update(
+        {
+            key: value
+            for key, value in args.items()
+            if key in _ADAPTIVE_RUN_OPTION_KEYS and value is not None
+        }
+    )
+    options["project_root"] = str(options.get("project_root") or ".")
+    options["workflow_timeout"] = _adaptive_workflow_timeout(
+        options.get("workflow_timeout")
+    )
+    options["per_call_timeout"] = max(
+        5.0, float(options.get("per_call_timeout") or 180)
+    )
+    options["max_concurrency"] = max(
+        1, min(int(options.get("max_concurrency") or 3), 3)
+    )
+    options["max_leaf_calls"] = max(
+        1,
+        min(
+            int(options.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS),
+            100,
+        ),
+    )
+    return options
+
+
+def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    out = deepcopy(state)
+    plan = out.get("plan") if isinstance(out.get("plan"), dict) else {}
+    completed = set((out.get("results") or {}).keys())
+    out["pending_steps"] = [
+        str(step.get("id"))
+        for step in plan.get("steps") or []
+        if str(step.get("id")) not in completed
+    ]
+    out["done"] = out.get("status") in {"completed", "failed"}
+    if out["done"]:
+        out["next_action"] = {
+            "type": "done" if out.get("status") == "completed" else "failed",
+            "message": out.get("error") or "Adaptive workflow finished.",
+        }
+    else:
+        out["next_action"] = {
+            "type": "call_tool",
+            "tool": "agent_hub_continue_workflow",
+            "arguments": {"run_id": str(out.get("run_id") or "")},
+        }
+    return out
+
+
+def _save_adaptive_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    store.save(state)
+    run_id = str(state.get("run_id") or "")
+    if not isinstance(store.load(run_id), dict):
+        raise RuntimeError(f"adaptive run state could not be persisted: {run_id}")
+    return _adaptive_public_state(state)
+
+
+def _new_adaptive_state(plan: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+    state = {
+        "run_id": uuid.uuid4().hex[:12],
+        "workflow_id": "adaptive",
+        "run_kind": "adaptive",
+        "mode": "supervised",
+        "created_at": time.time(),
+        "status": "paused",
+        "plan": plan,
+        "options": _adaptive_run_options(args),
+        "results": {},
+        "waves": [],
+        "leaf_calls": 0,
+    }
+    return state
+
+
 def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
     supplied = args.get("plan")
     max_steps = int(args.get("max_steps") or orchestrator.MAX_PLAN_STEPS)
@@ -1181,6 +1308,14 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
     attempts: List[Dict[str, Any]] = []
     previous_text = ""
     validation_error = ""
+    planner_timeout = min(
+        float(args.get("per_call_timeout") or 240),
+        max(
+            ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+            _adaptive_workflow_timeout(args.get("workflow_timeout"))
+            - ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+        ),
+    )
     for attempt in range(repairs + 1):
         planner_input = initial_prompt
         if attempt:
@@ -1196,7 +1331,7 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
                 "model": args.get("planner_model"),
                 "temperature": 0.1,
                 "max_tokens": int(args.get("planner_max_tokens") or 12000),
-                "timeout_sec": int(args.get("per_call_timeout") or 240),
+                "timeout_sec": int(planner_timeout),
                 "project_root": root,
                 "policy_mode": policy_mode,
                 "policy_file": policy_file or None,
@@ -1346,7 +1481,10 @@ def _adaptive_step_call(
         return _write(
             {
                 **common,
-                "task": "custom",
+                # Let the durable writer infer README / technical-doc from the
+                # reviewed goal. Forcing custom here silently downgraded a
+                # README to transform-class verification.
+                "task": "auto",
                 "instruction": context,
                 "source_text": source or None,
             }
@@ -1496,24 +1634,17 @@ def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     if _is_adaptive(args):
         plan = _adaptive_plan(args)
+        state = _save_adaptive_state(_new_adaptive_state(plan, args))
         return envelope(
             "start_workflow",
             {
                 "success": True,
-                "text": "Adaptive plan is ready for review; run it with agent_hub_run_workflow.",
+                "text": (
+                    "Adaptive run persisted. Continue it one dependency-ready wave at a time."
+                ),
                 "workflow_id": "adaptive",
                 "dynamic": True,
-                "status": "planned",
-                "plan": plan,
-                "next_action": {
-                    "type": "call_tool",
-                    "tool": "agent_hub_run_workflow",
-                    "arguments": {
-                        "workflow_id": "adaptive",
-                        "plan": plan,
-                        "project_root": str(args.get("project_root") or "."),
-                    },
-                },
+                **state,
             },
         )
     resolved = _workflow_resolution(args)
@@ -1535,10 +1666,137 @@ def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _continue_adaptive_workflow(
+    args: Dict[str, Any], state: Dict[str, Any]
+) -> Dict[str, Any]:
+    if state.get("status") in {"completed", "failed"}:
+        public = _adaptive_public_state(state)
+        return envelope(
+            "continue_workflow",
+            {
+                "success": state.get("status") == "completed",
+                "text": (
+                    "Adaptive workflow is already complete."
+                    if state.get("status") == "completed"
+                    else str(state.get("error") or "Adaptive workflow already failed.")
+                ),
+                **public,
+            },
+        )
+
+    options = _adaptive_run_options(args, state.get("options") or {})
+    workflow_timeout = float(options["workflow_timeout"])
+    requested_per_call = float(options["per_call_timeout"])
+    max_waves = max(
+        1,
+        min(
+            int(args.get("max_waves_per_call") or 1),
+            ADAPTIVE_MAX_WAVES_PER_CALL,
+        ),
+    )
+    started = time.monotonic()
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    executable = {key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")}
+
+    def invoke_with_budget(
+        step: Dict[str, Any], provider: str, dependencies: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        remaining = workflow_timeout - (time.monotonic() - started)
+        if remaining < ADAPTIVE_TIMEOUT_RETURN_MARGIN:
+            return {
+                "success": False,
+                "error": "workflow_timeout_exceeded",
+                "text": "Adaptive workflow slice exhausted its time budget.",
+            }
+        step_args = {
+            **options,
+            "per_call_timeout": min(requested_per_call, remaining),
+        }
+        return _adaptive_step_call(
+            dict(step),
+            provider,
+            dict(dependencies),
+            args=step_args,
+            goal=str(plan.get("goal") or ""),
+        )
+
+    result = orchestrator.execute_plan(
+        executable,
+        invoke=invoke_with_budget,
+        max_concurrency=int(options["max_concurrency"]),
+        max_calls=int(options["max_leaf_calls"]),
+        max_elapsed_seconds=max(
+            ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+            workflow_timeout - (time.monotonic() - started),
+        ),
+        initial_results=state.get("results") or {},
+        initial_waves=state.get("waves") or [],
+        initial_call_count=int(state.get("leaf_calls") or 0),
+        max_waves=max_waves,
+    )
+    successful_results = {
+        step_id: item
+        for step_id, item in (result.get("results") or {}).items()
+        if isinstance(item, dict) and item.get("success")
+    }
+    result_status = str(result.get("status") or "failed")
+    if result_status == "timed_out":
+        persisted_status = "paused"
+        pause_reason = "workflow_timeout_exceeded"
+    else:
+        persisted_status = result_status
+        pause_reason = "wave_limit" if result_status == "paused" else None
+    state.update(
+        {
+            "status": persisted_status,
+            "options": options,
+            "results": successful_results,
+            "waves": list(result.get("waves") or []),
+            "leaf_calls": int(result.get("leaf_calls") or 0),
+            "updated_at": time.time(),
+            "elapsed_ms_last_call": round((time.monotonic() - started) * 1000),
+        }
+    )
+    if pause_reason:
+        state["pause_reason"] = pause_reason
+    else:
+        state.pop("pause_reason", None)
+    if persisted_status == "completed":
+        state["text"] = str(result.get("text") or "")
+        state.pop("error", None)
+    elif persisted_status == "failed":
+        state["error"] = str(result.get("error") or "adaptive_step_failed")
+    else:
+        state.pop("text", None)
+        state.pop("error", None)
+    public = _save_adaptive_state(state)
+    return envelope(
+        "continue_workflow",
+        {
+            "success": persisted_status != "failed",
+            "text": (
+                str(state.get("text") or "")
+                if persisted_status == "completed"
+                else (
+                    "Adaptive workflow paused safely; call continue for the next wave."
+                    if persisted_status == "paused"
+                    else str(state.get("error") or "Adaptive workflow failed.")
+                )
+            ),
+            **public,
+        },
+    )
+
+
 def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = str(args.get("run_id") or "")
+    supplied_state = args.get("state") if isinstance(args.get("state"), dict) else None
+    persisted = supplied_state or store.load(run_id)
+    if isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive":
+        return _continue_adaptive_workflow(args, persisted)
     state = runner.continue_run(
-        run_id=str(args.get("run_id") or ""),
-        state=args.get("state") if isinstance(args.get("state"), dict) else None,
+        run_id=run_id,
+        state=supplied_state,
         stage_id=str(args.get("stage_id") or ""),
         result_text=str(args.get("result_text") or ""),
         success=bool(args.get("success", True)),
@@ -1552,7 +1810,12 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_run(args: Dict[str, Any]) -> Dict[str, Any]:
-    state = runner.get_run(str(args.get("run_id") or ""))
+    run_id = str(args.get("run_id") or "")
+    persisted = store.load(run_id)
+    if isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive":
+        state = _adaptive_public_state(persisted)
+    else:
+        state = runner.get_run(run_id)
     return envelope("get_run", {"success": True, "text": "Run loaded.", **state})
 
 
@@ -1560,18 +1823,80 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     from agent_hub.core.inprocess import make_resolver
 
     if _is_adaptive(args):
-        plan = _adaptive_plan(args)
+        workflow_timeout = _adaptive_workflow_timeout(args.get("workflow_timeout"))
+        started = time.monotonic()
+        requested_per_call = float(args.get("per_call_timeout") or 180)
+        planning_args = {
+            **args,
+            "per_call_timeout": min(
+                requested_per_call,
+                max(
+                    ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+                    workflow_timeout - ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+                ),
+            ),
+        }
+        plan = _adaptive_plan(planning_args)
         executable = {
             key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")
         }
+
+        def invoke_with_budget(
+            step: Dict[str, Any], provider: str, dependencies: Dict[str, Dict[str, Any]]
+        ) -> Dict[str, Any]:
+            remaining = workflow_timeout - (time.monotonic() - started)
+            if remaining < ADAPTIVE_TIMEOUT_RETURN_MARGIN:
+                return {
+                    "success": False,
+                    "error": "workflow_timeout_exceeded",
+                    "text": "Adaptive workflow exhausted its end-to-end time budget.",
+                }
+            step_args = {
+                **args,
+                "per_call_timeout": min(requested_per_call, remaining),
+            }
+            return _adaptive_step_call(
+                dict(step),
+                provider,
+                dict(dependencies),
+                args=step_args,
+                goal=plan["goal"],
+            )
+
         result = orchestrator.execute_plan(
             executable,
-            invoke=lambda step, provider, dependencies: _adaptive_step_call(
-                dict(step), provider, dict(dependencies), args=args, goal=plan["goal"]
-            ),
+            invoke=invoke_with_budget,
             max_concurrency=int(args.get("max_concurrency") or 3),
             max_calls=int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS),
+            max_elapsed_seconds=max(
+                ADAPTIVE_TIMEOUT_RETURN_MARGIN,
+                workflow_timeout - (time.monotonic() - started),
+            ),
         )
+        resumable: Dict[str, Any] = {}
+        if result.get("status") == "timed_out":
+            state = _new_adaptive_state(plan, args)
+            persisted = {
+                step_id: item
+                for step_id, item in (result.get("results") or {}).items()
+                if isinstance(item, dict) and item.get("success")
+            }
+            state.update(
+                {
+                    "status": "paused",
+                    "pause_reason": "workflow_timeout_exceeded",
+                    "results": persisted,
+                    "waves": list(result.get("waves") or []),
+                    "leaf_calls": int(result.get("leaf_calls") or 0),
+                    "updated_at": time.time(),
+                }
+            )
+            public = _save_adaptive_state(state)
+            resumable = {
+                "resumable": True,
+                "run_id": state["run_id"],
+                "next_action": public["next_action"],
+            }
         return envelope(
             "run_workflow",
             {
@@ -1579,6 +1904,9 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
                 "workflow_id": "adaptive",
                 "dynamic": True,
                 "planner": plan.get("planner"),
+                "workflow_timeout": workflow_timeout,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                **resumable,
             },
         )
     resolved = _workflow_resolution(args)
@@ -1594,6 +1922,7 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             "bindings",
             "max_leaf_calls",
             "per_call_timeout",
+            "workflow_timeout",
         }
     }
     result = broker.run_auto(
@@ -1854,6 +2183,30 @@ WORKFLOW_BASE = {
     "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
     **POLICY_CONTROL_SCHEMA,
 }
+ADAPTIVE_EXECUTION_CONTROL_SCHEMA = {
+    "max_leaf_calls": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+        "default": broker.DEFAULT_MAX_LEAF_CALLS,
+    },
+    "per_call_timeout": {
+        "type": "number",
+        "minimum": 5,
+        "maximum": 600,
+        "default": 180,
+    },
+    "workflow_timeout": {
+        "type": "number",
+        "minimum": ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
+        "maximum": ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
+        "default": ADAPTIVE_WORKFLOW_TIMEOUT_DEFAULT,
+        "description": (
+            "Time budget for one end-to-end adaptive call or one resumable slice. "
+            "Provider calls are clamped to the remaining budget."
+        ),
+    },
+}
 
 TOOL_SPECS: List[Dict[str, Any]] = [
     _spec(
@@ -2076,9 +2429,13 @@ TOOL_SPECS: List[Dict[str, Any]] = [
     _spec(
         "agent_hub_start_workflow",
         "Start Workflow",
-        "Start a supervised workflow and return its next action.",
+        "Start and persist a supervised workflow, including a resumable adaptive run.",
         _object(
-            {**WORKFLOW_BASE, "auto_local": {"type": "boolean", "default": True}},
+            {
+                **WORKFLOW_BASE,
+                **ADAPTIVE_EXECUTION_CONTROL_SCHEMA,
+                "auto_local": {"type": "boolean", "default": True},
+            },
             required=("workflow_id",),
             additional=True,
         ),
@@ -2087,7 +2444,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
     _spec(
         "agent_hub_continue_workflow",
         "Continue Workflow",
-        "Advance a supervised workflow with a completed leaf result.",
+        "Advance a fixed run with a leaf result or execute the next adaptive wave.",
         _object(
             {
                 "run_id": {"type": "string"},
@@ -2097,6 +2454,16 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                 "success": {"type": "boolean", "default": True},
                 "error": {"type": "string"},
                 "auto_local": {"type": "boolean", "default": True},
+                **ADAPTIVE_EXECUTION_CONTROL_SCHEMA,
+                "max_waves_per_call": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": ADAPTIVE_MAX_WAVES_PER_CALL,
+                    "default": 1,
+                    "description": (
+                        "Dependency-ready adaptive waves to execute before persisting and returning."
+                    ),
+                },
             }
         ),
         read_only=False,
@@ -2116,13 +2483,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         _object(
             {
                 **WORKFLOW_BASE,
-                "max_leaf_calls": {"type": "integer", "minimum": 1, "maximum": 100, "default": 24},
-                "per_call_timeout": {
-                    "type": "number",
-                    "minimum": 5,
-                    "maximum": 600,
-                    "default": 180,
-                },
+                **ADAPTIVE_EXECUTION_CONTROL_SCHEMA,
             },
             required=("workflow_id",),
             additional=True,

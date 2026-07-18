@@ -174,6 +174,10 @@ def infer_task(arguments: Dict[str, Any], source_text: str = "") -> str:
     haystack = " ".join(
         str(arguments.get(key) or "") for key in ("instruction", "context", "audience")
     ).lower()
+    if any(word in haystack for word in ("readme", "리드미", "저장소 안내")):
+        return "readme"
+    if any(word in haystack for word in ("technical doc", "technical-doc", "기술 문서")):
+        return "technical-doc"
     if any(word in haystack for word in ("release note", "release-notes", "릴리즈")):
         return "release-notes"
     if any(word in haystack for word in ("pr description", "pull request", "reviewer")):
@@ -218,7 +222,9 @@ def read_source(arguments: Dict[str, Any]) -> str:
         chunks.append(text)
     source_file = str(arguments.get("source_file") or "").strip()
     if source_file:
-        workspace_root = str(arguments.get("workspace_root") or "").strip() or None
+        workspace_root = str(
+            arguments.get("workspace_root") or arguments.get("project_root") or ""
+        ).strip() or None
         path = security.resolve_allowed_path(
             source_file,
             purpose="source_file",
@@ -335,13 +341,14 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "You are the writing arm of Agent Hub. Return only the "
         "requested writing unless the output mode asks for notes. Preserve source "
         "facts, names, versions, dates, commands, and numbers. Do not invent tests, "
-        "links, issue IDs, or compatibility claims. If evidence is missing, use a "
-        "clear placeholder instead of guessing."
+        "links, issue IDs, or compatibility claims. If evidence is missing, describe the "
+        "limitation plainly and omit unsupported operational detail instead of guessing."
     )
     if durable:
         system += (
             " This is a durable product document: use the fact pack and provided source only. "
             "Never turn session work, recent commits, or debug notes into product claims. "
+            "Do not emit TODO, TBD, placeholder, or 'fill this later' markers in a final document. "
             "For multi-step README pipelines (outline→draft→verify), prefer orchestrate-codex "
             "durable_readme; this path is a single durable-safe pass."
         )

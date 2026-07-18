@@ -134,6 +134,20 @@ def test_writing_workspace_root_authorizes_source_file(tmp_path, monkeypatch):
     assert writing.read_source(
         {"source_file": str(source), "workspace_root": str(workspace)}
     ) == "hello"
+    assert writing.read_source(
+        {"source_file": "note.md", "workspace_root": str(workspace)}
+    ) == "hello"
+    assert writing.read_source(
+        {"source_file": "note.md", "project_root": str(workspace)}
+    ) == "hello"
+
+
+def test_writing_infers_durable_document_tasks_before_source_polish():
+    assert writing.infer_task({"instruction": "Rewrite the repository README"}, "old") == "readme"
+    assert (
+        writing.infer_task({"instruction": "상세한 기술 문서를 작성해 주세요"}, "old")
+        == "technical-doc"
+    )
 
 
 def test_writing_blocks_sensitive_and_outside_source_files(tmp_path, monkeypatch):

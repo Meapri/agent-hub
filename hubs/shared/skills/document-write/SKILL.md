@@ -15,13 +15,19 @@ description: >
 
 1. 대상 저장소의 `AGENTS.md` 또는 `CLAUDE.md`, 현재 README, 주요 진입점, 공개 도구와 스키마, 설정,
    대표 테스트, Git 상태를 확인한다.
-2. 저장소 전체를 설명하는 문서라면 `agent_hub_plan_workflow`의 `adaptive` workflow를 사용한다.
-   planner가 `inspect_codebase`와 작성·검토 단계를 고르게 하되, 넓은 문서에는
-   `investigation_depth=deep`, `reasoning_effort=high`가 필요한지 확인한다.
+2. 저장소 전체를 설명하는 문서라면 먼저 `agent_hub_plan_workflow`의 `adaptive` workflow로 계획만
+   만든다. 이 도구는 실행기가 아니다. 반환된 plan에서 `inspect_codebase`가 작성 단계의 의존성인지,
+   넓은 문서에 `investigation_depth=deep`, `reasoning_effort=high`가 필요한지 확인한다. 검토한 plan은
+   wave가 적은 plan은 `agent_hub_run_workflow`에 그대로 넘긴다. 여러 wave가 필요한 plan은
+   `agent_hub_start_workflow`에 넘긴 뒤 반환된 `run_id`로 `agent_hub_continue_workflow`를 반복한다.
+   end-to-end 실행 결과가 `timed_out`이더라도 `resumable=true`이면 새로 시작하지 말고 그 `run_id`를
+   이어간다. 중간 상태의 문서 텍스트는 최종 파일로 저장하지 않는다.
 3. 작은 문서나 일부 문단 수정은 `agent_hub_write`를 직접 사용할 수 있다. README에는 `task=readme`,
-   절대 `project_root`, `policy_mode=required`를 넘긴다.
+   절대 `project_root`, `policy_mode=required`를 넘긴다. `source_file`은 절대경로로 주거나,
+   `project_root` 또는 `workspace_root` 안의 상대경로로 준다.
 4. 생성 결과의 `quality_gate.applied`와 `quality_gate.passed`를 확인한다. `passed=false`이거나 도구 응답이
-   실패했다면 결과를 파일에 쓰지 않는다. 경고를 반영해 전체 문서를 다시 만든다.
+   실패했다면 결과를 파일에 쓰지 않는다. placeholder나 저장소에 없는 파일 경고도 차단 오류로 취급하고,
+   경고를 반영해 전체 문서를 다시 만든다.
 5. 파일을 바꾼 뒤 `agent_hub_verify`를 `doc_class=durable`, `user_facing=true`로 실행한다. 저장소에
    `orchestrate_codex.document_quality`가 있으면 대상 파일에 대한 로컬 검사도 실행한다.
 6. 문서에 적은 명령과 주요 기능을 코드·테스트와 다시 대조하고, 저장소의 동기화 검사와 관련 테스트를
