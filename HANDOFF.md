@@ -11,7 +11,31 @@
 
 - **현재 단계**
 
-  **[2026-07-18 README 전면 재작성·resumable workflow 검증 — 이 블록이 최신]**
+  **[2026-07-18 README 사람 문체 전면 개편 — 이 블록이 최신]**
+
+  `README.md`를 실제 사용자가 읽는 순서로 다시 썼다. 여러 모델을 오갈 때 겪는 불편과 제작 이유를 첫
+  문단에서 설명하고, 설치 → 모델 로그인 → Codex·Claude Code 연결을 바로 따라 할 수 있게 앞에 배치했다.
+  공개 도구, adaptive 실행, 문서 검사와 내부 안전장치는 필요한 사용자가 뒤에서 읽도록 옮겼다. 추상적인
+  장점 나열과 대칭적인 불릿을 줄이고 명령 주변의 설명도 짧고 구체적으로 고쳤다.
+
+  adaptive plan은 `fc9dcf1a...`, run ID는 `9b67815a45f9`다. deep/high 저장소 조사는 58개 파일을 읽고
+  성공했다. 문체 검토 단계는 잘못 고른 `review_diff`가 clean worktree에서 `empty_diff`를 반환해 무효였고,
+  마지막 작성 단계는 약 282초 뒤 시간 예산을 소진했다. 모델이 만든 완성본은 없었으며, 실패한 결과를
+  README에 사용하지 않았다.
+
+  현재 README는 로컬 자연스러운 한국어 검사와 `agent_hub_verify` checker v3에서 경고 0건이다. 관련
+  테스트는 `23 passed`, `git diff --check`도 통과했다. 렌더링 화면 검수는 앱 브라우저의 로컬 파일 접근
+  제한 때문에 하지 못했다.
+
+  원격 `main`에는 이전 변경 커밋 `cca2a74`까지 푸시돼 있다. 이번 README와 기록 문서 변경은 아직
+  커밋하지 않았다.
+
+  **다음 한 걸음:** README diff를 사람이 한 번 더 읽고 만족하면 세 문서를 커밋한다. 별도 제품 수정으로는
+  planner가 기존 파일 검토에 `review_diff`를 고르지 않도록 capability 계약을 보강할 수 있다.
+
+  ---
+
+  **[2026-07-18 README 전면 재작성·resumable workflow 검증 — 이전 기록]**
 
   `README.md`를 현재 구현을 기준으로 처음부터 다시 썼다. 처음 보는 사용자가 제품의 역할부터 설치,
   provider 로그인, Codex·Claude Code 연결, 공개 도구 26개, 고정·adaptive workflow, timeout과 재개,
