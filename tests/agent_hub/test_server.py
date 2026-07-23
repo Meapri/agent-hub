@@ -181,6 +181,47 @@ def test_canonical_results_have_envelope_and_mcp_error_signal():
     assert failed["structuredContent"]["error"]["message"]
 
 
+def test_invalid_run_id_is_a_canonical_tool_error_not_a_jsonrpc_error():
+    response = _call(
+        server,
+        "agent_hub_get_run",
+        {"run_id": "../../outside"},
+    )
+
+    assert "error" not in response
+    result = response["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["success"] is False
+    assert result["structuredContent"]["error"]["type"] == "ValueError"
+
+
+def test_canonical_jsonrpc_preserves_run_id_free_fixed_state_handoff(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    state = operations.runner.start_run(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(tmp_path),
+    )
+    state.pop("run_id")
+
+    response = _call(
+        server,
+        "agent_hub_continue_workflow",
+        {
+            "state": state,
+            "stage_id": "chat",
+            "result_text": "done",
+            "success": True,
+        },
+    )
+
+    result = response["result"]
+    assert result["isError"] is False
+    assert result["structuredContent"]["data"]["status"] == "completed"
+
+
 def test_google_mcp_result_is_unwrapped_before_canonical_envelope():
     wrapped = {
         "content": [{"type": "text", "text": "ok"}],

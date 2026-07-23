@@ -121,7 +121,10 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string"},
+                    "run_id": {
+                        "type": "string",
+                        "pattern": store.RUN_ID_PATTERN,
+                    },
                     "state": {"type": "object"},
                     "stage_id": {"type": "string"},
                     "result_text": {"type": "string"},
@@ -137,7 +140,12 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "description": "Fetch run state by run_id from memory or the file-backed run store.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"run_id": {"type": "string"}},
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "pattern": store.RUN_ID_PATTERN,
+                    }
+                },
                 "required": ["run_id"],
                 "additionalProperties": False,
             },
@@ -326,7 +334,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if name == "orchestrate_continue_recipe":
             return _ok(
                 runner.continue_run(
-                    run_id=str(arguments.get("run_id") or ""),
+                    run_id=arguments.get("run_id"),
                     state=arguments.get("state") if isinstance(arguments.get("state"), dict) else None,
                     stage_id=str(arguments.get("stage_id") or ""),
                     result_text=str(arguments.get("result_text") or ""),
@@ -336,7 +344,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 )
             )
         if name == "orchestrate_get_run":
-            return _ok(runner.get_run(str(arguments.get("run_id") or "")))
+            return _ok(runner.get_run(arguments.get("run_id")))
         if name == "orchestrate_fallback_chains":
             return _ok({"fallback_chains": runner.FALLBACK_CHAINS, "default_bindings": recipes.DEFAULT_BINDINGS})
         if name == "orchestrate_advise":
@@ -458,7 +466,13 @@ def get_prompt(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_ids() -> List[str]:
     ids = set(runner._RUNS.keys()) | set(store.list_run_ids())
-    return sorted(ids)
+    valid_ids: List[str] = []
+    for run_id in ids:
+        try:
+            valid_ids.append(store.validate_run_id(run_id))
+        except ValueError:
+            continue
+    return sorted(valid_ids)
 
 
 def resource_list() -> List[Dict[str, Any]]:
@@ -479,7 +493,11 @@ def resource_read(uri: str) -> Dict[str, Any]:
     if not uri.startswith(_RUN_URI_PREFIX):
         raise RpcError(-32602, f"unknown resource uri: {uri}")
     rid = uri[len(_RUN_URI_PREFIX):]
-    state = runner.get_run(rid)  # raises on unknown
+    try:
+        rid = store.validate_run_id(rid)
+        state = runner.get_run(rid)
+    except ValueError as exc:
+        raise RpcError(-32602, str(exc)) from exc
     return {
         "contents": [
             {"uri": uri, "mimeType": "application/json", "text": json.dumps(state, ensure_ascii=False)}

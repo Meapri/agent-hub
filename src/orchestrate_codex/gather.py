@@ -3,159 +3,432 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import selectors
 import subprocess
+import tempfile
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from agent_hub.core.repository_facts import collect_repository_manifest
+from agent_hub.core.repository_facts import (
+    REPOSITORY_SKIP_PARTS,
+    collect_repository_manifest,
+    command_in_directory_fd,
+    filesystem_repository_files,
+    git_repository_files,
+    is_sensitive_repository_path,
+    read_repository_text,
+    repository_file_size,
+    repository_path_matches_fd,
+    repository_root_fd,
+    repository_subdirectories,
+    safe_repository_file,
+)
 
 
-def _run(cmd: List[str], cwd: Path, timeout: float = 20.0) -> str:
+def _run_bounded(
+    cmd: List[str],
+    cwd: Path,
+    *,
+    timeout: float = 20.0,
+    max_bytes: int = 64 * 1024,
+    cwd_fd: int | None = None,
+) -> tuple[str, bool]:
+    """Run a local command while bounding pipe memory and wall-clock time."""
+
+    byte_limit = max(0, int(max_bytes))
+    command = cmd
+    popen_kwargs: Dict[str, Any] = {"cwd": str(cwd)}
+    if cwd_fd is not None:
+        command, popen_kwargs = command_in_directory_fd(cmd, cwd_fd)
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            **popen_kwargs,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if proc.returncode != 0:
+    except OSError:
+        return "", False
+    if proc.stdout is None:
+        proc.kill()
+        proc.wait()
+        return "", False
+
+    chunks: List[bytes] = []
+    total = 0
+    truncated = False
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    try:
+        while True:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                truncated = True
+                proc.kill()
+                break
+            events = selector.select(timeout=min(0.1, remaining_time))
+            if not events:
+                if proc.poll() is not None:
+                    break
+                continue
+            chunk = os.read(proc.stdout.fileno(), min(64 * 1024, byte_limit - total + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > byte_limit:
+                truncated = True
+                proc.terminate()
+                break
+    finally:
+        selector.close()
+        proc.stdout.close()
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        else:
+            proc.wait()
+
+    raw = b"".join(chunks)
+    if len(raw) > byte_limit:
+        raw = raw[:byte_limit]
+    if proc.returncode != 0 and not truncated:
         # Non-zero exit: do not pass stdout/stderr off as real content.
-        return ""
-    return (proc.stdout or "").strip()
+        return "", False
+    return raw.decode("utf-8", errors="replace").strip(), truncated
 
 
-def gather_git(project_root: str | Path = ".") -> Dict[str, Any]:
-    root = Path(project_root).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"project_root is not a directory: {root}")
-    git_root = _run(["git", "rev-parse", "--show-toplevel"], root)
+def _run(
+    cmd: List[str],
+    cwd: Path,
+    timeout: float = 20.0,
+    *,
+    max_bytes: int = 64 * 1024,
+) -> str:
+    return _run_bounded(cmd, cwd, timeout=timeout, max_bytes=max_bytes)[0]
+
+
+def gather_git(
+    project_root: str | Path = ".",
+    *,
+    max_chars: int = 32_000,
+    root_fd: int | None = None,
+) -> Dict[str, Any]:
+    if root_fd is None:
+        root = validate_project_root(project_root)
+        with repository_root_fd(root) as opened_root_fd:
+            return gather_git(
+                root,
+                max_chars=max_chars,
+                root_fd=opened_root_fd,
+            )
+    root = Path(project_root).expanduser()
+    if not root.is_absolute():
+        raise ValueError("project_root must be absolute when root_fd is set")
+    output_limit = min(128_000, max(256, int(max_chars)))
+    git_root, root_truncated = _run_bounded(
+        ["git", "rev-parse", "--show-toplevel"],
+        root,
+        max_bytes=min(8_192, output_limit),
+        cwd_fd=root_fd,
+    )
     if not git_root:
         return {"ok": False, "error": "not a git repository", "root": str(root)}
-    repo = Path(git_root)
+    if root_fd is None:
+        repo = Path(git_root).resolve()
+        try:
+            scope_text = root.relative_to(repo).as_posix() or "."
+        except ValueError:
+            return {
+                "ok": False,
+                "error": "project_root is outside the detected git repository",
+                "root": str(root),
+            }
+    else:
+        prefix, prefix_truncated = _run_bounded(
+            ["git", "rev-parse", "--show-prefix"],
+            root,
+            max_bytes=min(8_192, output_limit),
+            cwd_fd=root_fd,
+        )
+        root_truncated = root_truncated or prefix_truncated
+        scope_text = prefix.rstrip("/") or "."
+    remaining = output_limit
+    output_truncated = root_truncated
+
+    def field(command: List[str], *, fallback: str = "") -> str:
+        nonlocal remaining, output_truncated
+        value, was_truncated = _run_bounded(
+            command,
+            root,
+            max_bytes=max(0, remaining),
+            cwd_fd=root_fd,
+        )
+        remaining = max(0, remaining - len(value.encode("utf-8")))
+        output_truncated = output_truncated or was_truncated
+        if value:
+            return value
+        return "[truncated]" if was_truncated else fallback
+
+    scoped = scope_text != "."
+    branch = (
+        "[scoped]"
+        if scoped
+        else field(["git", "branch", "--show-current"], fallback="[detached]")
+    )
+    head = field(["git", "rev-parse", "--short", "HEAD"])
+    status = field(
+        ["git", "status", "--short", "--untracked-files=all", "--", "."],
+        fallback="clean",
+    )
+    log = field(
+        [
+            "git",
+            "log",
+            "--format=%h" if scoped else "--oneline",
+            "-12",
+            "--",
+            ".",
+        ]
+    )
+    diff_stat = field(["git", "diff", "--stat", "HEAD", "--", "."])
+    if not diff_stat and remaining:
+        diff_stat = field(["git", "diff", "--stat", "--", "."])
     return {
         "ok": True,
-        "root": str(repo),
-        "branch": _run(["git", "branch", "--show-current"], repo) or "[detached]",
-        "head": _run(["git", "rev-parse", "--short", "HEAD"], repo),
-        "status": _run(["git", "status", "--short"], repo) or "clean",
-        "log": _run(["git", "log", "--oneline", "-12"], repo),
-        "diff_stat": _run(["git", "diff", "--stat", "HEAD"], repo)
-        or _run(["git", "diff", "--stat"], repo),
+        "root": str(root),
+        "scope": scope_text,
+        "branch": branch,
+        "head": head,
+        "status": status,
+        "log": log,
+        "diff_stat": diff_stat,
+        "output_char_limit": output_limit,
+        "output_truncated": output_truncated,
     }
 
 
-def _read_json(path: Path) -> Any:
+_DURABLE_READ_BYTE_LIMIT = 4 * 1024 * 1024
+_DURABLE_TEXT_CHAR_LIMIT = 100_000
+_DURABLE_METADATA_ENTRY_LIMIT = 1_000
+
+
+def _read_json_text(text: str) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        return json.loads(text) if text else None
+    except (ValueError, TypeError):
         return None
 
 
-def _version_from_tree(root: Path) -> str:
-    plugin = root / ".codex-plugin" / "plugin.json"
-    data = _read_json(plugin)
+def _package_init_files_from_tree(available: set[str]) -> Dict[str, str]:
+    packages: Dict[str, str] = {}
+    for item in available:
+        parts = Path(item).parts
+        if not parts or parts[-1] != "__init__.py":
+            continue
+        if len(parts) == 2:
+            packages[parts[0]] = item
+        elif len(parts) == 3 and parts[0] == "src":
+            packages[parts[1]] = item
+    return packages
+
+
+def _version_from_tree(available: set[str], read_text: Callable[[str], str]) -> str:
+    data = _read_json_text(read_text(".codex-plugin/plugin.json"))
     if isinstance(data, dict) and data.get("version"):
         return str(data["version"])
-    pyproject = root / "pyproject.toml"
-    if pyproject.is_file():
-        text = pyproject.read_text(encoding="utf-8", errors="replace")
+    if "pyproject.toml" in available:
+        text = read_text("pyproject.toml")
         m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
         if m:
             return m.group(1)
-    init_files = list(root.glob("*/__init__.py"))
+    init_files = sorted(_package_init_files_from_tree(available).values())
     for init in init_files[:5]:
-        text = init.read_text(encoding="utf-8", errors="replace")
+        text = read_text(init)
         m = re.search(r'__version__\s*=\s*"([^"]+)"', text)
         if m:
             return m.group(1)
     return ""
 
 
-def _list_skills(root: Path) -> List[str]:
-    skills = root / "skills"
-    if not skills.is_dir():
-        return []
-    return sorted(p.name for p in skills.iterdir() if p.is_dir() and not p.name.startswith("."))
+def _list_skills(
+    root: Path,
+    available: set[str],
+    *,
+    manifest_source: str,
+    root_fd: int,
+) -> List[str]:
+    names = {
+        parts[1]
+        for item in available
+        if len(parts := Path(item).parts) >= 2
+        and parts[0] == "skills"
+        and not parts[1].startswith(".")
+    }
+    if manifest_source != "filesystem":
+        return sorted(names)[:_DURABLE_METADATA_ENTRY_LIMIT]
+    discovered, _truncated = repository_subdirectories(
+        Path("skills"),
+        root,
+        root_fd=root_fd,
+        max_entries=_DURABLE_METADATA_ENTRY_LIMIT,
+    )
+    names.update(discovered)
+    return sorted(names)[:_DURABLE_METADATA_ENTRY_LIMIT]
 
 
-def _mcp_tools_from_config(root: Path) -> List[str]:
+def _mcp_tools_from_config(
+    available: set[str],
+    read_text: Callable[[str], str],
+) -> List[str]:
     names: List[str] = []
-    for rel in ("mcp_config.json", ".mcp.json"):
-        data = _read_json(root / rel)
-        if not isinstance(data, dict):
-            continue
-        # tools not always listed; fall through
-    # Scan mcp_server.py tool name strings if present
-    for path in root.glob("*/mcp_server.py"):
-        text = path.read_text(encoding="utf-8", errors="replace")
+    server_files = sorted(
+        item for item in available if Path(item).name == "mcp_server.py"
+    )
+    for path in server_files:
+        text = read_text(path)
         for m in re.finditer(r'"name":\s*"([a-z0-9_]+)"', text):
             name = m.group(1)
-            if name not in names and ("codex" in name or name.startswith("google_") or name.startswith("orchestrate_")):
+            if name not in names and (
+                "codex" in name
+                or name.startswith("google_")
+                or name.startswith("orchestrate_")
+            ):
                 names.append(name)
-        for m in re.finditer(r'"(claude_codex_[a-z0-9_]+|grok_codex_[a-z0-9_]+|google_[a-z0-9_]+|orchestrate_[a-z0-9_]+)"', text):
+                if len(names) >= _DURABLE_METADATA_ENTRY_LIMIT:
+                    return sorted(set(names))
+        for m in re.finditer(
+            r'"(claude_codex_[a-z0-9_]+|grok_codex_[a-z0-9_]+|'
+            r'google_[a-z0-9_]+|orchestrate_[a-z0-9_]+)"',
+            text,
+        ):
             if m.group(1) not in names:
                 names.append(m.group(1))
-    return sorted(set(names))
+                if len(names) >= _DURABLE_METADATA_ENTRY_LIMIT:
+                    return sorted(set(names))
+    return sorted(set(names))[:_DURABLE_METADATA_ENTRY_LIMIT]
 
 
-def _cli_commands_from_tree(root: Path) -> List[str]:
+def _cli_commands_from_tree(
+    available: set[str],
+    read_text: Callable[[str], str],
+) -> List[str]:
     """CLI entry points a README may legitimately reference: scripts/*.py basenames and
     pyproject [project.scripts] console-script names. Without these, verify would flag a
     correct `python3 scripts/foo.py` reference as a hallucinated tool."""
-    names: List[str] = []
-    scripts = root / "scripts"
-    if scripts.is_dir():
-        for p in scripts.glob("*.py"):
-            if not p.name.startswith("_"):
-                names.append(p.stem)
-    pyproject = root / "pyproject.toml"
-    if pyproject.is_file():
-        text = pyproject.read_text(encoding="utf-8", errors="replace")
+    names = [
+        Path(item).stem
+        for item in available
+        if len(Path(item).parts) == 2
+        and Path(item).parts[0] == "scripts"
+        and Path(item).suffix == ".py"
+        and not Path(item).name.startswith("_")
+    ]
+    if "pyproject.toml" in available:
+        text = read_text("pyproject.toml")
         m = re.search(r"(?ms)^\[project\.scripts\]\s*(.*?)(?:^\[|\Z)", text)
         if m:
             for line in m.group(1).splitlines():
                 key = line.split("=", 1)[0].strip().strip('"')
                 if key and not key.startswith("#"):
                     names.append(key)
-    return sorted(set(names))
+                    if len(names) >= _DURABLE_METADATA_ENTRY_LIMIT:
+                        break
+    return sorted(set(names))[:_DURABLE_METADATA_ENTRY_LIMIT]
 
 
-def _install_commands(root: Path) -> List[str]:
+def _install_commands(
+    root: Path,
+    available: set[str],
+    read_text: Callable[[str], str],
+) -> List[str]:
     cmds: List[str] = []
-    if (root / "pyproject.toml").is_file():
+    if "pyproject.toml" in available:
         cmds.append("pip install -e .")
-        text = (root / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
+        text = read_text("pyproject.toml")
         if "[project.optional-dependencies]" in text and "dev" in text:
             cmds.append("pip install -e '.[dev]'")
-    if (root / ".codex-plugin").is_dir():
+    if ".codex-plugin/plugin.json" in available:
         cmds.append(f'codex plugin marketplace add "{root}"')
     return cmds
 
 
 def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
     """Deterministic product facts — no git diary / recent commits."""
-    root = Path(project_root).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"project_root is not a directory: {root}")
-    version = _version_from_tree(root)
-    tools = _mcp_tools_from_config(root)
-    cli_commands = _cli_commands_from_tree(root)
-    install_commands = _install_commands(root)
-    packages = sorted(
-        d.name for d in root.iterdir() if d.is_dir() and (d / "__init__.py").is_file()
+    root = validate_project_root(project_root)
+    durable_read_bytes = 0
+    durable_read_skips: Dict[str, int] = {}
+    with repository_root_fd(root) as root_fd:
+        manifest = collect_repository_manifest(root, root_fd=root_fd)
+        if not repository_path_matches_fd(root, root_fd):
+            raise ValueError("project_root changed during collection")
+        available = set(manifest["repository_files"])
+
+        def read_text(relative: str) -> str:
+            nonlocal durable_read_bytes
+            if relative not in available:
+                return ""
+            remaining = _DURABLE_READ_BYTE_LIMIT - durable_read_bytes
+            if remaining <= 0:
+                durable_read_skips["read_budget"] = (
+                    durable_read_skips.get("read_budget", 0) + 1
+                )
+                return ""
+            text, size, reason = read_repository_text(
+                root / relative,
+                root,
+                root_fd=root_fd,
+                max_bytes=min(_CODE_MAX_FILE_BYTES, remaining),
+            )
+            if reason:
+                key = "read_budget" if reason == "oversized" else reason
+                durable_read_skips[key] = durable_read_skips.get(key, 0) + 1
+                return ""
+            durable_read_bytes += size
+            return text
+
+        version = _version_from_tree(available, read_text)
+        tools = _mcp_tools_from_config(available, read_text)
+        cli_commands = _cli_commands_from_tree(available, read_text)
+        install_commands = _install_commands(root, available, read_text)
+        readme_preview = read_text("README.md")[:1500]
+        skills = _list_skills(
+            root,
+            available,
+            manifest_source=str(manifest["repository_manifest_source"]),
+            root_fd=root_fd,
+        )
+
+    packages = sorted(_package_init_files_from_tree(available))[
+        :_DURABLE_METADATA_ENTRY_LIMIT
+    ]
+    has_license = bool({"LICENSE", "LICENSE.md"} & available)
+    rendered_text = _facts_as_text(
+        root=root,
+        version=version,
+        skills=skills,
+        tools=tools,
+        cli_commands=cli_commands,
+        install_commands=install_commands,
+        has_license=has_license,
+        readme_preview=readme_preview,
+        repository_files=manifest["repository_files"],
+        repository_manifest_complete=manifest["repository_manifest_complete"],
+        repository_manifest_total=manifest["repository_manifest_total"],
     )
-    skills = _list_skills(root)
-    manifest = collect_repository_manifest(root)
-    has_license = (root / "LICENSE").is_file() or (root / "LICENSE.md").is_file()
-    readme = root / "README.md"
-    readme_preview = ""
-    if readme.is_file():
-        readme_preview = readme.read_text(encoding="utf-8", errors="replace")[:1500]
+    text_truncated = len(rendered_text) > _DURABLE_TEXT_CHAR_LIMIT
+    if text_truncated:
+        marker = "\n[durable fact text truncated at configured limit]"
+        rendered_text = (
+            rendered_text[: _DURABLE_TEXT_CHAR_LIMIT - len(marker)] + marker
+        )
     facts = {
         "ok": True,
         "root": str(root),
@@ -172,25 +445,18 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
             f'codex plugin marketplace add "{root}"',
         ],
         "readme_preview_chars": len(readme_preview),
+        "durable_read_bytes": durable_read_bytes,
+        "durable_read_byte_limit": _DURABLE_READ_BYTE_LIMIT,
+        "durable_read_skips": dict(sorted(durable_read_skips.items())),
+        "text_char_limit": _DURABLE_TEXT_CHAR_LIMIT,
+        "text_truncated": text_truncated,
         "forbidden_in_output": [
             "session diary",
             "today we fixed",
             "HTTP 400 debug notes",
             "recent commits as product features",
         ],
-        "text": _facts_as_text(
-            root=root,
-            version=version,
-            skills=skills,
-            tools=tools,
-            cli_commands=cli_commands,
-            install_commands=install_commands,
-            has_license=has_license,
-            readme_preview=readme_preview,
-            repository_files=manifest["repository_files"],
-            repository_manifest_complete=manifest["repository_manifest_complete"],
-            repository_manifest_total=manifest["repository_manifest_total"],
-        ),
+        "text": rendered_text,
     }
     return facts
 
@@ -234,6 +500,14 @@ def _facts_as_text(
 
 _CODE_EXTS = {".py", ".toml", ".md", ".json", ".cfg", ".ini", ".txt", ".yaml", ".yml"}
 _CODE_SKIP_PARTS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules", "dist", "build"}
+_CODE_MAX_FILE_BYTES = 1_048_576
+_CODE_CANDIDATE_LIMITS = {"shallow": 1_000, "standard": 4_000, "deep": 10_000}
+_CODE_READ_BYTE_LIMITS = {
+    "shallow": 8 * 1024 * 1024,
+    "standard": 32 * 1024 * 1024,
+    "deep": 128 * 1024 * 1024,
+}
+_CODE_FOCUS_SCAN_LIMITS = {"shallow": 64, "standard": 256, "deep": 512}
 _CODE_CONTEXT_LIMITS = {
     "shallow": {
         "max_files": 20,
@@ -260,6 +534,144 @@ _CODE_CONTEXT_LIMITS = {
         "broad_ratio": 0.35,
     },
 }
+
+
+def validate_project_root(project_root: str | Path) -> Path:
+    """Resolve an explicit repository root without allowing broad or sensitive roots."""
+
+    root = Path(project_root).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"project_root is not a directory: {root}")
+    filesystem_root = Path(root.anchor).resolve()
+    home = Path.home().resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    blocked_roots = {
+        filesystem_root,
+        home,
+        *home.parents,
+        temp_root,
+        *temp_root.parents,
+    }
+    for raw_path in (
+        "/Applications",
+        "/Library",
+        "/System",
+        "/Volumes",
+        "/etc",
+        "/home",
+        "/opt",
+        "/private",
+        "/private/tmp",
+        "/private/var",
+        "/tmp",
+        "/usr",
+        "/var",
+    ):
+        candidate = Path(raw_path)
+        if candidate.exists():
+            blocked_roots.add(candidate.resolve())
+    if root in blocked_roots:
+        raise ValueError(
+            f"project_root is too broad and is blocked; provide a repository directory: {root}"
+        )
+    if root.name in REPOSITORY_SKIP_PARTS or is_sensitive_repository_path(root):
+        raise ValueError(f"project_root points to a sensitive directory: {root}")
+    return root
+
+
+def _safe_code_file(
+    path: Path,
+    root: Path,
+    *,
+    root_fd: int | None = None,
+) -> tuple[bool, str]:
+    if path.suffix.lower() not in _CODE_EXTS:
+        return False, "unsupported"
+    if root_fd is not None:
+        size, reason = repository_file_size(
+            path,
+            root,
+            root_fd=root_fd,
+            max_bytes=_CODE_MAX_FILE_BYTES,
+        )
+        return size is not None, reason
+    return safe_repository_file(path, root, max_bytes=_CODE_MAX_FILE_BYTES)
+
+
+def _looks_like_git_checkout(root: Path) -> bool:
+    current = root
+    while True:
+        if (current / ".git").exists():
+            return True
+        if current == current.parent:
+            return False
+        current = current.parent
+
+
+def _git_code_paths(
+    root: Path,
+    *,
+    scan_limit: int,
+    root_fd: int,
+) -> tuple[Optional[List[Path]], bool]:
+    relative_paths, truncated = git_repository_files(
+        root,
+        max_entries=scan_limit,
+        max_path_bytes=max(256_000, scan_limit * 512),
+        root_fd=root_fd,
+    )
+    if relative_paths is None:
+        if _looks_like_git_checkout(root):
+            raise ValueError("Git repository file selection failed; refusing filesystem fallback")
+        return None, False
+    return [root / item for item in relative_paths], truncated
+
+
+def _filesystem_code_paths(
+    root: Path,
+    *,
+    scan_limit: int,
+    root_fd: int,
+) -> tuple[List[Path], bool]:
+    path_byte_limit = max(256_000, scan_limit * 512)
+    relative_paths, truncated = filesystem_repository_files(
+        root,
+        max_entries=scan_limit,
+        max_path_bytes=path_byte_limit,
+        root_fd=root_fd,
+    )
+    return [root / item for item in relative_paths], truncated
+
+
+def _code_candidates(
+    root: Path,
+    *,
+    candidate_limit: int,
+    root_fd: int,
+) -> tuple[List[Path], bool, Dict[str, int]]:
+    scan_limit = max(candidate_limit * 4, candidate_limit + 1)
+    raw_paths, scan_truncated = _git_code_paths(
+        root,
+        scan_limit=scan_limit,
+        root_fd=root_fd,
+    )
+    if raw_paths is None:
+        raw_paths, scan_truncated = _filesystem_code_paths(
+            root,
+            scan_limit=scan_limit,
+            root_fd=root_fd,
+        )
+    skipped: Dict[str, int] = {}
+    candidates: List[Path] = []
+    for path in raw_paths:
+        safe, reason = _safe_code_file(path, root, root_fd=root_fd)
+        if not safe:
+            skipped[reason] = skipped.get(reason, 0) + 1
+            continue
+        candidates.append(path)
+    candidates.sort(key=lambda path: _code_context_priority(path, root))
+    candidate_truncated = scan_truncated or len(candidates) > candidate_limit
+    return candidates[:candidate_limit], candidate_truncated, skipped
 
 _FOCUS_STOP_TERMS = {
     "actual",
@@ -405,11 +817,32 @@ def _extract_focus_terms(focus: str | None) -> List[str]:
     return ordered
 
 
-def _read_code_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+def _read_code_text(
+    path: Path,
+    *,
+    root: Path | None = None,
+    root_fd: int | None = None,
+    max_bytes: int = _CODE_MAX_FILE_BYTES,
+) -> str:
+    read_root = (root or path.parent).resolve()
+    safe, _reason = _safe_code_file(path, read_root, root_fd=root_fd)
+    if not safe:
         return ""
+    if root_fd is None:
+        with repository_root_fd(read_root) as opened_root_fd:
+            return _read_code_text(
+                path,
+                root=read_root,
+                root_fd=opened_root_fd,
+                max_bytes=max_bytes,
+            )
+    text, _size, _reason = read_repository_text(
+        path,
+        read_root,
+        root_fd=root_fd,
+        max_bytes=min(_CODE_MAX_FILE_BYTES, max(0, int(max_bytes))),
+    )
+    return text
 
 
 def _focus_score(path: Path, root: Path, terms: List[str], body: str) -> int:
@@ -586,26 +1019,51 @@ def gather_code_context(
     This is the raw material multiple leaf LLMs analyze (architecture, usage, …) —
     distinct from the deterministic durable fact pack, which stays a guardrail.
     """
-    root = Path(project_root).expanduser().resolve()
-    if not root.is_dir():
-        raise ValueError(f"project_root is not a directory: {root}")
+    root = validate_project_root(project_root)
+    with repository_root_fd(root) as root_fd:
+        return _gather_code_context(
+            root,
+            root_fd=root_fd,
+            depth=depth,
+            focus=focus,
+            max_files=max_files,
+            max_chars=max_chars,
+        )
+
+
+def _gather_code_context(
+    root: Path,
+    *,
+    root_fd: int,
+    depth: str,
+    focus: str | None,
+    max_files: int | None,
+    max_chars: int | None,
+) -> Dict[str, Any]:
     normalized_depth = str(depth or "standard").strip().lower()
     if normalized_depth not in _CODE_CONTEXT_LIMITS:
         raise ValueError(
             "depth must be one of: " + ", ".join(sorted(_CODE_CONTEXT_LIMITS))
         )
     limits = _CODE_CONTEXT_LIMITS[normalized_depth]
-    file_limit = max(1, int(max_files or limits["max_files"]))
-    char_limit = max(1_000, int(max_chars or limits["max_chars"]))
-
-    candidates = []
-    for p in root.rglob("*"):
-        if not p.is_file() or p.suffix not in _CODE_EXTS:
-            continue
-        if any(part in _CODE_SKIP_PARTS or part.endswith(".egg-info") for part in p.relative_to(root).parts):
-            continue
-        candidates.append(p)
-    candidates.sort(key=lambda path: _code_context_priority(path, root))
+    file_limit = min(
+        int(limits["max_files"]),
+        max(1, int(max_files or limits["max_files"])),
+    )
+    char_limit = min(
+        int(limits["max_chars"]),
+        max(1_000, int(max_chars or limits["max_chars"])),
+    )
+    metadata_reserve = min(char_limit, min(8_000, max(1_000, char_limit // 4)))
+    source_char_limit = max(0, char_limit - metadata_reserve)
+    candidate_limit = int(_CODE_CANDIDATE_LIMITS[normalized_depth])
+    candidates, candidate_truncated, skipped_file_counts = _code_candidates(
+        root,
+        candidate_limit=candidate_limit,
+        root_fd=root_fd,
+    )
+    if not repository_path_matches_fd(root, root_fd):
+        raise ValueError("project_root changed during collection")
     broad_candidates = (
         _interleave_context_categories(candidates, root)
         if normalized_depth in {"standard", "deep"}
@@ -613,12 +1071,61 @@ def gather_code_context(
     )
 
     focus_terms = _extract_focus_terms(focus)
-    bodies = {path: _read_code_text(path) for path in candidates}
-    scored = sorted(
-        (
-            (_focus_score(path, root, focus_terms, bodies[path]), path)
-            for path in candidates
+    read_byte_limit = int(_CODE_READ_BYTE_LIMITS[normalized_depth])
+    focus_scan_byte_limit = int(read_byte_limit * 0.75)
+    read_bytes = 0
+    bodies: Dict[Path, str] = {}
+    read_budget_skips: set[Path] = set()
+
+    def body_for(path: Path, *, byte_ceiling: int = read_byte_limit) -> str:
+        nonlocal read_bytes
+        if path in bodies:
+            return bodies[path]
+        remaining_bytes = max(0, byte_ceiling - read_bytes)
+        source_bytes, reason = repository_file_size(
+            path,
+            root,
+            root_fd=root_fd,
+            max_bytes=min(_CODE_MAX_FILE_BYTES, remaining_bytes),
+        )
+        if source_bytes is None:
+            key = "read_budget" if reason == "oversized" else reason
+            if path not in read_budget_skips:
+                skipped_file_counts[key] = skipped_file_counts.get(key, 0) + 1
+                read_budget_skips.add(path)
+            return ""
+        body = _read_code_text(
+            path,
+            root=root,
+            root_fd=root_fd,
+            max_bytes=remaining_bytes,
+        )
+        read_bytes += source_bytes
+        bodies[path] = body
+        return body
+
+    path_scores = {
+        path: _focus_score(path, root, focus_terms, "")
+        for path in candidates
+    }
+    scan_order = sorted(
+        candidates,
+        key=lambda path: (
+            -path_scores[path],
+            _code_context_priority(path, root),
         ),
+    )
+    focus_scan_limit = int(_CODE_FOCUS_SCAN_LIMITS[normalized_depth])
+    focus_scan_candidates = scan_order[:focus_scan_limit] if focus_terms else []
+    for path in focus_scan_candidates:
+        path_scores[path] = _focus_score(
+            path,
+            root,
+            focus_terms,
+            body_for(path, byte_ceiling=focus_scan_byte_limit),
+        )
+    scored = sorted(
+        ((path_scores[path], path) for path in candidates),
         key=lambda item: (-item[0], _code_context_priority(item[1], root)),
     )
     focused_candidates = [
@@ -629,7 +1136,13 @@ def gather_code_context(
     focused_set = set(focused_candidates)
 
     repo_map = [str(path.relative_to(root)) for path in candidates]
-    git_state = gather_git(root)
+    git_state = gather_git(
+        root,
+        max_chars=max(256, min(8_000, char_limit // 5)),
+        root_fd=root_fd,
+    )
+    if not repository_path_matches_fd(root, root_fd):
+        raise ValueError("project_root changed during collection")
 
     broad_parts: List[str] = []
     focused_parts: List[str] = []
@@ -638,9 +1151,9 @@ def gather_code_context(
     evidence_segments: List[Dict[str, Any]] = []
     total = 0
     broad_limit = (
-        int(char_limit * float(limits["broad_ratio"]))
+        int(source_char_limit * float(limits["broad_ratio"]))
         if focused_candidates
-        else char_limit
+        else source_char_limit
     )
     broad_total = 0
     for p in broad_candidates:
@@ -648,7 +1161,7 @@ def gather_code_context(
             break
         if p in focused_set:
             continue
-        body = bodies[p]
+        body = body_for(p)
         if not body:
             continue
         rel = str(p.relative_to(root))
@@ -683,13 +1196,13 @@ def gather_code_context(
         broad_total += len(block)
         total += len(block)
 
-    focused_budget_start = char_limit - total
+    focused_budget_start = source_char_limit - total
     for index, p in enumerate(focused_candidates):
-        if len(used_files) >= file_limit or total >= char_limit:
+        if len(used_files) >= file_limit or total >= source_char_limit:
             break
         rel = str(p.relative_to(root))
         remaining_candidates = len(focused_candidates) - index
-        remaining_budget = char_limit - total
+        remaining_budget = source_char_limit - total
         fair_share = max(2_500, remaining_budget // max(1, remaining_candidates))
         requested_cap = (
             int(limits["focused_file_chars"])
@@ -699,11 +1212,15 @@ def gather_code_context(
         # An explicit path may use the full-file cap, but keep a small slice for
         # every remaining focus candidate so one large file cannot starve them.
         reserved_for_rest = max(0, remaining_candidates - 1) * 2_500
-        available = min(requested_cap, max(2_500, remaining_budget - reserved_for_rest))
+        available = min(
+            requested_cap,
+            remaining_budget,
+            max(2_500, remaining_budget - reserved_for_rest),
+        )
         blocks, records = _focused_file_blocks(
             p,
             root,
-            bodies[p],
+            body_for(p),
             focus_terms,
             max_chars=available,
         )
@@ -725,6 +1242,14 @@ def gather_code_context(
             f"focused deep reads: {len(focused_candidates)}; "
             f"focused character allowance: {focused_budget_start}"
         ),
+        (
+            f"Selection limits: {len(candidates)}/{candidate_limit} safe candidates"
+            f"{' (candidate list truncated)' if candidate_truncated else ''}; "
+            f"{read_bytes}/{read_byte_limit} source bytes read; "
+            f"focus scan truncated: "
+            f"{bool(focus_terms and len(candidates) > len(focus_scan_candidates))}"
+        ),
+        f"Skipped files by safety reason: {json.dumps(skipped_file_counts, sort_keys=True)}",
         "Focus candidates (highest relevance first):",
         *[f"- {path.relative_to(root)}" for path in focused_candidates],
         "Every excerpt keeps original line numbers. 'complete' means the whole file is present.",
@@ -737,13 +1262,22 @@ def gather_code_context(
             "generated-document synchronization, and working-tree state. State any missing evidence."
         ),
     ]
-    text = (
-        "\n".join(header)
-        + "\n\n--- PHASE 1: broad repository coverage ---\n"
+    source_text = (
+        "\n\n--- PHASE 1: broad repository coverage ---\n"
         + "".join(broad_parts)
         + "\n\n--- PHASE 2: focus-driven deep reads ---\n"
         + "".join(focused_parts)
     )
+    header_text = "\n".join(header)
+    header_char_limit = max(0, char_limit - len(source_text))
+    header_truncated = len(header_text) > header_char_limit
+    if header_truncated:
+        marker = "\n[context metadata truncated]"
+        if header_char_limit <= len(marker):
+            header_text = marker[:header_char_limit]
+        else:
+            header_text = header_text[: header_char_limit - len(marker)] + marker
+    text = header_text + source_text
     complete_files = sorted(
         {record["path"] for record in evidence_segments if record["mode"] == "complete"}
     )
@@ -761,6 +1295,19 @@ def gather_code_context(
         "focus_term_count": len(focus_terms),
         "focused_files": [str(path.relative_to(root)) for path in focused_candidates],
         "candidate_count": len(candidates),
+        "candidate_limit": candidate_limit,
+        "candidate_truncated": candidate_truncated,
+        "focus_scan_truncated": bool(
+            focus_terms and len(candidates) > len(focus_scan_candidates)
+        ),
+        "read_bytes": read_bytes,
+        "read_byte_limit": read_byte_limit,
+        "focus_scan_byte_limit": focus_scan_byte_limit,
+        "skipped_file_counts": dict(sorted(skipped_file_counts.items())),
+        "source_truncated_files": [],
+        "text_chars": len(text),
+        "text_char_limit": char_limit,
+        "text_truncated": header_truncated,
         "git": git_state,
         "text": text,
     }

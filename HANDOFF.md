@@ -11,6 +11,76 @@
 
 - **현재 단계**
 
+  **[2026-07-23 run state·저장소 조사 경계 보강 — 이 블록이 최신]**
+
+  사용자 요청에 따라 현재 구현을 다시 조사했고, 우선순위가 높은 보안 경계 문제를 수정했습니다.
+
+  완료한 내용:
+
+  - run ID를 서버가 생성하는 12자리 소문자 16진수로 제한했습니다. canonical·legacy schema, 메모리 조회,
+    파일 저장, resource URI는 같은 validator를 사용합니다.
+  - 상태 디렉터리와 파일 접근을 private permission(`0700`/`0600`)으로 고정했습니다. 사용자 제어 symlink는
+    거부하고, macOS의 `/var → /private/var`처럼 안전한 system alias만 허용했습니다.
+  - 검증한 directory FD를 파일 작업이 끝날 때까지 유지하고 `open`·`replace`·`unlink`를 `dir_fd`
+    기준으로 실행해 directory 교체와 path traversal이 외부 JSON 읽기·쓰기로 이어지지 않게 했습니다.
+  - `inspect_codebase`와 모든 durable fact pack은 Git tracked + non-ignored untracked 파일만 읽습니다.
+    Google durable writer의 중복 구현도 같은 canonical collector로 통합했고, Git에서 제외한 README나
+    pyproject를 별도 경로로 다시 읽는 우회를 막았습니다. `src/` layout의 실제 package도 fact pack에
+    포함해 문서 검증이 확인된 package 이름을 오탐하지 않게 했습니다.
+  - filesystem root, home과 그 상위, 넓은 system/temp root, 민감 파일, symlink, workspace 밖 대상,
+    1 MiB 초과 파일을 제외합니다. `secrets.yaml`, `.credentials.py`, `secrets.backup.txt` 같은 민감
+    설정 이름 변형도 차단했습니다.
+  - 저장소 읽기도 root directory FD에 고정하고 각 경로 구성요소를 no-follow 방식으로 열어, 검사 직후
+    상위 디렉터리가 symlink로 교체돼도 workspace 밖 내용을 읽지 않습니다. manifest와 Git 명령 자체도
+    해당 FD에서 실행하므로 root를 잠시 교체했다가 복원하는 ABA 우회가 외부 metadata를 노출하지 않습니다.
+  - Git과 non-Git 파일 열거, 후보 수, 경로 bytes, 총 읽기 bytes, Git 상태 출력, 최종 context 길이에
+    상한을 적용했습니다. Git file stream에는 deadline을 두고, manifest 부모 디렉터리 목록도 같은 문자
+    예산을 공유합니다. 하위 디렉터리 조사에서는 Git status/log/diff도 같은 범위로 제한합니다. 제한 여부와
+    생략 사유는 inspection metadata와 모델 입력에 함께 남깁니다.
+  - run ID 없는 fixed full-state handoff는 기존 호환성을 위해 비영속 방식으로 유지했습니다. adaptive state는
+    valid run ID가 필수이고, state와 별도 run ID를 함께 전달하면 중앙 runner가 일치 여부를 검사합니다.
+  - 개발 환경에 `pip install -e '.[dev]'`를 다시 실행해 pytest, Ruff, build 도구와 editable package를
+    설치했습니다.
+
+  변경 파일:
+
+  - `src/orchestrate_codex/store.py`
+  - `src/orchestrate_codex/runner.py`
+  - `src/orchestrate_codex/mcp_server.py`
+  - `src/orchestrate_codex/gather.py`
+  - `src/agent_hub/operations.py`
+  - `src/agent_hub/core/repository_facts.py`
+  - [`src/google_antigravity_codex/doc_facts.py`](./src/google_antigravity_codex/doc_facts.py)
+  - `tests/orchestrate_codex/test_core.py`
+  - `tests/agent_hub/test_adaptive_orchestration.py`
+  - `tests/agent_hub/test_server.py`
+  - `tests/google_antigravity_codex/test_writing_release.py`
+  - `HANDOFF.md`
+
+  검증:
+
+  - `./.venv/bin/python -m pytest -q` → `324 passed, 11 skipped`
+  - `./.venv/bin/python -m ruff check .` → 통과
+  - `git diff --check` → 통과
+  - `./scripts/check-sync.sh` → 통과
+  - `./.venv/bin/python -m build` → sdist·wheel 생성 성공
+  - `./.venv/bin/python -m orchestrate_codex.document_quality HANDOFF.md` → 통과
+  - 최신 블록 `agent_hub_verify(user_facing=true)` → 경고 0건
+
+  남은 위험과 범위:
+
+  - content-only focus symbol이 focus scan 상한 뒤에 있으면 자동 선택되지 않을 수 있다. 이 경우
+    `focus_scan_truncated`가 `true`로 반환되므로 더 구체적인 파일 경로로 다시 조사해야 한다.
+  - adaptive compare의 실제 provider 호출 수 계산과 downstream 답변 전달, prompt/resource 소유권,
+    concurrent continue의 CAS/lock은 이번 보안 변경 범위에 포함하지 않았습니다.
+  - 작업 시작 기준은 `d87562c`였고, 이 블록과 보안 변경은 같은 로컬 커밋으로 기록합니다. 원격 push는
+    요청받지 않아 수행하지 않습니다.
+
+  **다음 한 걸음:** adaptive `compare` participant 수를 최대 호출 수 계산에 반영하고 각 provider의 실제 답변을
+  downstream context에 전달하는 실패 회귀 테스트부터 추가하세요.
+
+  ---
+
   **[2026-07-18 README 사람 문체 전면 개편 — 이 블록이 최신]**
 
   `README.md`를 실제 사용자가 읽는 순서로 다시 썼다. 여러 모델을 오갈 때 겪는 불편과 제작 이유를 첫
@@ -632,4 +702,5 @@
   - 나머지 설계 금지사항은 `BUILD-SPEC.md` §8을 따를 것.
 
 - **다음 한 걸음**
-  Claude Code를 재시작한 새 작업에서 `document-write` 스킬이 자동 선택되는지 한 번 확인한다.
+  adaptive `compare` participant 수를 최대 호출 수 계산에 반영하고 각 provider의 실제 답변을 downstream
+  context에 전달하는 실패 회귀 테스트부터 추가한다.

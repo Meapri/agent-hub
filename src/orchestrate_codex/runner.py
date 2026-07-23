@@ -386,14 +386,18 @@ def _prune_runs() -> None:
 
 def load_state(state_or_id: Any) -> Dict[str, Any]:
     if isinstance(state_or_id, str) and state_or_id:
-        if state_or_id in _RUNS:
-            return _RUNS[state_or_id]
+        run_id = store.validate_run_id(state_or_id)
+        if run_id in _RUNS:
+            return _RUNS[run_id]
         # Not in memory — try the on-disk store (survives process restart).
-        persisted = store.load(state_or_id)
+        persisted = store.load(run_id)
         if persisted is not None:
-            _RUNS[state_or_id] = persisted
+            _RUNS[run_id] = persisted
             return persisted
     if isinstance(state_or_id, dict) and state_or_id.get("steps"):
+        raw_run_id = state_or_id.get("run_id")
+        if raw_run_id not in (None, ""):
+            store.validate_run_id(raw_run_id)
         return copy.deepcopy(state_or_id)
     raise ValueError("Provide run_id from start_run or a full state object")
 
@@ -606,6 +610,19 @@ def continue_run(
     error: str = "",
     auto_local: bool = True,
 ) -> Dict[str, Any]:
+    if state is not None:
+        state_run_id = (
+            store.validate_run_id(state.get("run_id"))
+            if state.get("run_id") not in (None, "")
+            else ""
+        )
+        requested_run_id = (
+            store.validate_run_id(run_id)
+            if run_id not in (None, "")
+            else ""
+        )
+        if state_run_id and requested_run_id and state_run_id != requested_run_id:
+            raise ValueError("run_id does not match state.run_id")
     st = load_state(state if state is not None else run_id)
     step = _current_step(st)
     if not step:
@@ -686,10 +703,11 @@ def continue_run(
 
 
 def _store(state: Dict[str, Any]) -> None:
-    rid = str(state.get("run_id") or "")
-    if rid:
-        _RUNS[rid] = state
-        store.save(state)
+    if state.get("run_id") in (None, ""):
+        return
+    rid = store.validate_run_id(state.get("run_id"))
+    store.save(state)
+    _RUNS[rid] = state
 
 
 _CAP_BINDING = {
@@ -829,10 +847,11 @@ def resolve_bindings(
 
 
 def get_run(run_id: str) -> Dict[str, Any]:
-    if run_id in _RUNS:
-        return _public_state(_RUNS[run_id])
-    persisted = store.load(run_id)
+    validated = store.validate_run_id(run_id)
+    if validated in _RUNS:
+        return _public_state(_RUNS[validated])
+    persisted = store.load(validated)
     if persisted is not None:
-        _RUNS[run_id] = persisted
+        _RUNS[validated] = persisted
         return _public_state(persisted)
-    raise ValueError(f"unknown run_id: {run_id}")
+    raise ValueError(f"unknown run_id: {validated}")

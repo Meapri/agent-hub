@@ -1190,7 +1190,9 @@ def _adaptive_run_options(
             if key in _ADAPTIVE_RUN_OPTION_KEYS and value is not None
         }
     )
-    options["project_root"] = str(options.get("project_root") or ".")
+    options["project_root"] = str(
+        gather.validate_project_root(options.get("project_root") or ".")
+    )
     options["workflow_timeout"] = _adaptive_workflow_timeout(
         options.get("workflow_timeout")
     )
@@ -1263,7 +1265,7 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
     supplied = args.get("plan")
     max_steps = int(args.get("max_steps") or orchestrator.MAX_PLAN_STEPS)
     max_calls = int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS)
-    root = str(args.get("project_root") or ".")
+    root = str(gather.validate_project_root(args.get("project_root") or "."))
     policy_mode = str(args.get("policy_mode") or "required")
     policy_file = str(args.get("policy_file") or "")
     max_policy_chars = int(
@@ -1458,6 +1460,27 @@ def _adaptive_step_call(
                 "partial_files": code_context.get("partial_files"),
                 "evidence_segments": code_context.get("evidence_segments"),
                 "focus_applied": code_context.get("focus_applied"),
+                "candidate_limit": code_context.get("candidate_limit"),
+                "candidate_truncated": code_context.get("candidate_truncated"),
+                "focus_scan_truncated": code_context.get("focus_scan_truncated"),
+                "read_bytes": code_context.get("read_bytes"),
+                "read_byte_limit": code_context.get("read_byte_limit"),
+                "focus_scan_byte_limit": code_context.get("focus_scan_byte_limit"),
+                "skipped_file_counts": code_context.get("skipped_file_counts"),
+                "source_truncated_files": code_context.get("source_truncated_files"),
+                "text_chars": code_context.get("text_chars"),
+                "text_char_limit": code_context.get("text_char_limit"),
+                "text_truncated": code_context.get("text_truncated"),
+                "git_output_truncated": (
+                    code_context.get("git", {}).get("output_truncated")
+                    if isinstance(code_context.get("git"), dict)
+                    else None
+                ),
+                "durable_read_bytes": durable_facts.get("durable_read_bytes"),
+                "durable_read_byte_limit": durable_facts.get(
+                    "durable_read_byte_limit"
+                ),
+                "durable_text_truncated": durable_facts.get("text_truncated"),
             }
         )
         return result
@@ -1789,9 +1812,26 @@ def _continue_adaptive_workflow(
 
 
 def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
-    run_id = str(args.get("run_id") or "")
+    run_id = args.get("run_id")
     supplied_state = args.get("state") if isinstance(args.get("state"), dict) else None
-    persisted = supplied_state or store.load(run_id)
+    if supplied_state is not None:
+        raw_state_run_id = supplied_state.get("run_id")
+        if raw_state_run_id not in (None, ""):
+            state_run_id = store.validate_run_id(raw_state_run_id)
+        elif supplied_state.get("run_kind") == "adaptive":
+            raise ValueError("adaptive state requires a valid run_id")
+        else:
+            state_run_id = ""
+        if run_id not in (None, ""):
+            requested_run_id = store.validate_run_id(run_id)
+            if state_run_id and requested_run_id != state_run_id:
+                raise ValueError("run_id does not match state.run_id")
+            state_run_id = state_run_id or requested_run_id
+        run_id = state_run_id
+        persisted = supplied_state
+    else:
+        run_id = store.validate_run_id(run_id)
+        persisted = store.load(run_id)
     if isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive":
         return _continue_adaptive_workflow(args, persisted)
     state = runner.continue_run(
@@ -1810,7 +1850,7 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_run(args: Dict[str, Any]) -> Dict[str, Any]:
-    run_id = str(args.get("run_id") or "")
+    run_id = store.validate_run_id(args.get("run_id"))
     persisted = store.load(run_id)
     if isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive":
         state = _adaptive_public_state(persisted)
@@ -2447,7 +2487,10 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "Advance a fixed run with a leaf result or execute the next adaptive wave.",
         _object(
             {
-                "run_id": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                },
                 "state": {"type": "object"},
                 "stage_id": {"type": "string"},
                 "result_text": {"type": "string"},
@@ -2472,7 +2515,15 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_get_run",
         "Get Run",
         "Load a workflow run from memory or the file-backed store.",
-        _object({"run_id": {"type": "string"}}, required=("run_id",)),
+        _object(
+            {
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                }
+            },
+            required=("run_id",),
+        ),
         read_only=True,
         idempotent=True,
     ),

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from google_antigravity_codex import release, writing
+from google_antigravity_codex import doc_facts, release, writing
 
 
 def test_writing_routes_to_antigravity_chat():
@@ -81,6 +81,23 @@ def test_durable_readme_forces_git_off_and_injects_fact_pack(tmp_path, monkeypat
     assert "7.7.7" in seen["prompt"]
     assert "Recent commits" not in seen["prompt"]
     assert "durable" in seen["system"].lower()
+
+
+def test_google_durable_facts_do_not_read_ignored_symlinked_metadata(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("pyproject.toml\n", encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.toml"
+    outside.write_text(
+        'version = "OUTSIDE_IGNORED_VERSION_SECRET"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").symlink_to(outside)
+
+    facts = doc_facts.collect_durable_facts(tmp_path)
+
+    assert facts["version"] == "[unknown]"
+    assert "pyproject.toml" not in facts["repository_files"]
+    assert "OUTSIDE_IGNORED_VERSION_SECRET" not in facts["text"]
 
 
 def test_durable_review_flags_recency():

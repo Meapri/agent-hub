@@ -439,10 +439,71 @@ def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     specs = {item["name"]: item for item in operations.tool_definitions()}
     start_props = specs["agent_hub_start_workflow"]["inputSchema"]["properties"]
     continue_props = specs["agent_hub_continue_workflow"]["inputSchema"]["properties"]
+    get_props = specs["agent_hub_get_run"]["inputSchema"]["properties"]
 
     assert start_props["workflow_timeout"]["default"] == 270
     assert continue_props["workflow_timeout"]["maximum"] == 290
     assert continue_props["max_waves_per_call"]["default"] == 1
+    assert continue_props["run_id"]["pattern"] == "^[0-9a-f]{12}$"
+    assert get_props["run_id"]["pattern"] == "^[0-9a-f]{12}$"
+
+
+def test_canonical_run_tools_reject_path_traversal_without_reading_outside(
+    tmp_path, monkeypatch
+):
+    state_dir = tmp_path / "runs"
+    outside = tmp_path / "outside.json"
+    outside.write_text(
+        '{"run_id": "../../outside", "run_kind": "adaptive", "secret": "do-not-leak"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_dir))
+
+    result = operations.dispatch_tool(
+        "agent_hub_get_run",
+        {"run_id": "../../outside"},
+    )
+
+    assert result["success"] is False
+    assert result["data"]["error_type"] == "ValueError"
+    assert "do-not-leak" not in json.dumps(result)
+
+    wrong_type = operations.dispatch_tool(
+        "agent_hub_get_run",
+        {"run_id": 123456789012},
+    )
+    assert wrong_type["success"] is False
+    assert wrong_type["data"]["error_type"] == "ValueError"
+
+
+def test_supplied_adaptive_state_rejects_invalid_run_id_before_provider_call(monkeypatch):
+    called = False
+
+    def forbidden_call(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("provider must not be called")
+
+    monkeypatch.setattr(operations, "_adaptive_step_call", forbidden_call)
+    state = {
+        "run_id": "../../outside",
+        "run_kind": "adaptive",
+        "status": "paused",
+        "plan": _plan(),
+        "options": {},
+        "results": {},
+        "waves": [],
+        "leaf_calls": 0,
+    }
+
+    result = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"state": state},
+    )
+
+    assert result["success"] is False
+    assert result["data"]["error_type"] == "ValueError"
+    assert called is False
 
 
 def test_end_to_end_timeout_returns_a_persisted_resume_run(tmp_path, monkeypatch):
@@ -490,7 +551,7 @@ def test_adaptive_run_fails_closed_when_resume_state_cannot_be_persisted(monkeyp
     monkeypatch.setattr(operations.store, "load", lambda _run_id: None)
 
     with pytest.raises(RuntimeError, match="could not be persisted"):
-        operations._save_adaptive_state({"run_id": "unwritable", "plan": _plan()})
+        operations._save_adaptive_state({"run_id": "0" * 12, "plan": _plan()})
 
 
 def test_workflow_catalog_and_schema_expose_adaptive_mode():
@@ -630,12 +691,29 @@ def test_adaptive_inspection_uses_bounded_local_code_evidence(tmp_path, monkeypa
                 {"path": "src/main.py", "mode": "complete", "start_line": 1, "end_line": 1}
             ],
             "focus_applied": bool(focus),
+            "candidate_limit": 10_000,
+            "candidate_truncated": True,
+            "focus_scan_truncated": True,
+            "read_bytes": 1_024,
+            "read_byte_limit": 2_048,
+            "focus_scan_byte_limit": 1_536,
+            "skipped_file_counts": {"sensitive": 1},
+            "source_truncated_files": [],
+            "text_chars": 1_900,
+            "text_char_limit": 2_000,
+            "text_truncated": True,
+            "git": {"output_truncated": True},
         },
     )
     monkeypatch.setattr(
         operations.gather,
         "gather_durable_facts",
-        lambda _root: {"text": "DURABLE FACT PACK"},
+        lambda _root: {
+            "text": "DURABLE FACT PACK",
+            "durable_read_bytes": 512,
+            "durable_read_byte_limit": 1_024,
+            "text_truncated": False,
+        },
     )
 
     def fake_chat(arguments):
@@ -668,6 +746,11 @@ def test_adaptive_inspection_uses_bounded_local_code_evidence(tmp_path, monkeypa
     assert result["data"]["inspection"]["depth"] == "deep"
     assert result["data"]["inspection"]["complete_files"] == ["src/main.py"]
     assert result["data"]["inspection"]["focus_applied"] is True
+    assert result["data"]["inspection"]["candidate_truncated"] is True
+    assert result["data"]["inspection"]["skipped_file_counts"] == {"sensitive": 1}
+    assert result["data"]["inspection"]["text_char_limit"] == 2_000
+    assert result["data"]["inspection"]["git_output_truncated"] is True
+    assert result["data"]["inspection"]["durable_read_bytes"] == 512
 
 
 def test_adaptive_compare_maps_models_to_participants(tmp_path, monkeypatch):

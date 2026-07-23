@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import stat
+from pathlib import Path
+
 import pytest
 
+from agent_hub.core import repository_facts
 from orchestrate_codex import catalog, errors, gather, policy, recipes, runner, store, verify
 from orchestrate_codex.mcp_server import dispatch_tool, handle_request, tool_definitions
 
@@ -109,6 +113,216 @@ def test_run_survives_process_restart(tmp_path):
     # and it can still be continued
     done = runner.continue_run(run_id=rid, stage_id="chat", result_text="ok", success=True)
     assert done["status"] == "completed"
+
+
+def test_run_store_rejects_path_traversal_and_invalid_ids(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": "do-not-read"}', encoding="utf-8")
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+
+    for run_id in (
+        "../../outside",
+        "/tmp/outside",
+        "ABCDEF123456",
+        "a" * 11,
+        "a" * 12 + "\n",
+        "가" * 12,
+        "a" * 11 + "\0",
+        123456789012,
+        "",
+    ):
+        with pytest.raises(ValueError, match="run_id"):
+            store.load(run_id)
+        with pytest.raises(ValueError, match="run_id"):
+            store.save({"run_id": run_id, "payload": "overwrite"})
+        with pytest.raises(ValueError, match="run_id"):
+            store.delete(run_id)
+
+    assert outside.read_text(encoding="utf-8") == '{"secret": "do-not-read"}'
+
+
+def test_run_store_uses_private_permissions_and_rejects_symlinks(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"secret": "unchanged"}', encoding="utf-8")
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+
+    run_id = "a" * 12
+    store.save({"run_id": run_id, "payload": "safe"})
+    state_file = state_root / f"{run_id}.json"
+    assert stat.S_IMODE(state_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
+
+    state_file.unlink()
+    state_file.symlink_to(outside)
+    assert store.load(run_id) is None
+    store.save({"run_id": run_id, "payload": "must-not-follow"})
+    assert outside.read_text(encoding="utf-8") == '{"secret": "unchanged"}'
+    assert run_id not in store.list_run_ids()
+
+
+def test_run_store_rejects_broad_or_symlinked_state_directories(tmp_path, monkeypatch):
+    home_mode = stat.S_IMODE(Path.home().stat().st_mode)
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(Path.home()))
+    with pytest.raises(ValueError, match="too broad"):
+        store.state_dir()
+    assert stat.S_IMODE(Path.home().stat().st_mode) == home_mode
+
+    target = tmp_path / "actual-runs"
+    target.mkdir()
+    linked = tmp_path / "linked-runs"
+    linked.symlink_to(target, target_is_directory=True)
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(linked))
+    with pytest.raises(ValueError, match="symlink"):
+        store.state_dir()
+
+    parent_target = tmp_path / "outside-parent"
+    parent_target.mkdir()
+    parent_link = tmp_path / "linked-parent"
+    parent_link.symlink_to(parent_target, target_is_directory=True)
+    monkeypatch.setenv(
+        "ORCHESTRATE_CODEX_STATE_DIR",
+        str(parent_link / "nested-runs"),
+    )
+    with pytest.raises(ValueError, match="symlink"):
+        store.state_dir()
+    assert not (parent_target / "nested-runs").exists()
+
+
+def test_run_store_allows_trusted_macos_var_alias(tmp_path, monkeypatch):
+    var_alias = Path("/var")
+    if not var_alias.is_symlink():
+        pytest.skip("macOS /var system alias is not present")
+    try:
+        relative = tmp_path.resolve().relative_to("/private/var")
+    except ValueError:
+        pytest.skip("pytest temp directory is not under /private/var")
+    aliased_state_dir = var_alias / relative / "alias-runs"
+    monkeypatch.setenv(
+        "ORCHESTRATE_CODEX_STATE_DIR",
+        str(aliased_state_dir),
+    )
+
+    resolved = store.state_dir()
+
+    assert resolved == aliased_state_dir.resolve()
+    assert stat.S_IMODE(resolved.stat().st_mode) == 0o700
+
+
+def test_run_store_keeps_file_access_on_validated_directory_fd(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_id = "c" * 12
+    (outside / f"{run_id}.json").write_text(
+        f'{{"run_id": "{run_id}", "secret": "outside"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    original_open = store._open_state_dir
+    swapped = False
+
+    def open_then_swap():
+        nonlocal swapped
+        root, directory_fd = original_open()
+        if not swapped:
+            swapped = True
+            validated = tmp_path / "validated-runs"
+            root.rename(validated)
+            root.symlink_to(outside, target_is_directory=True)
+        return root, directory_fd
+
+    monkeypatch.setattr(store, "_open_state_dir", open_then_swap)
+
+    assert store.load(run_id) is None
+
+
+def test_run_store_rejects_symlink_created_while_directory_is_opened(
+    tmp_path, monkeypatch
+):
+    state_root = tmp_path / "runs"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_id = "d" * 12
+    (outside / f"{run_id}.json").write_text(
+        f'{{"run_id": "{run_id}", "secret": "outside"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    original_lstat = Path.lstat
+    injected = False
+
+    def lstat_then_inject(path):
+        nonlocal injected
+        try:
+            return original_lstat(path)
+        except FileNotFoundError:
+            if Path(path) == state_root and not injected:
+                injected = True
+                state_root.symlink_to(outside, target_is_directory=True)
+            raise
+
+    monkeypatch.setattr(Path, "lstat", lstat_then_inject)
+
+    assert store.load(run_id) is None
+
+
+def test_run_id_contract_applies_to_memory_resources_and_legacy_schemas(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    runner._RUNS["../../outside"] = {"run_id": "../../outside", "steps": []}
+
+    run_specs = {
+        item["name"]: item["inputSchema"] for item in tool_definitions()
+        if item["name"] in {"orchestrate_continue_recipe", "orchestrate_get_run"}
+    }
+    assert run_specs["orchestrate_continue_recipe"]["properties"]["run_id"]["pattern"] == (
+        "^[0-9a-f]{12}$"
+    )
+    assert run_specs["orchestrate_get_run"]["properties"]["run_id"]["pattern"] == (
+        "^[0-9a-f]{12}$"
+    )
+    assert "../../outside" not in {
+        item["uri"].removeprefix("orchestrate://run/")
+        for item in handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}}
+        )["result"]["resources"]
+    }
+
+    malformed = handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "resources/read",
+            "params": {"uri": "orchestrate://run/../../outside"},
+        }
+    )
+    assert malformed["error"]["code"] == -32602
+    with pytest.raises(ValueError, match="run_id"):
+        runner.get_run("../../outside")
+
+
+def test_runner_rejects_mismatched_full_state_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        runner.continue_run(
+            run_id="b" * 12,
+            state=state,
+            stage_id="chat",
+            result_text="done",
+        )
+    with pytest.raises(ValueError, match="run_id"):
+        runner.continue_run(
+            state={**state, "run_id": 0},
+            stage_id="chat",
+            result_text="done",
+        )
 
 
 def test_looks_like_leaf_error():
@@ -460,10 +674,14 @@ def test_gather_durable_facts(tmp_path):
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "1.2.3"\n', encoding="utf-8")
     (tmp_path / "skills").mkdir()
     (tmp_path / "skills" / "demo").mkdir()
+    package = tmp_path / "src" / "demo_package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
     facts = gather.gather_durable_facts(tmp_path)
     assert facts["ok"] is True
     assert facts["version"] == "1.2.3"
     assert "demo" in facts["skills"]
+    assert "demo_package" in facts["packages"]
     assert "DURABLE FACT PACK" in facts["text"]
 
 
@@ -492,6 +710,199 @@ def test_durable_manifest_includes_non_ignored_untracked_files(tmp_path):
     }
 
 
+def test_durable_manifest_bounds_parent_directory_output(tmp_path):
+    for index in range(10):
+        relative = Path(
+            *[f"branch_{index}_{depth:02}" for depth in range(30)],
+            "module.py",
+        )
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True)
+        target.write_text("VALUE = 1\n", encoding="utf-8")
+
+    manifest = repository_facts.collect_repository_manifest(
+        tmp_path,
+        max_files=1_000,
+        max_chars=1_000,
+    )
+    output_chars = sum(
+        len(item) + 1
+        for key in ("repository_files", "repository_directories")
+        for item in manifest[key]
+    )
+
+    assert output_chars <= 1_000
+    assert manifest["repository_directories_truncated"] is True
+
+
+def test_durable_facts_do_not_read_git_ignored_readme(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("README.md\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text(
+        "# Private notes\n\nIGNORED_README_SECRET\n",
+        encoding="utf-8",
+    )
+
+    facts = gather.gather_durable_facts(tmp_path)
+
+    assert "README.md" not in facts["repository_files"]
+    assert facts["readme_preview_chars"] == 0
+    assert "IGNORED_README_SECRET" not in facts["text"]
+
+
+def test_empty_git_repository_does_not_fall_back_to_ignored_files(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("ignored.json\n", encoding="utf-8")
+    (tmp_path / "ignored.json").write_text('{"token": "secret"}\n', encoding="utf-8")
+
+    facts = gather.gather_durable_facts(tmp_path)
+    context = gather.gather_code_context(tmp_path, depth="shallow")
+
+    assert facts["repository_files"] == [".gitignore"]
+    assert context["candidate_count"] == 0
+    assert "ignored.json" not in context["text"]
+
+
+def test_durable_facts_do_not_follow_symlinks_or_include_sensitive_files(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-secret.txt"
+    outside.write_text("OUTSIDE_DURABLE_SECRET\n", encoding="utf-8")
+    (tmp_path / "README.md").symlink_to(outside)
+    (tmp_path / "pyproject.toml").symlink_to(outside)
+    (tmp_path / ".mcp.json").symlink_to(outside)
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "mcp_server.py").symlink_to(outside)
+    sensitive = tmp_path / ".claude"
+    sensitive.mkdir()
+    (sensitive / ".credentials.json").write_text(
+        '{"token": "CLAUDE_SECRET"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "oauth-token.json").write_text(
+        '{"token": "OAUTH_SECRET"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "auth.json").write_text(
+        '{"token": "AUTH_SECRET"}\n',
+        encoding="utf-8",
+    )
+
+    facts = gather.gather_durable_facts(tmp_path)
+    context = gather.gather_code_context(tmp_path, depth="deep")
+    combined = facts["text"] + "\n" + context["text"]
+
+    assert "OUTSIDE_DURABLE_SECRET" not in combined
+    assert "CLAUDE_SECRET" not in combined
+    assert "OAUTH_SECRET" not in combined
+    assert "AUTH_SECRET" not in combined
+    assert not {
+        "README.md",
+        "pyproject.toml",
+        ".mcp.json",
+        "package/mcp_server.py",
+        ".claude/.credentials.json",
+        "oauth-token.json",
+        "auth.json",
+    } & set(facts["repository_files"])
+
+
+def test_durable_facts_reject_root_swap_during_manifest_collection(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text(
+        "# Inside\n\nINSIDE_ROOT_MARKER\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "README.md").write_text(
+        "# Outside\n\nOUTSIDE_ROOT_SWAP_SECRET\n",
+        encoding="utf-8",
+    )
+    moved_root = tmp_path / "repo-original"
+    original_collect = gather.collect_repository_manifest
+
+    def swap_then_collect(project_root, **kwargs):
+        root.rename(moved_root)
+        root.symlink_to(outside, target_is_directory=True)
+        return original_collect(project_root, **kwargs)
+
+    monkeypatch.setattr(gather, "collect_repository_manifest", swap_then_collect)
+
+    with pytest.raises(ValueError, match="changed during collection"):
+        gather.gather_durable_facts(root)
+
+
+def test_durable_manifest_is_anchored_during_temporary_root_swap(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "inside.py").write_text("INSIDE = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_name = "OUTSIDE_FILENAME_SECRET.py"
+    (outside / outside_name).write_text("OUTSIDE_CONTENT_SECRET = 1\n", encoding="utf-8")
+    moved_root = tmp_path / "repo-original"
+    original_collect = gather.collect_repository_manifest
+
+    def collect_during_temporary_swap(project_root, **kwargs):
+        root.rename(moved_root)
+        root.symlink_to(outside, target_is_directory=True)
+        try:
+            return original_collect(project_root, **kwargs)
+        finally:
+            root.unlink()
+            moved_root.rename(root)
+
+    monkeypatch.setattr(
+        gather,
+        "collect_repository_manifest",
+        collect_during_temporary_swap,
+    )
+
+    facts = gather.gather_durable_facts(root)
+
+    assert facts["repository_files"] == ["inside.py"]
+    assert outside_name not in facts["text"]
+    assert "OUTSIDE_CONTENT_SECRET" not in facts["text"]
+
+
+def test_code_context_git_metadata_is_anchored_during_root_swap(tmp_path, monkeypatch):
+    import subprocess
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "inside.py").write_text("INSIDE = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside-git"
+    outside.mkdir()
+    subprocess.run(["git", "init"], cwd=outside, check=True, capture_output=True)
+    outside_name = "OUTSIDE_GIT_FILENAME_SECRET.py"
+    (outside / outside_name).write_text("OUTSIDE_GIT_CONTENT = 1\n", encoding="utf-8")
+    moved_root = tmp_path / "project-original"
+    original_gather_git = gather.gather_git
+
+    def gather_git_during_temporary_swap(project_root, **kwargs):
+        root.rename(moved_root)
+        root.symlink_to(outside, target_is_directory=True)
+        try:
+            return original_gather_git(project_root, **kwargs)
+        finally:
+            root.unlink()
+            moved_root.rename(root)
+
+    monkeypatch.setattr(gather, "gather_git", gather_git_during_temporary_swap)
+
+    context = gather.gather_code_context(root, depth="shallow")
+
+    assert "inside.py" in context["files"]
+    assert context["git"]["ok"] is False
+    assert outside_name not in context["text"]
+    assert "OUTSIDE_GIT_CONTENT" not in context["text"]
+
+
 def test_deep_code_context_covers_interfaces_tests_and_git_state(tmp_path):
     import subprocess
 
@@ -512,6 +923,443 @@ def test_deep_code_context_covers_interfaces_tests_and_git_state(tmp_path):
     assert "Coverage checklist" in context["text"]
     assert "Git state" in context["text"]
     assert "     1 |" in context["text"]
+
+
+def test_code_context_scopes_git_candidates_to_requested_subdirectory(tmp_path):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    target = repo / "packages" / "target"
+    target.mkdir(parents=True)
+    (target / "inside.py").write_text("INSIDE = 1\n", encoding="utf-8")
+    (repo / "sibling.py").write_text("SIBLING_SECRET = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    commit_secret = "SIBLING_COMMIT_SECRET"
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            commit_secret,
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    private_sibling = "SIBLING_PRIVATE_NAME.py"
+    (repo / private_sibling).write_text("PRIVATE = 1\n", encoding="utf-8")
+
+    context = gather.gather_code_context(target, depth="deep")
+
+    assert "inside.py" in context["files"]
+    assert "sibling.py" not in context["files"]
+    assert "SIBLING_SECRET" not in context["text"]
+    assert private_sibling not in context["text"]
+    assert private_sibling not in context["git"]["status"]
+    assert commit_secret not in context["text"]
+    assert context["git"]["branch"] == "[scoped]"
+
+
+def test_code_context_respects_gitignore_and_blocks_sensitive_or_symlinked_files(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text("ignored.json\n", encoding="utf-8")
+    (tmp_path / "tracked.py").write_text("TRACKED_MARKER = 1\n", encoding="utf-8")
+    (tmp_path / "visible.py").write_text("VISIBLE_MARKER = 1\n", encoding="utf-8")
+    (tmp_path / "ignored.json").write_text('{"token": "IGNORED_SECRET"}\n', encoding="utf-8")
+    (tmp_path / "credentials.json").write_text(
+        '{"token": "TRACKED_SECRET"}\n',
+        encoding="utf-8",
+    )
+    outside = tmp_path.parent / "outside_target.py"
+    outside.write_text("OUTSIDE_SECRET = 1\n", encoding="utf-8")
+    (tmp_path / "linked.py").symlink_to(outside)
+    (tmp_path / "linked_inside.py").symlink_to(tmp_path / "tracked.py")
+    subprocess.run(
+        ["git", "add", ".gitignore", "tracked.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", "-f", "credentials.json"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    context = gather.gather_code_context(tmp_path, depth="deep")
+
+    assert {"tracked.py", "visible.py"} <= set(context["files"])
+    assert not {
+        "ignored.json",
+        "credentials.json",
+        "linked.py",
+        "linked_inside.py",
+    } & set(context["files"])
+    assert "IGNORED_SECRET" not in context["text"]
+    assert "TRACKED_SECRET" not in context["text"]
+    assert "OUTSIDE_SECRET" not in context["text"]
+
+
+def test_gather_blocks_sensitive_yaml_names(tmp_path):
+    (tmp_path / "visible.py").write_text("VISIBLE = 1\n", encoding="utf-8")
+    (tmp_path / "secrets.yaml").write_text(
+        "token: YAML_SECRET_SENTINEL\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "credentials.yml").write_text(
+        "password: YAML_CREDENTIAL_SENTINEL\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "secrets.txt").write_text(
+        "TEXT_SECRET_SENTINEL\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "credentials.py").write_text(
+        "PYTHON_CREDENTIAL_SENTINEL = 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "credentials.local.py").write_text(
+        "VARIANT_CREDENTIAL_SENTINEL = 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "secrets.backup.txt").write_text(
+        "VARIANT_SECRET_SENTINEL\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".credentials.py").write_text(
+        "HIDDEN_CREDENTIAL_SENTINEL = 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".secrets.txt").write_text(
+        "HIDDEN_SECRET_SENTINEL\n",
+        encoding="utf-8",
+    )
+
+    facts = gather.gather_durable_facts(tmp_path)
+    context = gather.gather_code_context(tmp_path, depth="deep")
+    combined = facts["text"] + "\n" + context["text"]
+
+    assert "secrets.yaml" not in facts["repository_files"]
+    assert "credentials.yml" not in facts["repository_files"]
+    assert "secrets.txt" not in facts["repository_files"]
+    assert "credentials.py" not in facts["repository_files"]
+    assert "credentials.local.py" not in facts["repository_files"]
+    assert "secrets.backup.txt" not in facts["repository_files"]
+    assert ".credentials.py" not in facts["repository_files"]
+    assert ".secrets.txt" not in facts["repository_files"]
+    assert "YAML_SECRET_SENTINEL" not in combined
+    assert "YAML_CREDENTIAL_SENTINEL" not in combined
+    assert "TEXT_SECRET_SENTINEL" not in combined
+    assert "PYTHON_CREDENTIAL_SENTINEL" not in combined
+    assert "VARIANT_CREDENTIAL_SENTINEL" not in combined
+    assert "VARIANT_SECRET_SENTINEL" not in combined
+    assert "HIDDEN_CREDENTIAL_SENTINEL" not in combined
+    assert "HIDDEN_SECRET_SENTINEL" not in combined
+
+
+def test_code_context_rejects_parent_symlink_swap_during_read(tmp_path, monkeypatch):
+    package = tmp_path / "package"
+    package.mkdir()
+    target = package / "target.py"
+    target.write_text("INSIDE_MARKER = 1\n", encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (outside / "target.py").write_text(
+        "OUTSIDE_RACE_SECRET = 1\n",
+        encoding="utf-8",
+    )
+    original_package = tmp_path / "package-original"
+    original_safe = gather._safe_code_file
+    target_checks = 0
+
+    def swap_after_validation(path, root, **kwargs):
+        nonlocal target_checks
+        result = original_safe(path, root, **kwargs)
+        if path == target and result[0]:
+            target_checks += 1
+            if target_checks == 2:
+                package.rename(original_package)
+                package.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(gather, "_safe_code_file", swap_after_validation)
+
+    context = gather.gather_code_context(tmp_path, depth="shallow")
+
+    assert target_checks >= 2
+    assert "OUTSIDE_RACE_SECRET" not in context["text"]
+
+
+def test_code_context_rejects_broad_roots():
+    with pytest.raises(ValueError, match="too broad"):
+        gather.gather_code_context(Path.home())
+    with pytest.raises(ValueError, match="too broad"):
+        gather.gather_code_context(Path(Path.home().anchor))
+
+
+def test_project_root_validation_rejects_broad_ancestor_and_system_roots():
+    import tempfile
+
+    candidates = {
+        Path.home().resolve().parent,
+        Path(tempfile.gettempdir()).resolve(),
+    }
+    for candidate in (Path("/private/var"), Path("/private/tmp")):
+        if candidate.is_dir():
+            candidates.add(candidate.resolve())
+
+    for candidate in candidates:
+        with pytest.raises(ValueError, match="too broad"):
+            gather.validate_project_root(candidate)
+
+
+def test_code_context_skips_oversized_files(tmp_path):
+    (tmp_path / "small.py").write_text("SMALL_MARKER = 1\n", encoding="utf-8")
+    (tmp_path / "large.txt").write_text("LARGE_SECRET\n" * 100_000, encoding="utf-8")
+
+    context = gather.gather_code_context(tmp_path, depth="deep")
+
+    assert "small.py" in context["files"]
+    assert "large.txt" not in context["files"]
+    assert "LARGE_SECRET" not in context["text"]
+
+
+def test_code_context_reads_candidates_lazily(tmp_path, monkeypatch):
+    for index in range(1_050):
+        (tmp_path / f"module_{index:03}.py").write_text(
+            f"VALUE_{index} = {index}\n",
+            encoding="utf-8",
+        )
+    original = gather._read_code_text
+    reads = []
+
+    def recording_read(*args, **kwargs):
+        reads.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gather, "_read_code_text", recording_read)
+    context = gather.gather_code_context(tmp_path, depth="shallow")
+
+    assert context["candidate_count"] == 1_000
+    assert context["candidate_truncated"] is True
+    assert len(reads) <= 25
+
+
+def test_non_git_gather_does_not_use_materializing_os_walk(tmp_path, monkeypatch):
+    (tmp_path / "visible.py").write_text("VISIBLE = 1\n", encoding="utf-8")
+
+    def fail_walk(*_args, **_kwargs):
+        raise AssertionError("os.walk materializes an unbounded directory listing")
+
+    monkeypatch.setattr(repository_facts.os, "walk", fail_walk)
+
+    context = gather.gather_code_context(tmp_path, depth="shallow")
+    facts = gather.gather_durable_facts(tmp_path)
+
+    assert "visible.py" in context["files"]
+    assert "visible.py" in facts["repository_files"]
+
+
+def test_git_state_and_complete_context_respect_max_chars(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "tracked.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-F",
+            "-",
+        ],
+        cwd=tmp_path,
+        input="G" * 200_000,
+        text=True,
+        check=True,
+        capture_output=True,
+    )
+
+    context = gather.gather_code_context(
+        tmp_path,
+        depth="shallow",
+        max_chars=1_000,
+    )
+
+    assert len(context["text"]) <= 1_000
+    assert context["text_char_limit"] == 1_000
+    assert context["git"]["output_truncated"] is True
+
+
+def test_public_gather_git_anchors_root_before_commands(tmp_path, monkeypatch):
+    import subprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    inside_name = "INSIDE_STATUS.py"
+    (root / inside_name).write_text("INSIDE = 1\n", encoding="utf-8")
+
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    subprocess.run(["git", "init"], cwd=replacement, check=True, capture_output=True)
+    outside_name = "OUTSIDE_REPLACEMENT_SECRET.py"
+    (replacement / outside_name).write_text("OUTSIDE = 1\n", encoding="utf-8")
+    moved_root = tmp_path / "repo-original"
+    original_run = gather._run_bounded
+    swapped = False
+
+    def swap_before_first_git_command(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            root.rename(moved_root)
+            replacement.rename(root)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(gather, "_run_bounded", swap_before_first_git_command)
+
+    result = gather.gather_git(root)
+
+    assert result["ok"] is True
+    assert inside_name in result["status"]
+    assert outside_name not in result["status"]
+
+
+def test_git_file_stream_stops_on_oversized_unterminated_record(tmp_path, monkeypatch):
+    class FakeStdout:
+        def __init__(self):
+            self.read_calls = 0
+
+        def read(self, _size):
+            self.read_calls += 1
+            if self.read_calls <= 8:
+                return b"x" * (64 * 1024)
+            return b""
+
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = FakeStdout()
+            self.terminated = False
+
+        def poll(self):
+            return None if not self.terminated else -15
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15 if self.terminated else 0
+
+    fake_process = FakeProcess()
+    monkeypatch.setattr(repository_facts, "_git_root", lambda root: root)
+    monkeypatch.setattr(
+        repository_facts.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: fake_process,
+    )
+
+    paths, truncated = repository_facts.git_repository_files(
+        tmp_path,
+        max_entries=10,
+        max_path_bytes=1_000,
+    )
+
+    assert paths == []
+    assert truncated is True
+    assert fake_process.stdout.read_calls <= 2
+
+
+def test_git_file_stream_times_out_when_child_never_produces_output(
+    tmp_path,
+    monkeypatch,
+):
+    class HangingStdout:
+        def fileno(self):
+            return 123
+
+        def close(self):
+            return None
+
+    class HangingProcess:
+        def __init__(self):
+            self.stdout = HangingStdout()
+            self.terminated = False
+
+        def poll(self):
+            return None if not self.terminated else -15
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15 if self.terminated else 0
+
+    class NeverReadySelector:
+        def register(self, *_args, **_kwargs):
+            return None
+
+        def select(self, timeout=None):
+            return []
+
+        def close(self):
+            return None
+
+    fake_process = HangingProcess()
+    monotonic_values = iter([0.0, 1.0])
+    monkeypatch.setattr(repository_facts, "_git_root", lambda root: root)
+    monkeypatch.setattr(
+        repository_facts.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: fake_process,
+    )
+    monkeypatch.setattr(
+        repository_facts.selectors,
+        "DefaultSelector",
+        NeverReadySelector,
+    )
+    monkeypatch.setattr(
+        repository_facts.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    with pytest.raises(ValueError, match="timed out"):
+        repository_facts.git_repository_files(
+            tmp_path,
+            max_entries=10,
+            max_path_bytes=1_000,
+            timeout=0.1,
+        )
+
+    assert fake_process.terminated is True
 
 
 def test_deep_code_context_reads_a_focused_key_file_completely(tmp_path):
