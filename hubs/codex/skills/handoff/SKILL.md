@@ -1,33 +1,44 @@
 ---
 name: handoff
 description: >
-  현재 작업 상태를 HANDOFF.md 복구 기록으로 출력한다. 다른 하네스/모델로 작업을 넘기기 전, 또는
-  세션을 마칠 때 실행. Trigger when the user says "핸드오프", "hand off", "인계", "넘겨", or before
-  switching agents/models or ending a session.
+  현재 프로젝트의 작업 상태를 프로젝트별 HANDOFF.md 복구 기록으로 안전하게 갱신한다.
+  Trigger when the user says "핸드오프", "hand off", "인계", "넘겨", or before switching
+  agents/models or ending a session.
 ---
 
-## 목적
-브랜드가 다른 하네스 간에는 대화 상태가 그대로 넘어가지 않는다(툴콜 이력이 뭉개짐). 그래서 이관 단위를
-**대화가 아니라 저장소 아티팩트**로 바꾼다. 이 스킬은 다음 담당(사람이든 다른 에이전트든)이 원 대화 없이
-이어받을 수 있는 **복구 기록**을 만든다.
+# 프로젝트 핸드오프
 
-## Steps
-1. 현재 상태를 수집한다:
-   - 변경 파일: `git status --short` 와 `git diff --stat`.
-   - 검증 결과: 이번에 실제로 돌린 테스트/명령과 그 출력.
-2. 작업 루트의 `HANDOFF.md`에 아래 패킷을 채운다(요약이 아니라 복구 기록으로):
-   ```markdown
-   # HANDOFF — <작업명>
-   - 원래 목표: <궁극 목표>
-   - 현재 단계: <전체 중 지금 어디> — <어느 하네스/모델에서 작업했는지>
-   - 완료: <끝난 것 — 파일/커밋 해시와 함께>
-   - 미완: <남은 것 — 구체적으로>
-   - 변경 파일: <git diff 요약. `git diff > handoff-<name>.diff` 첨부 권장>
-   - 검증 실행 결과: <무엇을 돌렸고 결과가 무엇이었는지 — 실제 출력>
-   - 현재 리스크: <알려진 위험·의심되는 부분>
-   - Do-Not-Repeat: <이미 시도했다 실패한 것 — 반복 금지>
-   - 다음 한 걸음: <이어받는 쪽이 즉시 할 단 하나의 행동> — <권장 하네스가 있으면 명시>
-   ```
-3. 중요한 결정·선호·교훈은 shared memory(`mcp__memory__*`)에 함께 적재한다(진행 상태는 HANDOFF.md, 지속 지식은 memory).
-4. 패킷을 과대하게 채우지 않는다 — 다 넣으면 다음 담당이 안 읽는다.
-5. `git add -A && git commit -m "handoff: <작업명>"` 로 작은 커밋을 남긴다.
+핸드오프의 정본은 대화나 MCP memory가 아니라 현재 프로젝트의 Git에 남는 `HANDOFF.md`다. 다른
+하네스가 원 대화 없이 다음 행동을 실행할 수 있을 만큼만 복구 정보를 남긴다.
+
+## 진행 순서
+
+1. 현재 작업의 절대 `project_root`를 확인한다. `git status --short`, 관련 diff, 최근 커밋과 이번
+   세션에서 실제로 실행한 검증 결과를 모은다.
+2. `agent_hub_get_handoff`를 `project_root`, `mode=auto`, `search=nearest`로 호출한다. monorepo 하위
+   프로젝트에 자체 `HANDOFF.md`가 있으면 그것을 우선하고, 없을 때만 같은 Git 저장소의 가까운 상위
+   파일을 사용한다. 다른 저장소나 형제 프로젝트의 파일을 가져오지 않는다.
+3. 아래 내용을 짧은 Markdown 패킷으로 만든다.
+   - 원래 목표와 현재 단계
+   - 완료와 미완
+   - 실제 변경 파일
+   - 실제 검증 결과
+   - 현재 위험과 반복하면 안 되는 실패
+   - 이어받는 쪽이 바로 실행할 단 하나의 `다음 한 걸음`
+4. `agent_hub_prepare_handoff_update`에 패킷을 `body`로 넘긴다. 기본값은 현재
+   `project_root/HANDOFF.md`를 만들거나 갱신한다. 상위 프로젝트 파일을 의도적으로 갱신할 때만
+   `search=nearest`나 명시적인 `file`을 사용한다. 반환된 `target`, `expected_sha256`, `content`를
+   확인한다. 이 단계에서는 파일이 바뀌지 않는다.
+5. 대상과 diff가 맞을 때만 `agent_hub_apply_handoff_update`에 같은 `project_root`, `target`을
+   `file`로, 준비된 `content`와 `expected_sha256`을 넘긴다. SHA 충돌이면 다른 변경을 덮어쓰지 말고
+   파일을 다시 읽어 패킷을 재준비한다.
+6. 적용 뒤 `git diff -- HANDOFF.md`와 `git status --short`를 확인한다. stage·commit·push는
+   사용자가 요청했을 때만 관련 파일로 범위를 좁혀 수행한다.
+
+## 경계
+
+- 진행 상태와 결정은 `HANDOFF.md`에 남긴다. shared memory는 선택적인 검색 보조일 뿐 정본이 아니다.
+- 비밀값, 개인 데이터, provider 토큰, 대화 전문은 넣지 않는다.
+- 실행하지 않은 테스트를 통과했다고 쓰지 않는다.
+- 전체 작업 트리를 한꺼번에 stage하는 명령을 사용하지 않는다.
+- Agent Hub의 marker 밖 기존 기록은 보존한다.

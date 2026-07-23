@@ -14,11 +14,7 @@ def _policy_root(tmp_path):
 
 
 def _decision(label: str) -> str:
-    return (
-        '{"schema":"decision_v1","label":"'
-        + label
-        + '","confidence":0.9,"rationale":"checked"}'
-    )
+    return '{"schema":"decision_v1","label":"' + label + '","confidence":0.9,"rationale":"checked"}'
 
 
 def test_policy_injection_and_provenance_are_stable(tmp_path):
@@ -163,9 +159,7 @@ def test_compare_consistency_gate_passes_with_shared_provenance(tmp_path, monkey
     assert report["request_sha256"]
 
 
-def test_compare_consistency_gate_fails_closed_on_invalid_or_split_output(
-    tmp_path, monkeypatch
-):
+def test_compare_consistency_gate_fails_closed_on_invalid_or_split_output(tmp_path, monkeypatch):
     root = _policy_root(tmp_path)
     answers = {
         "claude": _decision("ACCEPT"),
@@ -225,14 +219,66 @@ def test_raw_compare_stays_unscored(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize(
+    ("failed_providers", "expected_success", "expected_status"),
+    [
+        (set(), True, "complete"),
+        ({"grok"}, True, "partial"),
+        ({"grok", "gemini"}, False, "insufficient"),
+        ({"claude", "grok", "gemini"}, False, "failed"),
+    ],
+)
+def test_raw_compare_requires_two_responses_and_reports_participants(
+    monkeypatch, failed_providers, expected_success, expected_status
+):
+    def fake_chat(provider, _arguments):
+        if provider in failed_providers:
+            return {
+                "success": False,
+                "text": "",
+                "model": f"{provider}-test",
+                "error": "provider unavailable",
+            }
+        text = provider * 5000 if provider == "claude" else f"{provider} evidence"
+        return {
+            "success": True,
+            "text": text,
+            "model": f"{provider}-test",
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(operations, "_chat_raw", fake_chat)
+    result = operations.dispatch_tool(
+        "agent_hub_compare_models",
+        {
+            "prompt": "open question",
+            "providers": ["claude", "grok", "gemini"],
+            "execution": "sequential",
+        },
+    )
+
+    data = result["data"]
+    assert result["success"] is expected_success
+    assert data["schema"] == "compare_result_v1"
+    assert data["status"] == expected_status
+    assert data["requested"] == 3
+    assert data["succeeded"] == 3 - len(failed_providers)
+    assert data["min_successes"] == 2
+    assert data["call_usage"]["provider_calls"] == 3
+    assert data["participants"] == data["results"]
+    claude = data["participants"][0]
+    if "claude" not in failed_providers:
+        assert claude["original_chars"] > len(claude["text"])
+        assert claude["text_truncated"] is True
+
+
 def test_public_schema_exposes_parallel_and_gate_controls():
     spec = next(
-        item
-        for item in operations.tool_definitions()
-        if item["name"] == "agent_hub_compare_models"
+        item for item in operations.tool_definitions() if item["name"] == "agent_hub_compare_models"
     )
     props = spec["inputSchema"]["properties"]
     assert props["execution"]["default"] == "parallel"
     assert props["max_concurrency"]["maximum"] == 3
+    assert props["min_successes"]["default"] == 2
     assert props["consistency"]["required"] == ["decision_labels"]
-    assert len(operations.tool_definitions()) == 26
+    assert len(operations.tool_definitions()) == 29

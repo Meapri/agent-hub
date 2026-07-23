@@ -69,12 +69,14 @@ def run_auto(
                 "ok": False,
                 "error": "no leaf servers configured",
                 "hint": "Create ~/.orchestrate_codex/leaves.json (or set ORCHESTRATE_CODEX_LEAVES), "
-                        "or use the supervised orchestrate_start_run flow instead.",
+                "or use the supervised orchestrate_start_run flow instead.",
             }
     else:
         reg = {}
 
-    state = runner.start_run(recipe_id, args=args or {}, bindings=bindings, project_root=project_root)
+    state = runner.start_run(
+        recipe_id, args=args or {}, bindings=bindings, project_root=project_root
+    )
     clients: Dict[str, LeafClient] = {}
     trace: List[Dict[str, Any]] = []
     calls = 0
@@ -87,6 +89,7 @@ def run_auto(
                 break
             na = state.get("next_action") or {}
             typ = na.get("type")
+            expected_revision = na.get("expected_revision")
             if typ in {"done", "failed"}:
                 break
             if typ == "call_tool":
@@ -94,10 +97,15 @@ def run_auto(
                 tool = str(na.get("tool") or "")
                 if calls >= max_leaf_calls:
                     state = runner.continue_run(
-                        run_id=state["run_id"], stage_id=stage, success=False,
+                        run_id=state["run_id"],
+                        stage_id=stage,
+                        success=False,
                         error="max_leaf_calls exceeded",
+                        expected_revision=expected_revision,
                     )
-                    trace.append({"stage": stage, "tool": tool, "ok": False, "error": "max_leaf_calls"})
+                    trace.append(
+                        {"stage": stage, "tool": tool, "ok": False, "error": "max_leaf_calls"}
+                    )
                     continue
                 if client_resolver is not None:
                     client = client_resolver(tool)
@@ -108,13 +116,19 @@ def run_auto(
                     # Unconfigured/unspawnable leaf → report as a leaf failure so the
                     # runner rotates to the next fallback tool.
                     state = runner.continue_run(
-                        run_id=state["run_id"], stage_id=stage, success=False, error=err
+                        run_id=state["run_id"],
+                        stage_id=stage,
+                        success=False,
+                        error=err,
+                        expected_revision=expected_revision,
                     )
                     trace.append({"stage": stage, "tool": tool, "ok": False, "error": err})
                     continue
                 calls += 1
                 try:
-                    ok, text = client.call_tool(tool, na.get("arguments") or {}, timeout=per_call_timeout)
+                    ok, text = client.call_tool(
+                        tool, na.get("arguments") or {}, timeout=per_call_timeout
+                    )
                 except LeafError as exc:
                     ok, text = False, str(exc)
                 # A leaf may hand back a transport/backend error (HTTP 503, connection
@@ -123,15 +137,30 @@ def run_auto(
                 soft_error = ok and errors.looks_like_leaf_error(text)
                 if soft_error:
                     ok = False
-                trace.append({"stage": stage, "tool": tool, "ok": ok,
-                              "result_chars": len(text), "soft_error": soft_error})
+                trace.append(
+                    {
+                        "stage": stage,
+                        "tool": tool,
+                        "ok": ok,
+                        "result_chars": len(text),
+                        "soft_error": soft_error,
+                    }
+                )
                 state = runner.continue_run(
-                    run_id=state["run_id"], stage_id=stage,
-                    result_text=text if ok else "", success=ok, error="" if ok else text,
+                    run_id=state["run_id"],
+                    stage_id=stage,
+                    result_text=text if ok else "",
+                    success=ok,
+                    error="" if ok else text,
+                    expected_revision=expected_revision,
                 )
                 continue
             # local / continue: advance the state machine (local stages auto-run)
-            state = runner.continue_run(run_id=state["run_id"], stage_id=str(na.get("stage_id") or ""))
+            state = runner.continue_run(
+                run_id=state["run_id"],
+                stage_id=str(na.get("stage_id") or ""),
+                expected_revision=expected_revision,
+            )
     finally:
         for client in clients.values():
             client.close()
@@ -159,8 +188,11 @@ def probe_models(leaves: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str
     """
     reg = leaves_mod.load_leaves() if leaves is None else leaves
     if not reg:
-        return {"configured": False, "confirmed": catalog.LATEST_MODELS,
-                "note": "No leaves configured; returning last-known ids (unverified)."}
+        return {
+            "configured": False,
+            "confirmed": catalog.LATEST_MODELS,
+            "note": "No leaves configured; returning last-known ids (unverified).",
+        }
     confirmed: Dict[str, str] = {}
     detail: List[Dict[str, Any]] = []
     for leaf_tool, candidates in catalog.PROBE_CANDIDATES.items():
@@ -171,11 +203,19 @@ def probe_models(leaves: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str
         picked = None
         tried = []
         try:
-            client = LeafClient(key, str(spec["command"]), [str(a) for a in spec.get("args", [])],
-                                cwd=spec.get("cwd"), env=spec.get("env"), default_timeout=60)
+            client = LeafClient(
+                key,
+                str(spec["command"]),
+                [str(a) for a in spec.get("args", [])],
+                cwd=spec.get("cwd"),
+                env=spec.get("env"),
+                default_timeout=60,
+            )
             try:
                 for cand in candidates:
-                    ok, _ = client.call_tool(leaf_tool, {"prompt": "ping", "model": cand, "max_tokens": 5}, timeout=45)
+                    ok, _ = client.call_tool(
+                        leaf_tool, {"prompt": "ping", "model": cand, "max_tokens": 5}, timeout=45
+                    )
                     tried.append({"model": cand, "ok": ok})
                     if ok:
                         picked = cand

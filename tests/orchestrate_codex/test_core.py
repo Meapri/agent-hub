@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import json
+import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,10 +29,16 @@ def test_step_delegation_resolves_latest_model_and_context(tmp_path):
     (tmp_path / "pyproject.toml").write_text('version = "1.0.0"\n', encoding="utf-8")
     (tmp_path / "m.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
     # host delegates architecture analysis to Claude with code context
-    out = dispatch_tool("orchestrate_step", {
-        "capability": "chat", "instruction": "Analyze architecture",
-        "doc_class": "durable", "gather": "code", "project_root": str(tmp_path),
-    })
+    out = dispatch_tool(
+        "orchestrate_step",
+        {
+            "capability": "chat",
+            "instruction": "Analyze architecture",
+            "doc_class": "durable",
+            "gather": "code",
+            "project_root": str(tmp_path),
+        },
+    )
     assert out["tool"] == "claude_codex_chat"
     assert out["model"] == "claude-opus-4-8"  # latest, not the leaf's stale default
     assert out["verify_after"] is True
@@ -36,10 +47,17 @@ def test_step_delegation_resolves_latest_model_and_context(tmp_path):
 
 
 def test_step_write_synthesis_uses_findings_as_source(tmp_path):
-    out = dispatch_tool("orchestrate_step", {
-        "capability": "write", "write_task": "readme", "instruction": "Write README",
-        "doc_class": "durable", "context": "FINDINGS: an MCP plugin", "project_root": str(tmp_path),
-    })
+    out = dispatch_tool(
+        "orchestrate_step",
+        {
+            "capability": "write",
+            "write_task": "readme",
+            "instruction": "Write README",
+            "doc_class": "durable",
+            "context": "FINDINGS: an MCP plugin",
+            "project_root": str(tmp_path),
+        },
+    )
     assert out["tool"] == "google_antigravity_write"
     assert out["model"] == "gemini-3.1-pro-high"
     assert out["arguments"]["task"] == "readme"
@@ -52,15 +70,36 @@ def test_cross_provider_fallback_fixes_model():
     # leaf) 404s. The selected tool's provider model must be substituted.
     step = {"id": "s", "capability": "chat", "instruction": "x"}
     ua = {"prompt": "hi", "model": "grok-4.5"}
-    assert runner._args_for_tool(step, "grok_codex_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={})["model"] == "grok-4.5"
-    assert runner._args_for_tool(step, "claude_codex_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={})["model"] == "claude-opus-4-8"
-    assert runner._args_for_tool(step, "google_antigravity_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={})["model"] == "gemini-3.1-pro-high"
+    assert (
+        runner._args_for_tool(
+            step, "grok_codex_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={}
+        )["model"]
+        == "grok-4.5"
+    )
+    assert (
+        runner._args_for_tool(
+            step, "claude_codex_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={}
+        )["model"]
+        == "claude-opus-4-8"
+    )
+    assert (
+        runner._args_for_tool(
+            step, "google_antigravity_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={}
+        )["model"]
+        == "gemini-3.1-pro-high"
+    )
 
 
 def test_step_can_force_leaf_and_model():
-    out = dispatch_tool("orchestrate_step", {
-        "capability": "chat", "instruction": "x", "leaf": "grok_codex_chat", "model": "grok-4.5",
-    })
+    out = dispatch_tool(
+        "orchestrate_step",
+        {
+            "capability": "chat",
+            "instruction": "x",
+            "leaf": "grok_codex_chat",
+            "model": "grok-4.5",
+        },
+    )
     assert out["tool"] == "grok_codex_chat"
     assert out["arguments"]["model"] == "grok-4.5"
 
@@ -70,11 +109,17 @@ def test_verify_tool_flags_hallucinated_tool(tmp_path):
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     # a real detected tool so verify knows the fact-pack tool set (else it can't flag unknowns)
-    (pkg / "mcp_server.py").write_text('TOOLS = [{"name": "claude_codex_chat"}]\n', encoding="utf-8")
-    out = dispatch_tool("orchestrate_verify", {
-        "text": "Today we shipped. Call google_madeup_tool.",
-        "doc_class": "durable", "project_root": str(tmp_path),
-    })
+    (pkg / "mcp_server.py").write_text(
+        'TOOLS = [{"name": "claude_codex_chat"}]\n', encoding="utf-8"
+    )
+    out = dispatch_tool(
+        "orchestrate_verify",
+        {
+            "text": "Today we shipped. Call google_madeup_tool.",
+            "doc_class": "durable",
+            "project_root": str(tmp_path),
+        },
+    )
     assert any("recency" in w for w in out["warnings"])
     assert any("google_madeup_tool" in w for w in out["warnings"])
 
@@ -89,17 +134,34 @@ def test_ok_text_is_full_json_even_when_payload_has_text(tmp_path):
     # the canonical JSON serialization that the stdio content[] and handoff depend on.
     import json as _json
 
-    resp = handle_request({
-        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-        "params": {"name": "orchestrate_verify",
-                   "arguments": {"text": "clean doc", "doc_class": "durable", "project_root": str(tmp_path)}},
-    })
+    resp = handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "orchestrate_verify",
+                "arguments": {
+                    "text": "clean doc",
+                    "doc_class": "durable",
+                    "project_root": str(tmp_path),
+                },
+            },
+        }
+    )
     content_text = resp["result"]["content"][0]["text"]
     parsed = _json.loads(content_text)  # must be valid JSON, not "verify ok"
     assert "warnings" in parsed
     # gather-bearing results have the same shape hazard
-    out = dispatch_tool("orchestrate_step", {"capability": "chat", "instruction": "x", "gather": "facts",
-                                             "project_root": str(tmp_path)})
+    out = dispatch_tool(
+        "orchestrate_step",
+        {
+            "capability": "chat",
+            "instruction": "x",
+            "gather": "facts",
+            "project_root": str(tmp_path),
+        },
+    )
     _json.loads(out["text"])  # round-trips
 
 
@@ -113,6 +175,256 @@ def test_run_survives_process_restart(tmp_path):
     # and it can still be continued
     done = runner.continue_run(run_id=rid, stage_id="chat", result_text="ok", success=True)
     assert done["status"] == "completed"
+
+
+def test_fixed_run_continue_uses_revision_cas(tmp_path):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    run_id = state["run_id"]
+
+    assert state["state_schema_version"] == 2
+    assert state["store_revision"] == 0
+    done = runner.continue_run(
+        run_id=run_id,
+        stage_id="chat",
+        result_text="first",
+        success=True,
+        expected_revision=0,
+    )
+    assert done["store_revision"] == 1
+    assert done["artifacts"]["draft"] == "first"
+
+    with pytest.raises(store.RunRevisionConflict):
+        runner.continue_run(
+            state=state,
+            stage_id="chat",
+            result_text="stale",
+            success=True,
+        )
+    assert runner.get_run(run_id)["artifacts"]["draft"] == "first"
+
+
+def test_fixed_terminal_runs_are_immutable(tmp_path):
+    completed = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    completed = runner.continue_run(
+        run_id=completed["run_id"],
+        stage_id="chat",
+        result_text="done",
+        expected_revision=0,
+    )
+    completed_again = runner.continue_run(
+        run_id=completed["run_id"],
+        stage_id="chat",
+        result_text="replacement",
+        expected_revision=completed["store_revision"],
+    )
+
+    assert completed_again["status"] == "completed"
+    assert completed_again["store_revision"] == completed["store_revision"]
+    assert completed_again["artifacts"]["draft"] == "done"
+
+    failed = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    failed = runner.continue_run(
+        run_id=failed["run_id"],
+        stage_id="chat",
+        success=False,
+        error="invalid request",
+        expected_revision=0,
+    )
+    failed_again = runner.continue_run(
+        run_id=failed["run_id"],
+        stage_id="chat",
+        result_text="must-not-revive",
+        expected_revision=failed["store_revision"],
+    )
+
+    assert failed_again["status"] == "failed"
+    assert failed_again["store_revision"] == failed["store_revision"]
+    assert "draft" not in failed_again["artifacts"]
+
+
+def test_legacy_continue_schema_and_dispatch_enforce_revision_cas(tmp_path):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    run_id = state["run_id"]
+    continue_spec = next(
+        item for item in tool_definitions() if item["name"] == "orchestrate_continue_recipe"
+    )
+
+    assert continue_spec["inputSchema"]["properties"]["expected_revision"] == {
+        "type": "integer",
+        "minimum": 0,
+    }
+    first = dispatch_tool(
+        "orchestrate_continue_recipe",
+        {
+            "run_id": run_id,
+            "stage_id": "chat",
+            "result_text": "first",
+            "expected_revision": 0,
+        },
+    )
+    assert first["success"] is True
+    stale = dispatch_tool(
+        "orchestrate_continue_recipe",
+        {
+            "run_id": run_id,
+            "stage_id": "chat",
+            "result_text": "stale",
+            "expected_revision": 0,
+        },
+    )
+    assert stale["success"] is False
+    assert stale["error_type"] == "RunRevisionConflict"
+    assert runner.get_run(run_id)["artifacts"]["draft"] == "first"
+
+
+def test_fixed_runner_rejects_adaptive_run_id_without_mutating_state():
+    adaptive = store.create(
+        {
+            "run_id": "a1b2c3d4e5f6",
+            "run_kind": "adaptive",
+            "state_schema_version": 2,
+            "store_revision": 0,
+            "status": "paused",
+            "plan": {"steps": []},
+            "results": {},
+        }
+    )
+
+    with pytest.raises(ValueError, match="not a fixed recipe run"):
+        runner.continue_run(
+            run_id=adaptive["run_id"],
+            expected_revision=0,
+        )
+
+    persisted = store.load(adaptive["run_id"])
+    assert persisted is not None
+    assert persisted["run_kind"] == "adaptive"
+    assert persisted["status"] == "paused"
+    assert persisted["store_revision"] == 0
+    assert "_lease" not in persisted
+
+
+def test_legacy_get_and_resource_reject_adaptive_state():
+    adaptive = store.create(
+        {
+            "run_id": "d1d2d3d4d5d6",
+            "run_kind": "adaptive",
+            "state_schema_version": 2,
+            "store_revision": 0,
+            "status": "paused",
+            "plan": {"steps": [{"id": "pending"}]},
+            "results": {},
+        }
+    )
+
+    loaded = dispatch_tool(
+        "orchestrate_get_run",
+        {"run_id": adaptive["run_id"]},
+    )
+    resource = handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "resources/read",
+            "params": {
+                "uri": f"orchestrate://run/{adaptive['run_id']}",
+            },
+        }
+    )
+
+    assert loaded["success"] is False
+    assert loaded["error_type"] == "ValueError"
+    assert resource["error"]["code"] == -32602
+    listed = handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "resources/list",
+            "params": {},
+        }
+    )
+    assert f"orchestrate://run/{adaptive['run_id']}" not in {
+        item["uri"] for item in listed["result"]["resources"]
+    }
+
+
+def test_fixed_runner_rejects_run_id_free_adaptive_state():
+    with pytest.raises(ValueError, match="not a fixed recipe run"):
+        runner.continue_run(
+            state={
+                "run_kind": "adaptive",
+                "status": "paused",
+                "steps": [{"id": "adaptive-step"}],
+            }
+        )
+
+
+def test_fixed_get_and_resource_redact_active_lease(tmp_path):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    claim = store.claim(
+        state["run_id"],
+        expected_revision=state["store_revision"],
+        lease_seconds=60,
+    )
+    try:
+        loaded = runner.get_run(state["run_id"])
+        resource = handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "resources/read",
+                "params": {
+                    "uri": f"orchestrate://run/{state['run_id']}",
+                },
+            }
+        )
+
+        assert "_lease" not in loaded
+        assert claim.token not in json.dumps(loaded)
+        resource_text = resource["result"]["contents"][0]["text"]
+        assert "_lease" not in resource_text
+        assert claim.token not in resource_text
+    finally:
+        store.abort_claim(claim)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_fixed_get_never_falls_back_to_stale_memory(tmp_path, damage):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    state_path = store.state_dir() / f"{state['run_id']}.json"
+    if damage == "missing":
+        state_path.unlink()
+        expected_error = store.RunNotFound
+    else:
+        state_path.write_text("{broken", encoding="utf-8")
+        expected_error = store.RunPersistenceError
+
+    with pytest.raises(expected_error):
+        runner.get_run(state["run_id"])
 
 
 def test_run_store_rejects_path_traversal_and_invalid_ids(tmp_path, monkeypatch):
@@ -160,6 +472,255 @@ def test_run_store_uses_private_permissions_and_rejects_symlinks(tmp_path, monke
     store.save({"run_id": run_id, "payload": "must-not-follow"})
     assert outside.read_text(encoding="utf-8") == '{"secret": "unchanged"}'
     assert run_id not in store.list_run_ids()
+
+
+def test_run_store_claim_and_commit_are_revision_fenced(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    run_id = "1" * 12
+    created = store.create({"run_id": run_id, "payload": "before"})
+
+    assert created["store_revision"] == 0
+    claim = store.claim(run_id, expected_revision=0, lease_seconds=60)
+    assert claim.state["payload"] == "before"
+    assert claim.base_revision == 0
+
+    with pytest.raises(store.RunLeaseActive):
+        store.claim(run_id, expected_revision=0, lease_seconds=60)
+
+    committed = store.commit_claim(
+        claim,
+        {**claim.state, "payload": "after"},
+    )
+    assert committed["store_revision"] == 1
+    assert committed["payload"] == "after"
+    assert "_lease" not in committed
+
+    with pytest.raises(store.RunLeaseLost):
+        store.commit_claim(claim, {**committed, "payload": "stale"})
+    assert store.load(run_id)["payload"] == "after"
+
+
+def test_missing_claim_does_not_create_lock_or_local_registry(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    run_id = "e" * 12
+    before_keys = set(store._LOCAL_LOCKS)
+
+    with pytest.raises(store.RunNotFound):
+        store.claim(run_id)
+
+    assert set(store._LOCAL_LOCKS) == before_keys
+    assert not (state_root / f".{run_id}.lock").exists()
+
+
+def test_run_store_expired_lease_takeover_fences_old_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    run_id = "2" * 12
+    now = [100.0]
+    monkeypatch.setattr(store.time, "time", lambda: now[0])
+    store.create({"run_id": run_id})
+
+    old_claim = store.claim(run_id, lease_seconds=10)
+    now[0] = 111.0
+    new_claim = store.claim(run_id, expected_revision=0, lease_seconds=10)
+
+    with pytest.raises(store.RunLeaseLost):
+        store.commit_claim(old_claim, old_claim.state)
+    committed = store.commit_claim(new_claim, new_claim.state)
+    assert committed["store_revision"] == 1
+
+
+def test_run_store_starts_lease_clock_after_lock_acquisition(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    run_id = "8" * 12
+    now = [100.0]
+    monkeypatch.setattr(store.time, "time", lambda: now[0])
+    store.create({"run_id": run_id})
+    original_locked_state_dir = store._locked_state_dir
+
+    @contextmanager
+    def delayed_lock(target_run_id):
+        with original_locked_state_dir(target_run_id) as directory_fd:
+            now[0] = 150.0
+            yield directory_fd
+
+    monkeypatch.setattr(store, "_locked_state_dir", delayed_lock)
+
+    claim = store.claim(run_id, lease_seconds=10)
+
+    assert claim.expires_at == 160.0
+
+
+def test_run_store_strict_create_does_not_overwrite_existing_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    run_id = "3" * 12
+    store.create({"run_id": run_id, "payload": "original"})
+
+    with pytest.raises(store.RunAlreadyExists):
+        store.create({"run_id": run_id, "payload": "replacement"})
+
+    assert store.load(run_id)["payload"] == "original"
+
+
+def test_run_store_strict_lock_is_private_and_never_follows_symlinks(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    safe_run_id = "5" * 12
+    store.create({"run_id": safe_run_id})
+    assert stat.S_IMODE((state_root / f".{safe_run_id}.lock").stat().st_mode) == 0o600
+
+    outside = tmp_path / "outside.lock"
+    outside.write_text("unchanged", encoding="utf-8")
+    blocked_run_id = "6" * 12
+    (state_root / f".{blocked_run_id}.lock").symlink_to(outside)
+
+    with pytest.raises(store.RunPersistenceError):
+        store.create({"run_id": blocked_run_id})
+
+    assert outside.read_text(encoding="utf-8") == "unchanged"
+    assert not (state_root / f"{blocked_run_id}.json").exists()
+
+
+def test_run_store_strict_paths_reject_hardlinks_without_chmod(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    store.create({"run_id": "9" * 12})
+
+    lock_target = tmp_path / "outside.lock"
+    lock_target.write_text("unchanged", encoding="utf-8")
+    lock_target.chmod(0o644)
+    os.link(lock_target, state_root / f".{'a' * 12}.lock")
+
+    with pytest.raises(store.RunPersistenceError):
+        store.create({"run_id": "a" * 12})
+
+    assert stat.S_IMODE(lock_target.stat().st_mode) == 0o644
+    assert lock_target.read_text(encoding="utf-8") == "unchanged"
+
+    state_target = tmp_path / "outside-state.json"
+    state_target.write_text(
+        json.dumps({"run_id": "9" * 12, "payload": "outside"}),
+        encoding="utf-8",
+    )
+    state_target.chmod(0o644)
+    state_path = state_root / f"{'9' * 12}.json"
+    state_path.unlink()
+    os.link(state_target, state_path)
+
+    with pytest.raises(store.RunPersistenceError):
+        store.load_strict("9" * 12)
+    assert store.load("9" * 12) is None
+    assert stat.S_IMODE(state_target.stat().st_mode) == 0o644
+
+
+def test_run_store_fifo_state_never_blocks_readers(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    store.create({"run_id": "c" * 12})
+    state_path = state_root / f"{'c' * 12}.json"
+    state_path.unlink()
+    os.mkfifo(state_path, 0o600)
+    script = """
+from orchestrate_codex import store
+
+assert store.load("cccccccccccc") is None
+try:
+    store.load_strict("cccccccccccc")
+except store.RunPersistenceError:
+    print("REJECTED")
+else:
+    raise AssertionError("FIFO state was accepted")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        env={
+            **os.environ,
+            "ORCHESTRATE_CODEX_STATE_DIR": str(state_root),
+        },
+        text=True,
+        capture_output=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "REJECTED"
+
+
+def test_abort_claim_checks_revision_and_lease_base(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    run_id = "b" * 12
+    store.create({"run_id": run_id})
+    claim = store.claim(run_id, expected_revision=0, lease_seconds=60)
+    with store._locked_state_dir(run_id) as directory_fd:
+        tampered = store._read_state_from_dir(
+            directory_fd,
+            run_id,
+            strict_owner=True,
+        )
+        tampered["store_revision"] = 1
+        tampered["_lease"]["base_revision"] = 1
+        store._write_state_to_dir(directory_fd, tampered)
+
+    with pytest.raises(store.RunLeaseLost):
+        store.abort_claim(claim)
+
+    persisted = store.load_strict(run_id)
+    assert persisted["_lease"]["token"] == claim.token
+    assert persisted["store_revision"] == 1
+
+
+def test_run_store_claim_is_serialized_across_processes(tmp_path, monkeypatch):
+    state_root = tmp_path / "runs"
+    trigger = tmp_path / "start"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_root))
+    run_id = "7" * 12
+    store.create({"run_id": run_id})
+    script = """
+import os
+from pathlib import Path
+import time
+from orchestrate_codex import store
+
+original_read = store._read_state_from_dir
+def slow_read(*args, **kwargs):
+    state = original_read(*args, **kwargs)
+    time.sleep(0.1)
+    return state
+store._read_state_from_dir = slow_read
+trigger = Path(os.environ["AGENT_HUB_TEST_TRIGGER"])
+while not trigger.exists():
+    time.sleep(0.005)
+try:
+    store.claim("777777777777", lease_seconds=60)
+    print("CLAIMED")
+except store.RunLeaseActive:
+    print("ACTIVE")
+"""
+    env = {
+        **os.environ,
+        "ORCHESTRATE_CODEX_STATE_DIR": str(state_root),
+        "AGENT_HUB_TEST_TRIGGER": str(trigger),
+    }
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(2)
+    ]
+    trigger.write_text("go", encoding="utf-8")
+    outputs = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 0, stderr
+        outputs.append(stdout.strip())
+
+    assert sorted(outputs) == ["ACTIVE", "CLAIMED"]
 
 
 def test_run_store_rejects_broad_or_symlinked_state_directories(tmp_path, monkeypatch):
@@ -238,9 +799,7 @@ def test_run_store_keeps_file_access_on_validated_directory_fd(tmp_path, monkeyp
     assert store.load(run_id) is None
 
 
-def test_run_store_rejects_symlink_created_while_directory_is_opened(
-    tmp_path, monkeypatch
-):
+def test_run_store_rejects_symlink_created_while_directory_is_opened(tmp_path, monkeypatch):
     state_root = tmp_path / "runs"
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -273,15 +832,14 @@ def test_run_id_contract_applies_to_memory_resources_and_legacy_schemas(tmp_path
     runner._RUNS["../../outside"] = {"run_id": "../../outside", "steps": []}
 
     run_specs = {
-        item["name"]: item["inputSchema"] for item in tool_definitions()
+        item["name"]: item["inputSchema"]
+        for item in tool_definitions()
         if item["name"] in {"orchestrate_continue_recipe", "orchestrate_get_run"}
     }
     assert run_specs["orchestrate_continue_recipe"]["properties"]["run_id"]["pattern"] == (
         "^[0-9a-f]{12}$"
     )
-    assert run_specs["orchestrate_get_run"]["properties"]["run_id"]["pattern"] == (
-        "^[0-9a-f]{12}$"
-    )
+    assert run_specs["orchestrate_get_run"]["properties"]["run_id"]["pattern"] == ("^[0-9a-f]{12}$")
     assert "../../outside" not in {
         item["uri"].removeprefix("orchestrate://run/")
         for item in handle_request(
@@ -334,7 +892,12 @@ def test_looks_like_leaf_error():
     assert errors.looks_like_leaf_error(doc) is False
     assert errors.looks_like_leaf_error("") is False
     # 4xx backend errors handed back as text are also leaf failures (regression: 404 missed)
-    assert errors.looks_like_leaf_error("Antigravity Code Assist returned HTTP 404; response body omitted.") is True
+    assert (
+        errors.looks_like_leaf_error(
+            "Antigravity Code Assist returned HTTP 404; response body omitted."
+        )
+        is True
+    )
 
 
 def test_error_classification_and_no_rotate_on_bad_request(tmp_path):
@@ -358,7 +921,10 @@ def test_list_recipes():
 def test_unified_workflows_group_presets_without_legacy_aliases():
     workflows = recipes.list_workflows()
     assert {item["id"] for item in workflows} == {
-        "repo_document", "git_document", "research_brief", "deep_readme"
+        "repo_document",
+        "git_document",
+        "research_brief",
+        "deep_readme",
     }
     readme = recipes.resolve_workflow("repo_document", "readme")
     assert readme["recipe_id"] == "durable_readme"
@@ -378,9 +944,20 @@ def test_one_stage_recipes_are_not_presented_as_workflows():
 def test_multi_domain_recipes_registered():
     ids = {r["id"] for r in recipes.list_recipes()}
     for rid in (
-        "technical_doc", "proposal", "release_notes", "translate_doc", "polish_text",
-        "summarize_text", "blog_post", "email_draft", "product_copy",
-        "research_brief", "review_diff", "release_draft", "generate_image", "compare_models",
+        "technical_doc",
+        "proposal",
+        "release_notes",
+        "translate_doc",
+        "polish_text",
+        "summarize_text",
+        "blog_post",
+        "email_draft",
+        "product_copy",
+        "research_brief",
+        "review_diff",
+        "release_draft",
+        "generate_image",
+        "compare_models",
     ):
         assert rid in ids, rid
 
@@ -432,11 +1009,15 @@ def test_transform_fallback_folds_source_text(tmp_path):
 
 def test_verify_reruns_and_triggers_revision(tmp_path):
     (tmp_path / "pyproject.toml").write_text('version = "1.0.0"\n', encoding="utf-8")
-    state = runner.start_run("durable_readme", args={"prompt": "readme"}, project_root=str(tmp_path))
+    state = runner.start_run(
+        "durable_readme", args={"prompt": "readme"}, project_root=str(tmp_path)
+    )
     # A draft full of recency/session-diary language must bounce back to the draft stage.
     bad = runner.continue_run(
-        run_id=state["run_id"], stage_id="draft",
-        result_text="Today we fixed the parser in this session.", success=True,
+        run_id=state["run_id"],
+        stage_id="draft",
+        result_text="Today we fixed the parser in this session.",
+        success=True,
     )
     assert bad["status"] == "running"
     assert bad["next_action"]["stage_id"] == "draft"
@@ -444,8 +1025,10 @@ def test_verify_reruns_and_triggers_revision(tmp_path):
     assert "REVISE" in str(bad["next_action"]["arguments"])
     # A clean redraft completes; the revision budget prevents an infinite loop.
     good = runner.continue_run(
-        run_id=state["run_id"], stage_id="draft",
-        result_text="# Project\n\nInstall with pip. Does X.", success=True,
+        run_id=state["run_id"],
+        stage_id="draft",
+        result_text="# Project\n\nInstall with pip. Does X.",
+        success=True,
     )
     assert good["status"] == "completed"
     assert good["revisions"] <= good["revision_budget"]
@@ -457,8 +1040,10 @@ def test_revision_budget_zero_disables_loop(tmp_path):
         "durable_readme", args={"prompt": "r", "revision_budget": 0}, project_root=str(tmp_path)
     )
     out = runner.continue_run(
-        run_id=state["run_id"], stage_id="draft",
-        result_text="today we changed things this session", success=True,
+        run_id=state["run_id"],
+        stage_id="draft",
+        result_text="today we changed things this session",
+        success=True,
     )
     assert out["status"] == "failed"  # a blocking quality failure cannot be accepted
     assert out["revisions"] == 0
@@ -495,7 +1080,8 @@ def test_verify_allows_cli_commands(tmp_path):
     # A README that references a real CLI script/console-script must NOT be flagged as a
     # hallucinated tool (regression from a live multi-LLM run on Grok Codex).
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nversion = "1.0.0"\n\n[project.scripts]\ngrok_codex_mcp = "x:serve"\n', encoding="utf-8"
+        '[project]\nversion = "1.0.0"\n\n[project.scripts]\ngrok_codex_mcp = "x:serve"\n',
+        encoding="utf-8",
     )
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -506,7 +1092,9 @@ def test_verify_allows_cli_commands(tmp_path):
     facts = gather.gather_durable_facts(tmp_path)
     assert "grok_codex_login" in facts["cli_commands"]
     assert facts["install_commands"]  # pip install -e . detected
-    body = "Run `python3 scripts/grok_codex_login.py` and start grok_codex_mcp. Also grok_codex_chat."
+    body = (
+        "Run `python3 scripts/grok_codex_login.py` and start grok_codex_mcp. Also grok_codex_chat."
+    )
     result = verify.verify_text(body, doc_class="durable", fact_pack=facts)
     assert not any("tool_not_in_fact_pack" in w for w in result["warnings"])
     # a genuinely invented tool is still flagged
@@ -516,12 +1104,18 @@ def test_verify_allows_cli_commands(tmp_path):
 
 def test_verify_flags_truncated_document():
     # a long doc cut off after a heading (leaf hit max_tokens) must not pass as clean
-    body = "# Title\n\n## 개요\n" + "This section has real content. " * 12 + "\n\n## 아키텍처\n\nGrok"
+    body = (
+        "# Title\n\n## 개요\n" + "This section has real content. " * 12 + "\n\n## 아키텍처\n\nGrok"
+    )
     r = verify.verify_text(body, doc_class="durable")
     assert r["ok"] is False
     assert any(w.startswith("truncated") for w in r["warnings"])
     # a properly closed doc of the same size passes
-    ok_body = "# Title\n\n## 개요\n" + "This section has real content. " * 12 + "\n\n## 라이선스\nReleased under the MIT license."
+    ok_body = (
+        "# Title\n\n## 개요\n"
+        + "This section has real content. " * 12
+        + "\n\n## 라이선스\nReleased under the MIT license."
+    )
     assert verify.verify_text(ok_body, doc_class="durable")["ok"] is True
 
 
@@ -532,12 +1126,27 @@ def test_verify_flags_unclosed_code_fence():
 
 
 def test_write_step_sets_max_tokens_budget():
-    out = dispatch_tool("orchestrate_step", {"capability": "write", "write_task": "readme",
-                                             "instruction": "x", "doc_class": "durable", "project_root": "."})
+    out = dispatch_tool(
+        "orchestrate_step",
+        {
+            "capability": "write",
+            "write_task": "readme",
+            "instruction": "x",
+            "doc_class": "durable",
+            "project_root": ".",
+        },
+    )
     assert out["arguments"]["max_tokens"] == runner.DEFAULT_WRITE_MAX_TOKENS
     # caller can override
-    out2 = dispatch_tool("orchestrate_step", {"capability": "write", "write_task": "readme",
-                                              "instruction": "x", "extra_args": {"max_tokens": 2000}})
+    out2 = dispatch_tool(
+        "orchestrate_step",
+        {
+            "capability": "write",
+            "write_task": "readme",
+            "instruction": "x",
+            "extra_args": {"max_tokens": 2000},
+        },
+    )
     assert out2["arguments"]["max_tokens"] == 2000
 
 
@@ -558,7 +1167,9 @@ def test_verify_allows_package_provider_and_leaf_names(tmp_path):
     r = verify.verify_text(body, doc_class="durable", fact_pack=facts)
     assert not any(w.startswith("tool_not_in_fact_pack") for w in r["warnings"]), r["warnings"]
     # a truly invented tool is still caught
-    bad = verify.verify_text("Call orchestrate_teleport." * 20, doc_class="durable", fact_pack=facts)
+    bad = verify.verify_text(
+        "Call orchestrate_teleport." * 20, doc_class="durable", fact_pack=facts
+    )
     assert any("orchestrate_teleport" in w for w in bad["warnings"])
     # sibling-repo launcher commands referenced in a meta-doc are legitimate
     meta = "Run the leaf servers grok_codex_mcp, claude_codex_mcp, google_antigravity_mcp. " * 4
@@ -572,7 +1183,10 @@ def test_verify_session_diary_noun_not_flagged():
     r = verify.verify_text(body, doc_class="durable")
     assert not any("recency" in w for w in r["warnings"])
     # actual recency tone still caught
-    assert any("recency" in w for w in verify.verify_text("today we fixed it " * 20, doc_class="durable")["warnings"])
+    assert any(
+        "recency" in w
+        for w in verify.verify_text("today we fixed it " * 20, doc_class="durable")["warnings"]
+    )
 
 
 def test_change_doc_recency_not_flagged():
@@ -606,19 +1220,29 @@ def test_resolve_bindings_discovery():
 
 def test_mcp_prompts_and_resources(tmp_path):
     init = handle_request(
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"},
+        }
     )["result"]
     assert set(init["capabilities"]) >= {"tools", "prompts", "resources"}
-    prompts = handle_request({"jsonrpc": "2.0", "id": 2, "method": "prompts/list", "params": {}})["result"]
+    prompts = handle_request({"jsonrpc": "2.0", "id": 2, "method": "prompts/list", "params": {}})[
+        "result"
+    ]
     assert any(p["name"] == "durable_readme" for p in prompts["prompts"])
     state = runner.start_run("direct_chat", args={"prompt": "hi"}, project_root=str(tmp_path))
-    rl = handle_request({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}})["result"]
+    rl = handle_request({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}})[
+        "result"
+    ]
     uri = f"orchestrate://run/{state['run_id']}"
     assert any(r["uri"] == uri for r in rl["resources"])
     rr = handle_request(
         {"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": uri}}
     )["result"]
     import json as _json
+
     assert _json.loads(rr["contents"][0]["text"])["run_id"] == state["run_id"]
 
 
@@ -1512,7 +2136,11 @@ def test_manual_local_stage_completes_run(tmp_path):
     runner.continue_run(run_id=state["run_id"], auto_local=False)
     # draft (write) — complete it
     runner.continue_run(
-        run_id=state["run_id"], stage_id="draft", result_text="# README", success=True, auto_local=False
+        run_id=state["run_id"],
+        stage_id="draft",
+        result_text="# README",
+        success=True,
+        auto_local=False,
     )
     # verify (local) is now current; continuing must complete the run, not hang in "running"
     final = runner.continue_run(run_id=state["run_id"], auto_local=False)
@@ -1527,8 +2155,12 @@ def test_missing_prompt_is_warned(tmp_path):
 
 def test_tools_call_wraps_mcp_content():
     resp = handle_request(
-        {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
-         "params": {"name": "orchestrate_list_recipes", "arguments": {}}}
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "orchestrate_list_recipes", "arguments": {}},
+        }
     )
     res = resp["result"]
     assert res["content"][0]["type"] == "text"

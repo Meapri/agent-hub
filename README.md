@@ -7,7 +7,7 @@ Claude, Grok, Gemini를 Codex와 Claude Code에서 같은 방식으로 쓰기 �
 방식이 달라지고, 앱을 옮기면 프로젝트 규칙이나 진행 상황도 쉽게 끊깁니다.
 
 Agent Hub는 제가 그 불편을 줄이려고 만든 개인용 도구입니다. 각 서비스의 인증과 요청 형식은 서버 안에서 처리하고,
-사용하는 쪽에는 `agent_hub_*` 도구 26개만 보여 줍니다. Codex에서 시작한 일을 Claude Code에서 이어도
+사용하는 쪽에는 `agent_hub_*` 도구 29개만 보여 줍니다. Codex에서 시작한 일을 Claude Code에서 이어도
 같은 규칙 파일과 인계 기록을 읽습니다.
 
 > 이 프로젝트는 Anthropic, xAI, Google의 공식 제품이 아닙니다.
@@ -129,6 +129,8 @@ Agent Hub가 잘못된 의존 관계나 과도한 호출 수가 없는지 확인
   "prompt": "코드와 테스트를 조사해 설치 가이드를 작성해 줘",
   "project_root": "/absolute/path/to/repository",
   "policy_mode": "required",
+  "handoff_mode": "auto",
+  "handoff_search": "nearest",
   "max_steps": 6,
   "max_leaf_calls": 12
 }
@@ -144,6 +146,7 @@ Agent Hub가 잘못된 의존 관계나 과도한 호출 수가 없는지 확인
 ```json
 {
   "run_id": "<start가 반환한 run_id>",
+  "expected_revision": 0,
   "max_waves_per_call": 1
 }
 ```
@@ -151,6 +154,14 @@ Agent Hub가 잘못된 의존 관계나 과도한 호출 수가 없는지 확인
 `agent_hub_continue_workflow`는 실행할 수 있는 단계 한 묶음을 처리한 뒤 상태를 다시 저장합니다. 앱이나
 MCP 서버가 재시작돼도 같은 `run_id`로 이어갈 수 있습니다. 기본 저장 위치는
 `~/.orchestrate_codex/runs/`이며 `ORCHESTRATE_CODEX_STATE_DIR`로 바꿀 수 있습니다.
+`expected_revision`에는 직전 응답의 `next_action.arguments.expected_revision`을 사용하세요. 다른 실행이
+먼저 상태를 바꿨다면 오래된 결과는 저장하지 않고 revision 충돌로 돌려줍니다.
+continue에는 저장된 run의 `run_id`가 항상 필요합니다. 응답의 전체 `state`만 다시 보내는 방식은 revision,
+lease, handoff drift를 증명할 수 없어 거부합니다.
+
+계획을 만들 때 읽은 `HANDOFF.md`도 실행 상태에 스냅샷으로 보관합니다. 재개 전에 파일이 바뀌면
+`handoff_drift`로 멈추므로 새 인계 내용을 검토할 수 있습니다. 변경 전 문맥을 그대로 쓰는 것이
+의도라면 `handoff_drift_policy="use-snapshot"`을 명시해야 합니다.
 
 ## 시간이 오래 걸리는 작업
 
@@ -170,6 +181,11 @@ MCP 서버가 재시작돼도 같은 `run_id`로 이어갈 수 있습니다. 기
 중간 단계에서 나온 글은 최종 결과로 저장하지 마세요. `status=completed`인지, 마지막 품질 검사까지
 통과했는지 확인한 뒤 파일에 반영하는 것이 안전합니다.
 
+`max_leaf_calls`는 provider adapter에 실제로 전달한 논리 호출 수를 셉니다. 예를 들어 세 모델 비교는
+세 번을 사용하며, 비교 안쪽 호출과 바깥 단계를 합쳐 같은 동시 실행 제한을 공유합니다. HTTP transport
+내부의 재시도나 인증 갱신은 별도 leaf call로 세지 않습니다. 동시 실행 제한은 한 workflow 안에서
+공유되며, 서로 다른 workflow 프로세스 전체를 묶는 전역 제한은 아닙니다.
+
 ## 연결별 지원 범위
 
 | 기능 | Claude | Grok | Gemini |
@@ -186,9 +202,9 @@ MCP 서버가 재시작돼도 같은 `run_id`로 이어갈 수 있습니다. 기
 이해하는 요청 형식으로 바꿉니다. 선택한 모델이 해당 설정을 지원하지 않으면 조용히 무시하지 않고 오류를
 반환합니다.
 
-## 공개 도구 26개
+## 공개 도구 29개
 
-모델마다 다른 내부 도구는 밖으로 노출하지 않습니다. 앱에서 보이는 이름은 아래 26개가 전부입니다.
+모델마다 다른 내부 도구는 밖으로 노출하지 않습니다. 앱에서 보이는 이름은 아래 29개가 전부입니다.
 
 | 구분 | 도구 |
 |---|---|
@@ -197,6 +213,7 @@ MCP 서버가 재시작돼도 같은 `run_id`로 이어갈 수 있습니다. 기
 | 대화와 생성 | `agent_hub_chat`, `agent_hub_search`, `agent_hub_write`, `agent_hub_generate_image` |
 | 검토와 릴리스 | `agent_hub_compare_models`, `agent_hub_review_diff`, `agent_hub_release_snapshot`, `agent_hub_release_draft` |
 | 설정 | `agent_hub_get_settings`, `agent_hub_update_settings`, `agent_hub_reset_settings` |
+| 인계 기록 | `agent_hub_get_handoff`, `agent_hub_prepare_handoff_update`, `agent_hub_apply_handoff_update` |
 | 작업 흐름 | `agent_hub_list_workflows`, `agent_hub_get_workflow`, `agent_hub_plan_workflow`, `agent_hub_start_workflow`, `agent_hub_continue_workflow`, `agent_hub_get_run`, `agent_hub_run_workflow` |
 | 위임과 검증 | `agent_hub_delegate`, `agent_hub_verify` |
 
@@ -239,20 +256,34 @@ Agent Hub는 중요한 문맥을 세 곳에 나눠 둡니다.
 
 - `instructions/.ruler/`에는 사람이 관리하는 프로젝트 규칙이 있습니다. `AGENTS.md`, `CLAUDE.md`,
   `.gemini/settings.json`은 여기서 생성합니다.
-- `HANDOFF.md`에는 지금 어디까지 했는지, 무엇을 확인했고 다음에 무엇을 해야 하는지 적습니다.
+- 각 프로젝트의 `HANDOFF.md`에는 지금 어디까지 했는지, 무엇을 확인했고 다음에 무엇을 해야 하는지
+  적습니다. monorepo 하위 프로젝트에 자체 파일이 있으면 그것을 먼저 사용하고, 없을 때만 같은 Git
+  저장소 안의 가까운 상위 파일을 찾습니다.
 - `memory/data/`에는 나중에 다시 찾을 결정과 교훈을 Markdown으로 보관합니다.
 
 공유 메모리는 `basic-memory`의 로컬 검색을 사용합니다. 기본 설정은 시맨틱 검색을 끄기 때문에 노트 내용을
 외부 임베딩 서비스로 보내지 않습니다. 메모리는 검색을 돕는 자료일 뿐, 프로젝트 규칙이나 현재 상태를
 대신하지는 않습니다.
 
+인계 기록을 갱신할 때는 먼저 `agent_hub_prepare_handoff_update`로 변경 내용과 현재 파일 SHA를
+확인하고, 그 결과를 `agent_hub_apply_handoff_update`에 넘깁니다. apply는 SHA가 그대로일 때만 marker
+블록을 원자적으로 교체합니다. prepare의 기본 대상은 현재 `project_root`의 `HANDOFF.md`이며, 상위
+파일을 의도적으로 갱신하려면 `search=nearest`나 명시적인 `file`을 사용합니다. apply에는 prepare가
+반환한 정확한 `target`이 필요합니다. Git stage, commit, push는 자동으로 하지 않습니다.
+
 ## 보안상 알아둘 점
 
 - OAuth 토큰과 개인 설정은 각 연결의 로컬 설정 디렉터리에 저장합니다. 저장소에 커밋하지 마세요.
 - `.env`, SSH 키, 클라우드 자격 증명, 인증서 개인키는 일반 문서나 코드 검토 입력에서 차단합니다.
 - `project_root`와 `workspace_root`에는 파일시스템 루트나 홈 디렉터리 전체를 지정할 수 없습니다.
+- `HANDOFF.md`는 정책이나 검증된 코드 근거가 아니라 신뢰되지 않은 운영 문맥으로 모델에 전달합니다.
+  ignored 파일, symlink, hardlink, 저장소 밖 파일은 읽거나 갱신하지 않습니다.
 - 모델 검색과 이미지 생성은 계정 권한과 사용량을 쓸 수 있습니다. 긴 작업에는 `max_leaf_calls`를 정해
   두는 편이 좋습니다.
+
+고정형 supervised workflow는 provider 호출 결과를 저장할 때 revision과 handoff SHA를 다시
+확인합니다. 다만 provider 호출 자체는 호스트 앱이 실행하므로, 동시에 같은 단계를 호출했을 때 발생한
+중복 사용량까지 되돌리지는 못합니다.
 
 ## 저장소 둘러보기
 

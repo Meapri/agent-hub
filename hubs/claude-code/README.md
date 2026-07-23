@@ -33,7 +33,7 @@ provider별 동의와 OAuth 검사는 Agent Hub 내부 adapter가 처리합니�
 ## 준비
 
 ```bash
-cd /Users/naen/Git/agent-hub-mono
+cd /Users/naen/Git/agent-hub
 python3 -m venv .venv
 ./.venv/bin/pip install -e '.[dev]'
 uv tool install basic-memory
@@ -42,7 +42,7 @@ uv tool install basic-memory
 다른 위치에 clone했다면 `.mcp.json`의 절대경로를 실제 경로에 맞게 수정합니다.
 
 ```bash
-claude plugin marketplace add /Users/naen/Git/agent-hub-mono
+claude plugin marketplace add /Users/naen/Git/agent-hub
 claude plugin install agent-hub@agent-hub --scope user
 claude plugin list
 ```
@@ -55,7 +55,7 @@ claude --plugin-dir ./hubs/claude-code
 ```
 
 - MCP 목록에서 `agent-hub`와 `memory`가 연결되는지 확인합니다.
-- `tools/list`에는 `agent_hub_*` 26개만 보여야 합니다.
+- `tools/list`에는 `agent_hub_*` 29개만 보여야 합니다.
 - `orchestrate_*`, `claude_codex_*`, `grok_codex_*`, `google_antigravity_*`는 통합 서버에서 보이거나
   호출되면 안 됩니다.
 - 모델 상태는 `agent_hub_status`, workflow 목록은 `agent_hub_list_workflows`로 확인합니다.

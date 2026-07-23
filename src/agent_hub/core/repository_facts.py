@@ -95,14 +95,12 @@ def _file_open_flags() -> int:
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
     return flags
 
 
-_FD_EXEC_SCRIPT = (
-    "import os,sys;"
-    "os.fchdir(int(sys.argv[1]));"
-    "os.execvp(sys.argv[2], sys.argv[2:])"
-)
+_FD_EXEC_SCRIPT = "import os,sys;os.fchdir(int(sys.argv[1]));os.execvp(sys.argv[2], sys.argv[2:])"
 
 
 def command_in_directory_fd(
@@ -139,12 +137,8 @@ def is_sensitive_repository_path(path: Path) -> bool:
         for stem in REPOSITORY_ALWAYS_SENSITIVE_STEMS
     ):
         return True
-    if (
-        path.suffix.lower() in REPOSITORY_SENSITIVE_CONFIG_SUFFIXES
-        and any(
-            normalized_name.startswith(f"{stem}.")
-            for stem in REPOSITORY_SENSITIVE_CONFIG_STEMS
-        )
+    if path.suffix.lower() in REPOSITORY_SENSITIVE_CONFIG_SUFFIXES and any(
+        normalized_name.startswith(f"{stem}.") for stem in REPOSITORY_SENSITIVE_CONFIG_STEMS
     ):
         return True
     if name.endswith((".p12", ".pfx")):
@@ -154,6 +148,19 @@ def is_sensitive_repository_path(path: Path) -> bool:
     if any(part in REPOSITORY_SENSITIVE_PARTS for part in lowered_parts):
         return True
     return ".config/gcloud" in "/".join(lowered_parts)
+
+
+def repository_relative_path_reason(path: Path) -> str:
+    """Return the canonical rejection reason for a repository-relative path."""
+
+    if path.is_absolute() or not path.parts or any(part in {"", ".."} for part in path.parts):
+        return "outside_root"
+    lowered = [part.lower() for part in path.parts]
+    if any(part in REPOSITORY_SKIP_PARTS or part.endswith(".egg-info") for part in lowered):
+        return "unsupported"
+    if is_sensitive_repository_path(path):
+        return "sensitive"
+    return ""
 
 
 @contextmanager
@@ -195,28 +202,24 @@ def _repository_relative_file(path: Path, root: Path) -> tuple[Optional[Path], s
         relative = path.relative_to(root)
     except ValueError:
         return None, "outside_root"
-    if not relative.parts or any(
-        part in REPOSITORY_SKIP_PARTS or part.endswith(".egg-info")
-        for part in relative.parts
-    ):
-        return None, "unsupported"
-    if is_sensitive_repository_path(relative):
-        return None, "sensitive"
+    reason = repository_relative_path_reason(relative)
+    if reason:
+        return None, reason
     return relative, ""
 
 
-def read_repository_text(
+def read_repository_bytes(
     path: Path,
     root: Path,
     *,
     root_fd: int,
     max_bytes: int,
-) -> tuple[str, int, str]:
-    """Read one regular repository file without following path-component symlinks."""
+) -> tuple[bytes, int, str]:
+    """Read one regular repository file without following links or hard links."""
 
     relative, reason = _repository_relative_file(path, root)
     if relative is None:
-        return "", 0, reason
+        return b"", 0, reason
     current_fd = os.dup(root_fd)
     file_fd: Optional[int] = None
     try:
@@ -227,10 +230,12 @@ def read_repository_text(
         file_fd = os.open(relative.parts[-1], _file_open_flags(), dir_fd=current_fd)
         file_stat = os.fstat(file_fd)
         if not stat.S_ISREG(file_stat.st_mode):
-            return "", 0, "not_regular"
+            return b"", 0, "not_regular"
+        if file_stat.st_nlink != 1:
+            return b"", 0, "hardlink"
         byte_limit = max(0, int(max_bytes))
         if file_stat.st_size > byte_limit:
-            return "", 0, "oversized"
+            return b"", 0, "oversized"
         chunks: list[bytes] = []
         remaining = byte_limit + 1
         while remaining > 0:
@@ -241,14 +246,34 @@ def read_repository_text(
             remaining -= len(chunk)
         raw = b"".join(chunks)
         if len(raw) > byte_limit:
-            return "", 0, "oversized"
-        return raw.decode("utf-8", errors="replace"), len(raw), ""
+            return b"", 0, "oversized"
+        return raw, len(raw), ""
     except OSError:
-        return "", 0, "read_error"
+        return b"", 0, "read_error"
     finally:
         if file_fd is not None:
             os.close(file_fd)
         os.close(current_fd)
+
+
+def read_repository_text(
+    path: Path,
+    root: Path,
+    *,
+    root_fd: int,
+    max_bytes: int,
+) -> tuple[str, int, str]:
+    """Read one UTF-8 repository file through the canonical byte boundary."""
+
+    raw, size, reason = read_repository_bytes(
+        path,
+        root,
+        root_fd=root_fd,
+        max_bytes=max_bytes,
+    )
+    if reason:
+        return "", size, reason
+    return raw.decode("utf-8", errors="replace"), size, ""
 
 
 def repository_file_size(
@@ -294,9 +319,7 @@ def repository_subdirectories(
 ) -> tuple[list[str], bool]:
     """List immediate child directories through the anchored repository FD."""
 
-    if relative_directory.is_absolute() or is_sensitive_repository_path(
-        relative_directory
-    ):
+    if relative_directory.is_absolute() or is_sensitive_repository_path(relative_directory):
         return [], False
     if any(
         part in REPOSITORY_SKIP_PARTS or part.endswith(".egg-info")
@@ -370,13 +393,9 @@ def safe_repository_file(
         relative = path.relative_to(root)
     except ValueError:
         return False, "outside_root"
-    if any(
-        part in REPOSITORY_SKIP_PARTS or part.endswith(".egg-info")
-        for part in relative.parts
-    ):
-        return False, "unsupported"
-    if is_sensitive_repository_path(relative):
-        return False, "sensitive"
+    reason = repository_relative_path_reason(relative)
+    if reason:
+        return False, reason
     if _has_symlink_component(path, root):
         return False, "symlink"
     try:
@@ -433,11 +452,7 @@ def git_repository_files(
 ) -> tuple[Optional[list[str]], bool]:
     """Stream Git-visible paths under root and stop at explicit input bounds."""
 
-    git_root = (
-        _git_root(root)
-        if root_fd is None
-        else _git_root(root, root_fd=root_fd)
-    )
+    git_root = _git_root(root) if root_fd is None else _git_root(root, root_fd=root_fd)
     if git_root is None:
         return None, False
     command = [
@@ -467,9 +482,7 @@ def git_repository_files(
     if proc.stdout is None:
         proc.kill()
         proc.wait()
-        raise ValueError(
-            "Git repository file selection failed; refusing filesystem fallback"
-        )
+        raise ValueError("Git repository file selection failed; refusing filesystem fallback")
 
     paths: list[str] = []
     buffer = b""
@@ -552,9 +565,7 @@ def git_repository_files(
     if timed_out:
         raise ValueError("Git repository file selection timed out")
     if not truncated and return_code != 0:
-        raise ValueError(
-            "Git repository file selection failed; refusing filesystem fallback"
-        )
+        raise ValueError("Git repository file selection failed; refusing filesystem fallback")
     return sorted(set(paths)), truncated
 
 
@@ -686,9 +697,7 @@ def collect_repository_manifest(
     )
     if git_candidates is None:
         if _looks_like_git_checkout(root):
-            raise ValueError(
-                "Git repository file selection failed; refusing filesystem fallback"
-            )
+            raise ValueError("Git repository file selection failed; refusing filesystem fallback")
         candidates, input_truncated = filesystem_repository_files(
             root,
             max_entries=input_entry_limit,

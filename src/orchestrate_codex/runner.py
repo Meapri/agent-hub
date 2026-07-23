@@ -7,6 +7,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from agent_hub.core import handoff as handoff_state
+
 from . import __version__, catalog, errors, gather, policy, recipes, store, verify
 
 # capability → ordered fallback tools (first is primary unless bindings override)
@@ -25,6 +27,8 @@ FALLBACK_CHAINS: Dict[str, List[str]] = {
 
 # Max concurrently-retained runs; oldest evicted first (in-process store only).
 MAX_RUNS = 200
+RUN_STATE_SCHEMA_VERSION = 2
+RUN_LEASE_SECONDS = 60.0
 
 # Default output budget for a structured write (README/PR/etc.); leaf defaults truncate.
 DEFAULT_WRITE_MAX_TOKENS = 65536
@@ -33,6 +37,22 @@ DEFAULT_WRITE_MAX_TOKENS = 65536
 DEFAULT_CHAT_MAX_TOKENS = 65536
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
+
+
+def _load_handoff_snapshot(user_args: Dict[str, Any]) -> Dict[str, Any]:
+    if "_handoff_snapshot" in user_args:
+        raise ValueError("_handoff_snapshot is reserved for persisted internal state")
+    return handoff_state.load_handoff(
+        str(user_args.get("project_root") or "."),
+        mode=str(user_args.get("handoff_mode") or "auto"),
+        search=str(user_args.get("handoff_search") or "nearest"),
+        file=str(user_args.get("handoff_file") or ""),
+        max_chars=int(user_args.get("max_handoff_chars") or handoff_state.DEFAULT_MAX_CHARS),
+    )
+
+
+def _handoff_context(user_args: Dict[str, Any]) -> str:
+    return handoff_state.render_context(user_args.get("_handoff_snapshot"))
 
 
 def _tool_family(tool: str) -> str:
@@ -107,7 +127,10 @@ def _enrich_chat_args(
         str(step.get("instruction") or ""),
     ]
     if step.get("revise_notes"):
-        parts.append("REVISE — fix these local-check failures: " + "; ".join(str(n) for n in step["revise_notes"]))
+        parts.append(
+            "REVISE — fix these local-check failures: "
+            + "; ".join(str(n) for n in step["revise_notes"])
+        )
     if artifacts.get("facts_text"):
         parts.append("FACT PACK:\n" + str(artifacts["facts_text"]))
     if artifacts.get("git_text") and pol.get("git") == "on":
@@ -124,10 +147,15 @@ def _enrich_chat_args(
         parts.append("SOURCE TEXT:\n" + str(user_args["source_text"]))
     if user_args.get("target_language"):
         parts.append("TARGET LANGUAGE: " + str(user_args["target_language"]))
+    operational_handoff = _handoff_context(user_args)
+    if operational_handoff and step.get("capability") != "grounded_search":
+        parts.append(operational_handoff)
     if prompt:
         parts.append("User request:\n" + prompt)
     if step.get("capability") == "grounded_search":
-        args["query"] = prompt or args.get("query") or "status"  # GROUNDING_SCHEMA has no max_tokens
+        args["query"] = (
+            prompt or args.get("query") or "status"
+        )  # GROUNDING_SCHEMA has no max_tokens
     else:
         args["prompt"] = "\n\n".join(p for p in parts if p)
         # Always pass the conductor budget so every provider has the same generous
@@ -160,6 +188,11 @@ def _enrich_write_args(
     artifacts = artifacts or {}
     instruction = str(user_args.get("prompt") or user_args.get("instruction") or "").strip()
     full_instruction = instruction or str(step.get("instruction") or "")
+    operational_handoff = _handoff_context(user_args)
+    if operational_handoff:
+        full_instruction = "\n\n".join(
+            part for part in (full_instruction, operational_handoff) if part
+        )
     if step.get("revise_notes"):
         full_instruction += (
             "\n\nREVISE — the previous draft failed these local checks; fix each: "
@@ -193,7 +226,9 @@ def _enrich_write_args(
     # Feed an upstream stage's output (e.g. grounded search) as the source to transform,
     # unless the caller supplied explicit source text/file.
     if "source_text" not in args and "source_file" not in args:
-        upstream = artifacts.get("findings_text") or artifacts.get("search") or artifacts.get("outline")
+        upstream = (
+            artifacts.get("findings_text") or artifacts.get("search") or artifacts.get("outline")
+        )
         if upstream:
             args["source_text"] = str(upstream)
     return args
@@ -231,12 +266,18 @@ def _args_for_tool(
                 args[key] = user_args[key]
     elif family == "compare":
         prompt = str(user_args.get("prompt") or user_args.get("instruction") or "").strip()
+        operational_handoff = _handoff_context(user_args)
+        if operational_handoff:
+            prompt = "\n\n".join(part for part in (prompt, operational_handoff) if part)
         args = {"prompt": prompt or str(step.get("instruction") or "")}
         # COMPARE_SCHEMA takes `models` (plural), not `model`.
         if user_args.get("models") not in (None, "", []):
             args["models"] = user_args["models"]
     elif family == "review_diff":
         prompt = str(user_args.get("prompt") or user_args.get("instruction") or "").strip()
+        operational_handoff = _handoff_context(user_args)
+        if operational_handoff:
+            prompt = "\n\n".join(part for part in (prompt, operational_handoff) if part)
         args = {"cwd": str(user_args.get("project_root") or ".")}
         if prompt:
             args["instruction"] = prompt
@@ -284,7 +325,9 @@ def _resolve_model_for_tool(tool: str, requested: Optional[str]) -> Optional[str
     return catalog.latest_for(tool)
 
 
-def _build_steps(recipe: Dict[str, Any], bindings: Dict[str, str], user_args: Dict[str, Any], pol: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _build_steps(
+    recipe: Dict[str, Any], bindings: Dict[str, str], user_args: Dict[str, Any], pol: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     steps: List[Dict[str, Any]] = []
     for i, stage in enumerate(recipe["stages"]):
         capability = str(stage.get("capability") or "")
@@ -332,18 +375,23 @@ def start_run(
     user_args = dict(args or {})
     if project_root:
         user_args.setdefault("project_root", project_root)
+    handoff_snapshot = _load_handoff_snapshot(user_args)
     run_id = uuid.uuid4().hex[:12]
     state: Dict[str, Any] = {
         "run_id": run_id,
+        "run_kind": "fixed",
         "recipe_id": recipe["id"],
         "doc_class": recipe["doc_class"],
         "context_policy": pol,
         "bindings": bind,
         "fallback_chains": FALLBACK_CHAINS,
         "mode": "supervised",
+        "state_schema_version": RUN_STATE_SCHEMA_VERSION,
+        "store_revision": 0,
         "version": __version__,
         "created_at": time.time(),
         "user_args": user_args,
+        "_handoff_snapshot": handoff_snapshot,
         "project_root": str(user_args.get("project_root") or project_root or "."),
         "steps": _build_steps(recipe, bind, user_args, pol),
         "artifacts": {},
@@ -367,10 +415,13 @@ def start_run(
     )
     prompt_text = str(user_args.get("prompt") or user_args.get("instruction") or "").strip()
     if needs_prompt and not prompt_text:
-        state.setdefault("warnings", []).append("missing_prompt: recipe has a generative stage but no prompt/instruction")
+        state.setdefault("warnings", []).append(
+            "missing_prompt: recipe has a generative stage but no prompt/instruction"
+        )
     if auto_local:
         _auto_local_forward(state)
-    _store(state)
+    state = store.create(state)
+    _RUNS[run_id] = state
     _prune_runs()
     return _public_state(state)
 
@@ -404,8 +455,18 @@ def load_state(state_or_id: Any) -> Dict[str, Any]:
 
 def _public_state(state: Dict[str, Any]) -> Dict[str, Any]:
     out = copy.deepcopy(state)
+    out.pop("_lease", None)
     out["current_step"] = _current_step(out)
     out["next_action"] = _next_action(out)
+    snapshot = out.pop("_handoff_snapshot", None)
+    if isinstance(snapshot, dict):
+        out["handoff"] = handoff_state.public_snapshot(snapshot)
+    if (
+        out.get("run_id")
+        and isinstance(out.get("store_revision"), int)
+        and out["next_action"].get("type") not in {"done", "failed"}
+    ):
+        out["next_action"]["expected_revision"] = out["store_revision"]
     out["done"] = out.get("status") in {"completed", "failed"}
     return out
 
@@ -436,7 +497,10 @@ def _next_action(state: Dict[str, Any]) -> Dict[str, Any]:
             step["suggested_arguments"] = _args_for_tool(
                 step,
                 tool,
-                user_args=state.get("user_args") or {},
+                user_args={
+                    **(state.get("user_args") or {}),
+                    "_handoff_snapshot": state.get("_handoff_snapshot"),
+                },
                 pol=pol,
                 artifacts=state.get("artifacts") or {},
             )
@@ -522,7 +586,9 @@ def _run_local_step(state: Dict[str, Any], step: Dict[str, Any]) -> None:
             result = verify.verify_text(
                 text,
                 doc_class=str(state.get("doc_class") or "durable"),
-                fact_pack=artifacts.get("facts") if isinstance(artifacts.get("facts"), dict) else None,
+                fact_pack=artifacts.get("facts")
+                if isinstance(artifacts.get("facts"), dict)
+                else None,
                 user_facing=(
                     state.get("recipe_id") == "durable_readme"
                     or (state.get("user_args") or {}).get("task") == "readme"
@@ -600,36 +666,19 @@ def _advance_cursor(state: Dict[str, Any]) -> None:
         state["cursor"] = int(state.get("cursor") or 0) + 1
 
 
-def continue_run(
+def _advance_run_state(
+    st: Dict[str, Any],
     *,
-    run_id: str = "",
-    state: Optional[Dict[str, Any]] = None,
-    stage_id: str = "",
-    result_text: str = "",
-    success: bool = True,
-    error: str = "",
-    auto_local: bool = True,
+    stage_id: str,
+    result_text: str,
+    success: bool,
+    error: str,
+    auto_local: bool,
 ) -> Dict[str, Any]:
-    if state is not None:
-        state_run_id = (
-            store.validate_run_id(state.get("run_id"))
-            if state.get("run_id") not in (None, "")
-            else ""
-        )
-        requested_run_id = (
-            store.validate_run_id(run_id)
-            if run_id not in (None, "")
-            else ""
-        )
-        if state_run_id and requested_run_id and state_run_id != requested_run_id:
-            raise ValueError("run_id does not match state.run_id")
-    st = load_state(state if state is not None else run_id)
     step = _current_step(st)
     if not step:
         st["status"] = "completed"
-        out = _public_state(st)
-        _store(st)
-        return out
+        return st
 
     sid = stage_id or str(step.get("id") or "")
     if sid and sid != step.get("id"):
@@ -641,17 +690,13 @@ def continue_run(
         if step.get("status") == "failed":
             st["status"] = "failed"
             st["error"] = step.get("error")
-            out = _public_state(st)
-            _store(st)
-            return out
+            return st
         _advance_cursor(st)  # honors a verify-scheduled revision rewind
         if auto_local:
             _auto_local_forward(st)
         if st.get("cursor", 0) >= len(st["steps"]) and st.get("status") == "running":
             st["status"] = "completed"
-        out = _public_state(st)
-        _store(st)
-        return out
+        return st
 
     if success:
         step["status"] = "completed"
@@ -697,17 +742,124 @@ def continue_run(
             st["status"] = "failed"
             st["error"] = step["error"]
 
-    out = _public_state(st)
-    _store(st)
-    return out
+    return st
 
 
-def _store(state: Dict[str, Any]) -> None:
-    if state.get("run_id") in (None, ""):
-        return
-    rid = store.validate_run_id(state.get("run_id"))
-    store.save(state)
-    _RUNS[rid] = state
+def _validate_fixed_run_state(state: Dict[str, Any]) -> None:
+    run_kind = state.get("run_kind")
+    if (
+        run_kind not in (None, "fixed")
+        or not str(state.get("recipe_id") or "").strip()
+        or not isinstance(state.get("steps"), list)
+    ):
+        raise ValueError("persisted run is not a fixed recipe run")
+
+
+def continue_run(
+    *,
+    run_id: str = "",
+    state: Optional[Dict[str, Any]] = None,
+    stage_id: str = "",
+    result_text: str = "",
+    success: bool = True,
+    error: str = "",
+    auto_local: bool = True,
+    expected_revision: int | None = None,
+    handoff_drift_policy: str | None = None,
+) -> Dict[str, Any]:
+    if isinstance(state, dict) and "_handoff_snapshot" in state:
+        raise ValueError("_handoff_snapshot is reserved for persisted internal state")
+    state_run_id = ""
+    state_revision = None
+    if state is not None:
+        state_run_id = (
+            store.validate_run_id(state.get("run_id"))
+            if state.get("run_id") not in (None, "")
+            else ""
+        )
+        state_revision = state.get("store_revision")
+    requested_run_id = store.validate_run_id(run_id) if run_id not in (None, "") else ""
+    if state_run_id and requested_run_id and state_run_id != requested_run_id:
+        raise ValueError("run_id does not match state.run_id")
+    for field, value in (
+        ("expected_revision", expected_revision),
+        ("state.store_revision", state_revision),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise ValueError(f"{field} must be a non-negative integer")
+    if (
+        expected_revision is not None
+        and state_revision is not None
+        and expected_revision != state_revision
+    ):
+        raise ValueError("expected_revision does not match state.store_revision")
+    expected = expected_revision if expected_revision is not None else state_revision
+    persistent_run_id = state_run_id or requested_run_id
+    if not persistent_run_id:
+        if state is not None and state.get("run_kind") == "adaptive":
+            raise ValueError("state is not a fixed recipe run")
+        raise ValueError(
+            "fixed continuation requires run_id; caller-supplied state-only "
+            "continuation cannot provide revision, lease, or handoff drift guarantees"
+        )
+
+    claim = store.claim(
+        persistent_run_id,
+        expected_revision=expected,
+        lease_seconds=RUN_LEASE_SECONDS,
+    )
+    try:
+        _validate_fixed_run_state(claim.state)
+        if claim.state.get("status") in {"completed", "failed"}:
+            released = store.abort_claim(claim)
+            _RUNS[persistent_run_id] = released
+            return _public_state(released)
+        drift_policy = (
+            str(
+                handoff_drift_policy
+                or (claim.state.get("user_args") or {}).get("handoff_drift_policy")
+                or "pause"
+            )
+            .strip()
+            .lower()
+        )
+        if drift_policy not in {"pause", "use-snapshot"}:
+            raise ValueError("handoff_drift_policy must be pause or use-snapshot")
+        handoff_snapshot = claim.state.get("_handoff_snapshot")
+        drift = handoff_state.check_drift(
+            handoff_snapshot if isinstance(handoff_snapshot, dict) else None
+        )
+        if drift.get("drifted") and drift_policy == "pause":
+            store.abort_claim(claim)
+            raise handoff_state.HandoffDrift(drift)
+        working_state = copy.deepcopy(claim.state)
+        if drift.get("drifted"):
+            working_state["handoff_drift"] = drift
+            warnings = working_state.setdefault("warnings", [])
+            if "handoff_drift_using_snapshot" not in warnings:
+                warnings.append("handoff_drift_using_snapshot")
+        else:
+            working_state.pop("handoff_drift", None)
+        advanced = _advance_run_state(
+            working_state,
+            stage_id=stage_id,
+            result_text=result_text,
+            success=success,
+            error=error,
+            auto_local=auto_local,
+        )
+        committed = store.commit_claim(claim, advanced)
+    except Exception:
+        try:
+            store.abort_claim(claim)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    _RUNS[persistent_run_id] = committed
+    _prune_runs()
+    return _public_state(committed)
 
 
 _CAP_BINDING = {
@@ -794,7 +946,9 @@ def prepare_step(
         "fallback_tools": fallbacks,
         "model": args.get("model") or resolved_model,
         "arguments": args,
-        "gathered": [k for k in ("facts_text", "code_text", "git_text", "findings_text") if k in artifacts],
+        "gathered": [
+            k for k in ("facts_text", "code_text", "git_text", "findings_text") if k in artifacts
+        ],
         "verify_after": doc_class in {"durable", "transform"},
         "note": (
             "Call `tool` with `arguments`. On failure, call the next entry in `fallback_tools`. "
@@ -827,11 +981,14 @@ def resolve_bindings(
     runnable: List[str] = []
     blocked: List[Dict[str, Any]] = []
     for rid, recipe in recipes.all_recipes().items():
-        missing = sorted({
-            str(stage.get("capability"))
-            for stage in recipe["stages"]
-            if stage.get("capability") in FALLBACK_CHAINS and not chains.get(str(stage.get("capability")))
-        })
+        missing = sorted(
+            {
+                str(stage.get("capability"))
+                for stage in recipe["stages"]
+                if stage.get("capability") in FALLBACK_CHAINS
+                and not chains.get(str(stage.get("capability")))
+            }
+        )
         if missing:
             blocked.append({"id": rid, "missing_capabilities": missing})
         else:
@@ -848,10 +1005,7 @@ def resolve_bindings(
 
 def get_run(run_id: str) -> Dict[str, Any]:
     validated = store.validate_run_id(run_id)
-    if validated in _RUNS:
-        return _public_state(_RUNS[validated])
-    persisted = store.load(validated)
-    if persisted is not None:
-        _RUNS[validated] = persisted
-        return _public_state(persisted)
-    raise ValueError(f"unknown run_id: {validated}")
+    persisted = store.load_strict(validated)
+    _validate_fixed_run_state(persisted)
+    _RUNS[validated] = persisted
+    return _public_state(persisted)

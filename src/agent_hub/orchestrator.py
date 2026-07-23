@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from graphlib import CycleError, TopologicalSorter
 from hashlib import sha256
 import json
 import re
+from threading import BoundedSemaphore, Lock
 import time
-from typing import Any, Callable, Dict, List, Mapping, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Sequence
 
 from agent_hub import capabilities, consistency
 from agent_hub.core import parallel
@@ -51,9 +53,150 @@ _STEP_KEYS = {
     "decision_labels",
     "reasoning_effort",
     "investigation_depth",
+    "min_successes",
+    "quality_rewrite_attempts",
+    "provider_calls_per_attempt",
+    "estimated_max_provider_calls",
 }
 REASONING_EFFORTS = ("low", "medium", "high")
 INVESTIGATION_DEPTHS = ("shallow", "standard", "deep")
+PROVIDER_CALL_BUDGET_ERROR = "provider_call_budget_exhausted"
+PROVIDER_CALL_DEADLINE_ERROR = "workflow_timeout_exceeded"
+
+
+class ProviderCallBudgetExceeded(RuntimeError):
+    """Raised before dispatch when the workflow has no provider-call credit left."""
+
+    def __init__(self) -> None:
+        super().__init__(PROVIDER_CALL_BUDGET_ERROR)
+
+
+class ProviderCallDeadlineExceeded(RuntimeError):
+    """Raised before dispatch when no workflow time remains for a provider call."""
+
+    def __init__(self) -> None:
+        super().__init__(PROVIDER_CALL_DEADLINE_ERROR)
+
+
+class ProviderCallReservation:
+    """A bounded, thread-safe reservation shared by one adaptive step attempt."""
+
+    def __init__(self, budget: ProviderCallBudget, count: int) -> None:
+        self._budget = budget
+        self._remaining = count
+        self._used = 0
+        self._closed = False
+        self._lock = Lock()
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    @contextmanager
+    def dispatch(self) -> Iterator[float | None]:
+        with self._lock:
+            if self._closed or self._remaining <= 0:
+                raise ProviderCallBudgetExceeded()
+            self._remaining -= 1
+        wait_seconds = self._budget.remaining_seconds
+        if wait_seconds is not None and wait_seconds <= 0:
+            with self._lock:
+                self._remaining += 1
+            raise ProviderCallDeadlineExceeded()
+        acquired = (
+            self._budget._semaphore.acquire()
+            if wait_seconds is None
+            else self._budget._semaphore.acquire(timeout=wait_seconds)
+        )
+        remaining_seconds = self._budget.remaining_seconds
+        if not acquired or (remaining_seconds is not None and remaining_seconds <= 0):
+            if acquired:
+                self._budget._semaphore.release()
+            with self._lock:
+                self._remaining += 1
+            raise ProviderCallDeadlineExceeded()
+        with self._lock:
+            self._used += 1
+        with self._budget._lock:
+            self._budget._reserved -= 1
+            self._budget._used += 1
+        try:
+            yield remaining_seconds
+        finally:
+            self._budget._semaphore.release()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            with self._budget._lock:
+                self._budget._reserved -= self._remaining
+            self._remaining = 0
+            self._closed = True
+
+
+class ProviderCallBudget:
+    """Global provider-call budget and concurrency gate for one adaptive run slice."""
+
+    def __init__(
+        self,
+        limit: int,
+        *,
+        used: int = 0,
+        max_concurrency: int = 3,
+        deadline_monotonic: float | None = None,
+    ) -> None:
+        self.limit = max(0, int(limit))
+        self._used = max(0, int(used))
+        self._reserved = 0
+        self._lock = Lock()
+        self._semaphore = BoundedSemaphore(max(1, int(max_concurrency)))
+        self._deadline_monotonic = (
+            float(deadline_monotonic) if deadline_monotonic is not None else None
+        )
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self.limit - self._used - self._reserved)
+
+    @property
+    def remaining_seconds(self) -> float | None:
+        if self._deadline_monotonic is None:
+            return None
+        return max(0.0, self._deadline_monotonic - time.monotonic())
+
+    def consume(self, count: int) -> None:
+        """Account for an opaque invoker that cannot use a dispatch reservation."""
+
+        amount = max(0, int(count))
+        with self._lock:
+            if self._used + self._reserved + amount > self.limit:
+                raise ProviderCallBudgetExceeded()
+            self._used += amount
+
+    def reserve(self, count: int) -> ProviderCallReservation:
+        amount = max(0, int(count))
+        with self._lock:
+            if self._used + self._reserved + amount > self.limit:
+                raise ProviderCallBudgetExceeded()
+            self._reserved += amount
+        return ProviderCallReservation(self, amount)
+
+    @contextmanager
+    def dispatch(self) -> Iterator[float | None]:
+        reservation = self.reserve(1)
+        try:
+            with reservation.dispatch() as remaining_seconds:
+                yield remaining_seconds
+        finally:
+            reservation.close()
 
 
 def capability_manifest() -> Dict[str, Any]:
@@ -91,8 +234,10 @@ Contract:
       "instruction": "specific task for this step",
       "reasoning_effort": "low | medium | high",
       "investigation_depth": "shallow | standard | deep (inspect_codebase only)",
+      "quality_rewrite_attempts": 1,
       "final": false,
       "participants": ["only for compare: 2-3 model providers"],
+      "min_successes": 2,
       "decision_labels": ["only for a closed decision compare: 2-20 labels"]
     }}
   ]
@@ -114,6 +259,8 @@ Rules:
 - Every non-final step must feed, directly or transitively, the one final step.
 - Use compare only when multiple independent judgments materially help. Use decision_labels only
   when the answer has a real caller-definable closed label set; never fake a semantic score for open text.
+- A compare normally requires at least two successful participants. Lower min_successes only when
+  the caller can safely use one independent response.
 - verify is a deterministic local text check, not an LLM judge.
 
 User goal:
@@ -222,12 +369,11 @@ def validate_plan(
                     f"{', '.join(INVESTIGATION_DEPTHS)}"
                 )
         elif investigation_depth:
-            raise ValueError(
-                f"{step_id}.investigation_depth is only valid for inspect_codebase"
-            )
+            raise ValueError(f"{step_id}.investigation_depth is only valid for inspect_codebase")
 
         participants: List[str] = []
         decision_labels: List[str] = []
+        min_successes: int | None = None
         if capability == "compare":
             participants = _unique_strings(
                 raw.get("participants", ["claude", "grok", "gemini"]),
@@ -237,10 +383,43 @@ def validate_plan(
                 item not in {"claude", "grok", "gemini"} for item in participants
             ):
                 raise ValueError(f"{step_id}.participants must contain 2-3 model providers")
+            raw_min_successes = raw.get("min_successes", min(2, len(participants)))
+            if isinstance(raw_min_successes, bool) or not isinstance(raw_min_successes, int):
+                raise ValueError(f"{step_id}.min_successes must be an integer")
+            min_successes = raw_min_successes
+            if not 1 <= min_successes <= len(participants):
+                raise ValueError(f"{step_id}.min_successes must be within 1..{len(participants)}")
             if raw.get("decision_labels"):
                 decision_labels = consistency.validate_labels(raw["decision_labels"])
-        elif raw.get("participants") or raw.get("decision_labels"):
-            raise ValueError(f"{step_id} may use participants/decision_labels only with compare")
+        elif (
+            raw.get("participants")
+            or raw.get("decision_labels")
+            or raw.get("min_successes") is not None
+        ):
+            raise ValueError(
+                f"{step_id} may use participants/min_successes/decision_labels only with compare"
+            )
+
+        quality_rewrite_attempts: int | None = None
+        if capability == "write":
+            raw_rewrites = raw.get("quality_rewrite_attempts", 1)
+            if isinstance(raw_rewrites, bool) or not isinstance(raw_rewrites, int):
+                raise ValueError(f"{step_id}.quality_rewrite_attempts must be an integer")
+            quality_rewrite_attempts = raw_rewrites
+            if not 0 <= quality_rewrite_attempts <= 2:
+                raise ValueError(f"{step_id}.quality_rewrite_attempts must be within 0..2")
+        elif raw.get("quality_rewrite_attempts") is not None:
+            raise ValueError(f"{step_id}.quality_rewrite_attempts is only valid for write")
+
+        if capability in {"verify", "release_snapshot"}:
+            provider_calls_per_attempt = 0
+        elif capability == "compare":
+            provider_calls_per_attempt = len(participants)
+        elif capability == "write":
+            provider_calls_per_attempt = 1 + int(quality_rewrite_attempts or 0)
+        else:
+            provider_calls_per_attempt = 1
+        estimated_max_provider_calls = provider_calls_per_attempt * (1 + len(fallbacks))
 
         normalized_steps.append(
             {
@@ -251,14 +430,18 @@ def validate_plan(
                 "fallback_providers": fallbacks,
                 "instruction": instruction,
                 "reasoning_effort": reasoning_effort,
-                **(
-                    {"investigation_depth": investigation_depth}
-                    if investigation_depth
-                    else {}
-                ),
+                **({"investigation_depth": investigation_depth} if investigation_depth else {}),
                 "final": bool(raw.get("final", False)),
                 **({"participants": participants} if participants else {}),
+                **({"min_successes": min_successes} if min_successes is not None else {}),
                 **({"decision_labels": decision_labels} if decision_labels else {}),
+                **(
+                    {"quality_rewrite_attempts": quality_rewrite_attempts}
+                    if quality_rewrite_attempts is not None
+                    else {}
+                ),
+                "provider_calls_per_attempt": provider_calls_per_attempt,
+                "estimated_max_provider_calls": estimated_max_provider_calls,
             }
         )
         ids.append(step_id)
@@ -308,9 +491,11 @@ def validate_plan(
     if orphaned:
         raise ValueError(f"steps do not feed the final result: {orphaned}")
 
-    expected_calls = sum(1 + len(step["fallback_providers"]) for step in normalized_steps)
+    expected_calls = sum(int(step["estimated_max_provider_calls"]) for step in normalized_steps)
     if expected_calls > int(max_calls):
-        raise ValueError(f"plan may require {expected_calls} calls, exceeding max_calls={max_calls}")
+        raise ValueError(
+            f"plan may require {expected_calls} calls, exceeding max_calls={max_calls}"
+        )
 
     normalized = {
         "schema": PLAN_SCHEMA,
@@ -319,6 +504,7 @@ def validate_plan(
         "steps": normalized_steps,
         "final_step": final_id,
         "expected_max_calls": expected_calls,
+        "expected_max_provider_calls": expected_calls,
     }
     material = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     normalized["plan_sha256"] = sha256(material.encode("utf-8")).hexdigest()
@@ -339,6 +525,7 @@ def execute_plan(
     initial_waves: Sequence[Mapping[str, Any]] | None = None,
     initial_call_count: int = 0,
     max_waves: int | None = None,
+    call_budget: ProviderCallBudget | None = None,
 ) -> Dict[str, Any]:
     """Execute dependency-ready frontiers, optionally resuming a prior slice."""
 
@@ -347,13 +534,16 @@ def execute_plan(
     results: Dict[str, Dict[str, Any]] = {
         str(step_id): dict(result)
         for step_id, result in (initial_results or {}).items()
-        if str(step_id) in steps
-        and isinstance(result, Mapping)
-        and bool(result.get("success"))
+        if str(step_id) in steps and isinstance(result, Mapping) and bool(result.get("success"))
     }
     pending = set(steps) - set(results)
     waves: List[Dict[str, Any]] = [dict(wave) for wave in (initial_waves or [])]
-    call_count = max(0, int(initial_call_count))
+    opaque_invoker = call_budget is None
+    runtime_budget = call_budget or ProviderCallBudget(
+        max_calls,
+        used=initial_call_count,
+        max_concurrency=max_concurrency,
+    )
     slice_wave_count = 0
     started = time.monotonic()
 
@@ -366,20 +556,55 @@ def execute_plan(
     def run_step(step: Mapping[str, Any]) -> Dict[str, Any]:
         dependency_results = {dep: results[dep] for dep in step["depends_on"]}
         attempts: List[Dict[str, Any]] = []
+        provider_calls_per_attempt = int(step.get("provider_calls_per_attempt") or 0)
         for provider in [step["provider"], *step["fallback_providers"]]:
             if timed_out():
                 attempts.append(
                     {"provider": provider, "success": False, "error": "workflow_timeout_exceeded"}
                 )
                 break
+            reservation: ProviderCallReservation | None = None
             try:
-                response = invoke(step, provider, dependency_results)
+                invoke_step = step
+                if provider_calls_per_attempt:
+                    if opaque_invoker:
+                        runtime_budget.consume(provider_calls_per_attempt)
+                    else:
+                        reservation = runtime_budget.reserve(provider_calls_per_attempt)
+                        invoke_step = {
+                            **step,
+                            "_provider_call_reservation": reservation,
+                        }
+                before_calls = reservation.used if reservation is not None else 0
+                response = invoke(invoke_step, provider, dependency_results)
+                provider_calls = reservation.used - before_calls if reservation is not None else 0
+                if timed_out():
+                    attempts.append(
+                        {
+                            "provider": provider,
+                            "success": False,
+                            "error": PROVIDER_CALL_DEADLINE_ERROR,
+                            "provider_calls": (
+                                provider_calls_per_attempt if opaque_invoker else provider_calls
+                            ),
+                        }
+                    )
+                    break
+                raw_error = response.get("error")
+                response_error = (
+                    str(raw_error.get("type") or raw_error.get("message") or "")
+                    if isinstance(raw_error, Mapping)
+                    else raw_error
+                )
                 ok = bool(response.get("success", not response.get("error")))
                 attempts.append(
                     {
                         "provider": provider,
                         "success": ok,
-                        "error": response.get("error"),
+                        "error": response_error,
+                        "provider_calls": (
+                            provider_calls_per_attempt if opaque_invoker else provider_calls
+                        ),
                     }
                 )
                 if ok:
@@ -390,8 +615,44 @@ def execute_plan(
                         "attempts": attempts,
                         "data": response.get("data") or response,
                     }
+            except ProviderCallDeadlineExceeded:
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "success": False,
+                        "error": PROVIDER_CALL_DEADLINE_ERROR,
+                        "provider_calls": (reservation.used if reservation is not None else 0),
+                    }
+                )
+                break
+            except ProviderCallBudgetExceeded:
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "success": False,
+                        "error": PROVIDER_CALL_BUDGET_ERROR,
+                        "provider_calls": (reservation.used if reservation is not None else 0),
+                    }
+                )
+                break
             except Exception as exc:  # noqa: BLE001 - fallback is part of the contract
-                attempts.append({"provider": provider, "success": False, "error": str(exc)})
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "success": False,
+                        "error": str(exc),
+                        "provider_calls": (
+                            provider_calls_per_attempt
+                            if opaque_invoker
+                            else reservation.used
+                            if reservation is not None
+                            else 0
+                        ),
+                    }
+                )
+            finally:
+                if reservation is not None:
+                    reservation.close()
         return {
             "success": False,
             "provider": None,
@@ -410,7 +671,7 @@ def execute_plan(
                 "plan": normalized,
                 "results": results,
                 "waves": waves,
-                "leaf_calls": call_count,
+                "leaf_calls": runtime_budget.used,
             }
         if timed_out():
             return {
@@ -422,7 +683,7 @@ def execute_plan(
                 "plan": normalized,
                 "results": results,
                 "waves": waves,
-                "leaf_calls": call_count,
+                "leaf_calls": runtime_budget.used,
             }
         ready = [
             step_id
@@ -438,7 +699,7 @@ def execute_plan(
                 "plan": normalized,
                 "results": results,
                 "waves": waves,
-                "leaf_calls": call_count,
+                "leaf_calls": runtime_budget.used,
             }
         outcomes = parallel.run_ordered(
             [lambda sid=step_id: run_step(steps[sid]) for step_id in ready],
@@ -461,7 +722,6 @@ def execute_plan(
             result["elapsed_ms"] = outcome.elapsed_ms
             results[step_id] = result
             pending.remove(step_id)
-            call_count += len(result.get("attempts") or [])
             wave_results[step_id] = {
                 "success": bool(result.get("success")),
                 "provider": result.get("provider"),
@@ -480,23 +740,42 @@ def execute_plan(
                 )
                 for step_id in failed
             )
+            budget_failure = any(
+                any(
+                    attempt.get("error") == PROVIDER_CALL_BUDGET_ERROR
+                    for attempt in results[step_id].get("attempts") or []
+                )
+                for step_id in failed
+            )
             return {
                 "success": False,
-                "status": "timed_out" if timeout_failure else "failed",
+                "status": (
+                    "timed_out"
+                    if timeout_failure
+                    else "budget_exhausted"
+                    if budget_failure
+                    else "failed"
+                ),
                 "text": (
                     "Adaptive workflow exhausted its end-to-end time budget."
                     if timeout_failure
+                    else "Adaptive workflow exhausted its provider-call budget."
+                    if budget_failure
                     else f"Adaptive workflow failed at: {', '.join(failed)}"
                 ),
                 "error": (
-                    "workflow_timeout_exceeded" if timeout_failure else "adaptive_step_failed"
+                    "workflow_timeout_exceeded"
+                    if timeout_failure
+                    else PROVIDER_CALL_BUDGET_ERROR
+                    if budget_failure
+                    else "adaptive_step_failed"
                 ),
                 "failed_steps": failed,
                 "blocked_steps": blocked,
                 "plan": normalized,
                 "results": results,
                 "waves": waves,
-                "leaf_calls": call_count,
+                "leaf_calls": runtime_budget.used,
             }
 
     final = results[normalized["final_step"]]
@@ -507,6 +786,6 @@ def execute_plan(
         "plan": normalized,
         "results": results,
         "waves": waves,
-        "leaf_calls": call_count,
+        "leaf_calls": runtime_budget.used,
         "final_step": normalized["final_step"],
     }

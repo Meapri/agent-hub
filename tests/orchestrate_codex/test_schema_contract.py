@@ -31,7 +31,11 @@ def _schema_dict_node(module: ast.Module, var_name: str) -> Optional[ast.Dict]:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
-                if isinstance(t, ast.Name) and t.id == var_name and isinstance(node.value, ast.Dict):
+                if (
+                    isinstance(t, ast.Name)
+                    and t.id == var_name
+                    and isinstance(node.value, ast.Dict)
+                ):
                     return node.value
     return None
 
@@ -43,7 +47,9 @@ def _dict_get(dnode: ast.Dict, key: str) -> Optional[ast.AST]:
     return None
 
 
-def _prop_keys(module: ast.Module, var_name: str, _seen: Optional[Set[str]] = None) -> Tuple[Set[str], list, Optional[bool]]:
+def _prop_keys(
+    module: ast.Module, var_name: str, _seen: Optional[Set[str]] = None
+) -> Tuple[Set[str], list, Optional[bool]]:
     """Return (property keys, required list, additionalProperties bool) for a *_SCHEMA var."""
     _seen = _seen or set()
     node = _schema_dict_node(module, var_name)
@@ -76,7 +82,11 @@ def _tool_schema_var(source: str, tool: str) -> Optional[str]:
     """Find the inputSchema variable bound to a tool name in tool_definitions()."""
     import re
 
-    m = re.search(rf'"name":\s*"{re.escape(tool)}"(.*?)"inputSchema":\s*([A-Za-z_][A-Za-z0-9_]*)', source, re.S)
+    m = re.search(
+        rf'"name":\s*"{re.escape(tool)}"(.*?)"inputSchema":\s*([A-Za-z_][A-Za-z0-9_]*)',
+        source,
+        re.S,
+    )
     return m.group(2) if m else None
 
 
@@ -133,4 +143,5 @@ def test_write_chat_fallback_matches_claude_schema(tmp_path):
     out = runner.continue_run(run_id=state["run_id"], success=False, error="quota")
     na = out["next_action"]
     assert na["tool"] == "claude_codex_chat"
+    assert na["expected_revision"] == out["store_revision"]
     _validate("claude", na["tool"], na["arguments"])

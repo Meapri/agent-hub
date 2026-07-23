@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from threading import Barrier
+from threading import Barrier, Event, Lock, Thread
+import time
 
 import pytest
 
@@ -46,6 +47,43 @@ def _plan():
     }
 
 
+def _compare_plan():
+    return {
+        "schema": "agent_hub_plan_v1",
+        "goal": "Compare independent findings",
+        "steps": [
+            {
+                "id": "compare_findings",
+                "capability": "compare",
+                "provider": "multiple",
+                "depends_on": [],
+                "fallback_providers": [],
+                "instruction": "Compare the findings.",
+                "participants": ["claude", "grok", "gemini"],
+                "final": True,
+            }
+        ],
+    }
+
+
+def _single_chat_plan():
+    return {
+        "schema": "agent_hub_plan_v1",
+        "goal": "Answer once",
+        "steps": [
+            {
+                "id": "answer",
+                "capability": "chat",
+                "provider": "claude",
+                "depends_on": [],
+                "fallback_providers": [],
+                "instruction": "Answer.",
+                "final": True,
+            }
+        ],
+    }
+
+
 def _policy_root(tmp_path):
     (tmp_path / "AGENTS.md").write_text("# Rules\n\n- Ground claims.\n", encoding="utf-8")
     return str(tmp_path)
@@ -54,9 +92,35 @@ def _policy_root(tmp_path):
 def test_validator_accepts_llm_chosen_dag():
     plan = orchestrator.validate_plan(_plan())
     assert plan["final_step"] == "synthesize"
-    assert plan["expected_max_calls"] == 6
+    assert plan["expected_max_calls"] == 8
+    assert plan["expected_max_provider_calls"] == 8
     assert plan["plan_sha256"]
     assert all(step["reasoning_effort"] == "medium" for step in plan["steps"])
+
+
+def test_validator_counts_compare_participants_as_provider_calls():
+    with pytest.raises(ValueError, match="3 calls"):
+        orchestrator.validate_plan(_compare_plan(), max_calls=2)
+
+    normalized = orchestrator.validate_plan(_compare_plan(), max_calls=3)
+
+    assert normalized["steps"][0]["estimated_max_provider_calls"] == 3
+    assert normalized["expected_max_provider_calls"] == 3
+    assert normalized["expected_max_calls"] == 3
+
+
+def test_validator_counts_bounded_write_rewrites_and_rejects_invalid_limit():
+    plan = _plan()
+    plan["steps"][2]["quality_rewrite_attempts"] = 0
+    normalized = orchestrator.validate_plan(plan)
+
+    assert normalized["steps"][2]["provider_calls_per_attempt"] == 1
+    assert normalized["steps"][2]["estimated_max_provider_calls"] == 2
+    assert normalized["expected_max_provider_calls"] == 6
+
+    plan["steps"][2]["quality_rewrite_attempts"] = 3
+    with pytest.raises(ValueError, match="quality_rewrite_attempts"):
+        orchestrator.validate_plan(plan)
 
 
 def test_validator_accepts_codebase_depth_and_rejects_invalid_effort():
@@ -151,6 +215,218 @@ def test_scheduler_uses_fallback_and_fails_closed_before_dependents():
     assert "synthesize" not in failed["results"]
 
 
+def test_scheduler_does_not_call_provider_after_resume_budget_is_exhausted():
+    plan = _compare_plan()
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("provider must not be called")
+
+    result = orchestrator.execute_plan(
+        plan,
+        invoke=forbidden,
+        max_calls=3,
+        initial_call_count=3,
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "budget_exhausted"
+    assert result["error"] == "provider_call_budget_exhausted"
+    assert result["leaf_calls"] == 3
+    assert called is False
+
+
+def test_compare_budget_reservation_starts_no_provider_when_credit_is_insufficient(
+    monkeypatch,
+):
+    called = []
+    budget = orchestrator.ProviderCallBudget(2, max_concurrency=2)
+
+    monkeypatch.setattr(
+        operations,
+        "_chat_raw",
+        lambda provider, _arguments: called.append(provider) or {"success": True, "text": provider},
+    )
+
+    with pytest.raises(
+        orchestrator.ProviderCallBudgetExceeded,
+        match="provider_call_budget_exhausted",
+    ):
+        operations._compare_models(
+            {
+                "prompt": "Compare.",
+                "providers": ["claude", "grok", "gemini"],
+                "_provider_call_budget": budget,
+            }
+        )
+
+    assert called == []
+    assert budget.used == 0
+
+
+def test_provider_budget_is_global_across_compare_and_sibling_call(monkeypatch):
+    budget = orchestrator.ProviderCallBudget(4, max_concurrency=2)
+    gate = Barrier(2)
+    lock = Lock()
+    active = 0
+    max_active = 0
+
+    def fake_dispatch(_tool, _arguments):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            gate.wait(timeout=2)
+            time.sleep(0.01)
+            return {"success": True, "text": "ok", "warnings": []}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(operations.claude_mcp, "dispatch_tool", fake_dispatch)
+    monkeypatch.setattr(operations.grok_mcp, "dispatch_tool", fake_dispatch)
+    monkeypatch.setattr(operations.google_mcp, "dispatch_tool", fake_dispatch)
+
+    outcomes = operations.parallel.run_ordered(
+        [
+            lambda: operations._compare_models(
+                {
+                    "prompt": "Compare.",
+                    "providers": ["claude", "grok", "gemini"],
+                    "_provider_call_budget": budget,
+                }
+            ),
+            lambda: operations._chat_raw(
+                "claude",
+                {"prompt": "Sibling.", "_provider_call_budget": budget},
+            ),
+        ],
+        execution="parallel",
+        max_workers=2,
+    )
+
+    assert all(outcome.error is None for outcome in outcomes)
+    assert max_active == 2
+    assert budget.used == 4
+
+
+def test_provider_budget_stops_waiters_at_dispatch_deadline():
+    budget = orchestrator.ProviderCallBudget(
+        2,
+        max_concurrency=1,
+        deadline_monotonic=time.monotonic() + 0.02,
+    )
+    reservation = budget.reserve(2)
+
+    with reservation.dispatch():
+        time.sleep(0.03)
+
+    with pytest.raises(
+        orchestrator.ProviderCallDeadlineExceeded,
+        match="workflow_timeout_exceeded",
+    ):
+        with reservation.dispatch():
+            raise AssertionError("provider must not start after the deadline")
+
+    reservation.close()
+    assert budget.used == 1
+
+
+def test_scheduler_rejects_success_that_arrives_after_workflow_deadline():
+    plan = _compare_plan()
+    plan["steps"][0]["participants"] = ["claude", "gemini"]
+
+    def slow_success(_step, _provider, _dependencies):
+        time.sleep(0.02)
+        return {"success": True, "text": "late answer"}
+
+    result = orchestrator.execute_plan(
+        plan,
+        invoke=slow_success,
+        max_calls=2,
+        max_elapsed_seconds=0.01,
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "timed_out"
+    assert result["error"] == "workflow_timeout_exceeded"
+
+
+def test_adaptive_compare_does_not_dispatch_queued_participants_after_deadline(
+    tmp_path, monkeypatch
+):
+    root = _policy_root(tmp_path)
+    budget = orchestrator.ProviderCallBudget(
+        3,
+        max_concurrency=1,
+        deadline_monotonic=time.monotonic() + 0.02,
+    )
+    called = []
+
+    def fake_dispatch(_tool, _arguments):
+        called.append(True)
+        time.sleep(0.03)
+        return {"success": True, "text": "evidence", "warnings": []}
+
+    monkeypatch.setattr(operations.claude_mcp, "dispatch_tool", fake_dispatch)
+    monkeypatch.setattr(operations.grok_mcp, "dispatch_tool", fake_dispatch)
+    monkeypatch.setattr(operations.google_mcp, "dispatch_tool", fake_dispatch)
+
+    result = orchestrator.execute_plan(
+        _compare_plan(),
+        invoke=lambda step, provider, dependencies: operations._adaptive_step_call(
+            dict(step),
+            provider,
+            dict(dependencies),
+            args={"project_root": root, "_provider_call_budget": budget},
+            goal="Compare independent findings",
+        ),
+        max_calls=3,
+        max_elapsed_seconds=0.2,
+        call_budget=budget,
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "timed_out"
+    assert result["error"] == "workflow_timeout_exceeded"
+    assert result["leaf_calls"] == 1
+    assert len(called) == 1
+
+
+def test_adaptive_compare_reports_three_actual_provider_calls(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    budget = orchestrator.ProviderCallBudget(3, max_concurrency=3)
+
+    def fake_dispatch(_tool, _arguments):
+        return {"success": True, "text": "evidence", "warnings": []}
+
+    monkeypatch.setattr(operations.claude_mcp, "dispatch_tool", fake_dispatch)
+    monkeypatch.setattr(operations.grok_mcp, "dispatch_tool", fake_dispatch)
+    monkeypatch.setattr(operations.google_mcp, "dispatch_tool", fake_dispatch)
+
+    result = orchestrator.execute_plan(
+        _compare_plan(),
+        invoke=lambda step, provider, dependencies: operations._adaptive_step_call(
+            dict(step),
+            provider,
+            dict(dependencies),
+            args={"project_root": root, "_provider_call_budget": budget},
+            goal="Compare independent findings",
+        ),
+        max_calls=3,
+        call_budget=budget,
+    )
+
+    assert result["success"] is True
+    assert result["leaf_calls"] == 3
+    compare = result["results"]["compare_findings"]["data"]
+    assert compare["schema"] == "compare_result_v1"
+    assert compare["call_usage"]["provider_calls"] == 3
+
+
 def test_adaptive_plan_uses_llm_then_local_validator(tmp_path, monkeypatch):
     root = _policy_root(tmp_path)
     captured = {}
@@ -221,6 +497,123 @@ def test_adaptive_context_requires_a_completed_current_response():
 
     assert "Complete this step in the current response" in context
     assert "do not announce, request, or defer" in context
+
+
+def test_adaptive_context_renders_each_compare_participant_answer():
+    context = operations._adaptive_context(
+        "Synthesize the review.",
+        {"instruction": "Write the final recommendation."},
+        {
+            "compare_findings": {
+                "success": True,
+                "text": "Compared 3 provider/model targets (2 succeeded).",
+                "data": {
+                    "schema": "compare_result_v1",
+                    "status": "partial",
+                    "requested": 3,
+                    "succeeded": 2,
+                    "min_successes": 2,
+                    "participants": [
+                        {
+                            "provider": "claude",
+                            "model": "claude-test",
+                            "success": True,
+                            "text": "Claude evidence",
+                        },
+                        {
+                            "provider": "grok",
+                            "model": "grok-test",
+                            "success": False,
+                            "text": "",
+                            "error": "provider unavailable",
+                        },
+                        {
+                            "provider": "gemini",
+                            "model": "gemini-test",
+                            "success": True,
+                            "text": "Gemini evidence",
+                        },
+                    ],
+                },
+            }
+        },
+    )
+
+    assert "claude / claude-test" in context
+    assert "Claude evidence" in context
+    assert "gemini / gemini-test" in context
+    assert "Gemini evidence" in context
+    assert "grok / grok-test" in context
+    assert "provider unavailable" in context
+
+
+def test_adaptive_write_source_preserves_compare_participant_answers(tmp_path, monkeypatch):
+    captured = {}
+    root = _policy_root(tmp_path)
+    dependency = {
+        "success": True,
+        "text": "aggregate only",
+        "data": {
+            "schema": "compare_result_v1",
+            "status": "partial",
+            "requested": 2,
+            "succeeded": 1,
+            "min_successes": 1,
+            "participants": [
+                {
+                    "provider": "claude",
+                    "model": "claude-test",
+                    "success": True,
+                    "text": "Claude evidence",
+                },
+                {
+                    "provider": "gemini",
+                    "model": "gemini-test",
+                    "success": False,
+                    "error": "provider unavailable",
+                },
+            ],
+        },
+    }
+
+    def fake_write(arguments):
+        captured.update(arguments)
+        return operations.envelope("write", {"success": True, "text": "final"}, provider="claude")
+
+    monkeypatch.setattr(operations, "_write", fake_write)
+    operations._adaptive_step_call(
+        {
+            "id": "write_final",
+            "capability": "write",
+            "provider": "claude",
+            "depends_on": ["compare"],
+            "fallback_providers": [],
+            "instruction": "Write the final answer.",
+            "final": True,
+        },
+        "claude",
+        {"compare": dependency},
+        args={"project_root": root},
+        goal="Synthesize.",
+    )
+
+    assert "claude / claude-test" in captured["source_text"]
+    assert "Claude evidence" in captured["source_text"]
+    assert "gemini / gemini-test" in captured["source_text"]
+    assert "provider unavailable" in captured["source_text"]
+
+
+def test_dependency_context_has_one_total_character_limit():
+    rendered = operations._render_dependency_outputs(
+        {
+            "first": {"text": "a" * 30_000},
+            "second": {"text": "b" * 30_000},
+            "third": {"text": "c" * 30_000},
+        }
+    )
+
+    assert rendered.endswith("[dependency context truncated]")
+    assert len(rendered) <= operations.ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS + 31
 
 
 def test_adaptive_planner_repairs_one_invalid_plan(tmp_path, monkeypatch):
@@ -365,17 +758,17 @@ def test_adaptive_run_clamps_each_call_to_remaining_workflow_budget(tmp_path, mo
 
 
 def test_adaptive_run_schema_exposes_end_to_end_timeout():
-    spec = next(
-        item for item in operations.tool_definitions() if item["name"] == "agent_hub_run_workflow"
-    )
-    timeout = spec["inputSchema"]["properties"]["workflow_timeout"]
+    specs = {item["name"]: item for item in operations.tool_definitions()}
+    timeout = specs["agent_hub_run_workflow"]["inputSchema"]["properties"]["workflow_timeout"]
     assert timeout["default"] == 270
     assert timeout["maximum"] == 290
+    assert (
+        specs["agent_hub_plan_workflow"]["inputSchema"]["properties"]["max_leaf_calls"]["default"]
+        == 24
+    )
 
 
-def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(
-    tmp_path, monkeypatch
-):
+def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     root = _policy_root(repo)
@@ -406,17 +799,13 @@ def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(
     run_id = started["data"]["run_id"]
     assert (state_dir / f"{run_id}.json").is_file()
 
-    loaded_before_continue = operations.dispatch_tool(
-        "agent_hub_get_run", {"run_id": run_id}
-    )
+    loaded_before_continue = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
     first = operations.dispatch_tool(
         "agent_hub_continue_workflow",
         {"state": loaded_before_continue["data"]},
     )
     assert first["success"] is True
-    assert first["text"] == (
-        "Adaptive workflow paused safely; call continue for the next wave."
-    )
+    assert first["text"] == ("Adaptive workflow paused safely; call continue for the next wave.")
     assert first["data"]["status"] == "paused"
     assert set(first["data"]["results"]) == {
         "analyze_code",
@@ -424,15 +813,252 @@ def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(
     }
     assert first["data"]["pending_steps"] == ["synthesize"]
 
-    second = operations.dispatch_tool(
-        "agent_hub_continue_workflow", {"run_id": run_id}
-    )
+    second = operations.dispatch_tool("agent_hub_continue_workflow", {"run_id": run_id})
     assert second["success"] is True
     assert second["data"]["status"] == "completed"
     assert second["text"] == "final"
     loaded = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
     assert loaded["data"]["done"] is True
     assert loaded["data"]["status"] == "completed"
+
+
+def test_concurrent_adaptive_continue_calls_only_one_provider(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    monkeypatch.setenv(
+        "ORCHESTRATE_CODEX_STATE_DIR",
+        str(tmp_path / "runs"),
+    )
+    provider_started = Event()
+    release_provider = Event()
+    second_done = Event()
+    calls = 0
+    call_lock = Lock()
+    responses = {}
+
+    def fake_step(_step, provider, _dependencies, **_kwargs):
+        nonlocal calls
+        with call_lock:
+            calls += 1
+        provider_started.set()
+        assert release_provider.wait(timeout=2)
+        return {"success": True, "provider": provider, "text": "done", "data": {}}
+
+    monkeypatch.setattr(operations, "_adaptive_step_call", fake_step)
+    started = operations.dispatch_tool(
+        "agent_hub_start_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": _single_chat_plan(),
+            "project_root": root,
+        },
+    )
+    run_id = started["data"]["run_id"]
+    stale_state = dict(started["data"])
+    assert started["data"]["state_schema_version"] == 2
+    assert started["data"]["call_accounting_version"] == 2
+    assert started["data"]["store_revision"] == 0
+    assert started["data"]["next_action"]["arguments"]["expected_revision"] == 0
+
+    first_thread = Thread(
+        target=lambda: responses.setdefault(
+            "first",
+            operations.dispatch_tool(
+                "agent_hub_continue_workflow",
+                {"run_id": run_id},
+            ),
+        )
+    )
+
+    def run_second():
+        responses["second"] = operations.dispatch_tool(
+            "agent_hub_continue_workflow",
+            {"run_id": run_id},
+        )
+        second_done.set()
+
+    second_thread = Thread(target=run_second)
+    first_thread.start()
+    assert provider_started.wait(timeout=1)
+    second_thread.start()
+    try:
+        assert second_done.wait(timeout=0.5)
+        assert responses["second"]["success"] is False
+        assert responses["second"]["error"]["type"] == "run_lease_active"
+        assert calls == 1
+        observed = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+        assert observed["data"]["lease_active"] is True
+        assert "_lease" not in json.dumps(observed)
+    finally:
+        release_provider.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+    assert responses["first"]["success"] is True
+    assert responses["first"]["data"]["store_revision"] == 1
+    assert "_lease" not in responses["first"]["data"]
+
+    stale = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"run_id": run_id, "expected_revision": 0},
+    )
+    assert stale["success"] is False
+    assert stale["error"]["type"] == "run_revision_conflict"
+    assert calls == 1
+
+    stale_supplied = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"state": stale_state},
+    )
+    assert stale_supplied["success"] is False
+    assert stale_supplied["error"]["type"] == "run_revision_conflict"
+    assert calls == 1
+
+
+def test_adaptive_continue_lease_always_covers_maximum_runtime(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    monkeypatch.setenv(
+        "ORCHESTRATE_CODEX_STATE_DIR",
+        str(tmp_path / "runs"),
+    )
+    observed_lease_seconds = []
+    original_claim = operations.store.claim
+
+    def recording_claim(*args, **kwargs):
+        observed_lease_seconds.append(kwargs["lease_seconds"])
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(operations.store, "claim", recording_claim)
+    monkeypatch.setattr(
+        operations,
+        "_adaptive_step_call",
+        lambda _step, provider, _dependencies, **_kwargs: {
+            "success": True,
+            "provider": provider,
+            "text": "done",
+            "data": {},
+        },
+    )
+    started = operations.dispatch_tool(
+        "agent_hub_start_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": _single_chat_plan(),
+            "project_root": root,
+            "workflow_timeout": operations.ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
+        },
+    )
+
+    resumed = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"run_id": started["data"]["run_id"]},
+    )
+
+    assert resumed["success"] is True
+    assert observed_lease_seconds == [
+        operations.ADAPTIVE_WORKFLOW_TIMEOUT_MAX + operations.ADAPTIVE_LEASE_GRACE_SECONDS
+    ]
+
+
+def test_legacy_adaptive_call_accounting_pauses_before_provider_call(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    monkeypatch.setenv(
+        "ORCHESTRATE_CODEX_STATE_DIR",
+        str(tmp_path / "runs"),
+    )
+    called = False
+    run_id = "4" * 12
+    operations.store.create(
+        {
+            "run_id": run_id,
+            "workflow_id": "adaptive",
+            "run_kind": "adaptive",
+            "status": "paused",
+            "plan": _single_chat_plan(),
+            "options": {"project_root": root},
+            "results": {},
+            "waves": [],
+            "leaf_calls": 1,
+        }
+    )
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("legacy state must not call a provider")
+
+    monkeypatch.setattr(operations, "_adaptive_step_call", forbidden)
+    result = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"run_id": run_id},
+    )
+
+    assert result["success"] is False
+    assert result["error"]["type"] == "legacy_call_accounting"
+    assert result["data"]["pause_reason"] == "call_accounting_upgrade_required"
+    assert called is False
+    assert "_lease" not in operations.store.load(run_id)
+
+
+def test_adaptive_continue_releases_lease_after_unexpected_exception(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    monkeypatch.setenv(
+        "ORCHESTRATE_CODEX_STATE_DIR",
+        str(tmp_path / "runs"),
+    )
+    started = operations.dispatch_tool(
+        "agent_hub_start_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": _single_chat_plan(),
+            "project_root": root,
+        },
+    )
+    run_id = started["data"]["run_id"]
+    real_execute_plan = orchestrator.execute_plan
+
+    def fail_execute(*_args, **_kwargs):
+        raise RuntimeError("unexpected scheduler failure")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_plan",
+        fail_execute,
+    )
+
+    failed = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"run_id": run_id},
+    )
+
+    assert failed["success"] is False
+    assert operations.store.load(run_id).get("_lease") is None
+
+    monkeypatch.setattr(orchestrator, "execute_plan", real_execute_plan)
+    monkeypatch.setattr(
+        operations,
+        "_adaptive_step_call",
+        lambda _step, provider, _dependencies, **_kwargs: {
+            "success": True,
+            "provider": provider,
+            "text": "done",
+            "data": {},
+        },
+    )
+    resumed = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {"run_id": run_id},
+    )
+
+    assert resumed["success"] is True
+    assert resumed["data"]["status"] == "completed"
 
 
 def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
@@ -444,13 +1070,12 @@ def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     assert start_props["workflow_timeout"]["default"] == 270
     assert continue_props["workflow_timeout"]["maximum"] == 290
     assert continue_props["max_waves_per_call"]["default"] == 1
+    assert continue_props["expected_revision"]["minimum"] == 0
     assert continue_props["run_id"]["pattern"] == "^[0-9a-f]{12}$"
     assert get_props["run_id"]["pattern"] == "^[0-9a-f]{12}$"
 
 
-def test_canonical_run_tools_reject_path_traversal_without_reading_outside(
-    tmp_path, monkeypatch
-):
+def test_canonical_run_tools_reject_path_traversal_without_reading_outside(tmp_path, monkeypatch):
     state_dir = tmp_path / "runs"
     outside = tmp_path / "outside.json"
     outside.write_text(
@@ -547,10 +1172,15 @@ def test_end_to_end_timeout_returns_a_persisted_resume_run(tmp_path, monkeypatch
 
 
 def test_adaptive_run_fails_closed_when_resume_state_cannot_be_persisted(monkeypatch):
-    monkeypatch.setattr(operations.store, "save", lambda _state: None)
-    monkeypatch.setattr(operations.store, "load", lambda _run_id: None)
+    def fail_create(_state):
+        raise operations.store.RunPersistenceError("could not persist run state")
 
-    with pytest.raises(RuntimeError, match="could not be persisted"):
+    monkeypatch.setattr(operations.store, "create", fail_create)
+
+    with pytest.raises(
+        operations.store.RunPersistenceError,
+        match="could not persist",
+    ):
         operations._save_adaptive_state({"run_id": "0" * 12, "plan": _plan()})
 
 
@@ -558,19 +1188,15 @@ def test_workflow_catalog_and_schema_expose_adaptive_mode():
     listed = operations.dispatch_tool("agent_hub_list_workflows", {})
     adaptive = next(item for item in listed["data"]["workflows"] if item["id"] == "adaptive")
     assert adaptive["dynamic"] is True
-    explained = operations.dispatch_tool(
-        "agent_hub_get_workflow", {"workflow_id": "adaptive"}
-    )
+    explained = operations.dispatch_tool("agent_hub_get_workflow", {"workflow_id": "adaptive"})
     assert explained["data"]["schema"] == "agent_hub_plan_v1"
     planned = next(
-        item
-        for item in operations.tool_definitions()
-        if item["name"] == "agent_hub_plan_workflow"
+        item for item in operations.tool_definitions() if item["name"] == "agent_hub_plan_workflow"
     )
     assert planned["annotations"]["readOnlyHint"] is False
     assert "planner_provider" in planned["inputSchema"]["properties"]
     assert "models" in planned["inputSchema"]["properties"]
-    assert len(operations.tool_definitions()) == 26
+    assert len(operations.tool_definitions()) == 29
 
 
 def test_adaptive_review_requires_a_completed_result(tmp_path, monkeypatch):
@@ -583,9 +1209,7 @@ def test_adaptive_review_requires_a_completed_result(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
     (repo / "AGENTS.md").write_text("# Rules\n", encoding="utf-8")
     subprocess.run(["git", "add", "AGENTS.md"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)

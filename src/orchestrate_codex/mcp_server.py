@@ -102,10 +102,21 @@ def tool_definitions() -> List[Dict[str, Any]]:
                         "description": 'e.g. {"chat":"grok_codex_chat"}',
                     },
                     "auto_local": {"type": "boolean", "default": True},
-                    "source_text": {"type": "string", "description": "Source for transform tasks (translate/polish/summarize)."},
-                    "target_language": {"type": "string", "description": "Target language for translate tasks."},
-                    "models": {"description": "Model ids for compare_models (array or comma string)."},
-                    "version": {"type": "string", "description": "Release version for release_draft."},
+                    "source_text": {
+                        "type": "string",
+                        "description": "Source for transform tasks (translate/polish/summarize).",
+                    },
+                    "target_language": {
+                        "type": "string",
+                        "description": "Target language for translate tasks.",
+                    },
+                    "models": {
+                        "description": "Model ids for compare_models (array or comma string)."
+                    },
+                    "version": {
+                        "type": "string",
+                        "description": "Release version for release_draft.",
+                    },
                 },
                 "required": ["recipe_id"],
                 "description": "Extra properties are forwarded verbatim to the leaf tool (domain args).",
@@ -115,7 +126,8 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "orchestrate_continue_recipe",
             "description": (
-                "Advance a run after a leaf tool result. Pass run_id and/or full state. "
+                "Advance a persisted run after a leaf tool result. Pass run_id; an optional "
+                "echoed state never replaces the persisted revision authority. "
                 "On leaf failure set success=false to try fallback_tools (Claude→Grok→AG)."
             ),
             "inputSchema": {
@@ -125,7 +137,22 @@ def tool_definitions() -> List[Dict[str, Any]]:
                         "type": "string",
                         "pattern": store.RUN_ID_PATTERN,
                     },
-                    "state": {"type": "object"},
+                    "state": {
+                        "type": "object",
+                        "description": (
+                            "Optional echoed state; it must contain the same run_id and cannot "
+                            "be used for state-only continuation."
+                        ),
+                    },
+                    "expected_revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                    },
+                    "handoff_drift_policy": {
+                        "type": "string",
+                        "enum": ["pause", "use-snapshot"],
+                        "default": "pause",
+                    },
                     "stage_id": {"type": "string"},
                     "result_text": {"type": "string"},
                     "success": {"type": "boolean", "default": True},
@@ -165,8 +192,11 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "available_tools": {"type": "array", "items": {"type": "string"},
-                                        "description": "Leaf tool names present in the session (optional filter)."},
+                    "available_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Leaf tool names present in the session (optional filter).",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -182,18 +212,50 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "capability": {"type": "string",
-                                   "enum": ["chat", "write", "grounded_search", "image", "review_diff", "release", "compare"]},
+                    "capability": {
+                        "type": "string",
+                        "enum": [
+                            "chat",
+                            "write",
+                            "grounded_search",
+                            "image",
+                            "review_diff",
+                            "release",
+                            "compare",
+                        ],
+                    },
                     "instruction": {"type": "string", "description": "What this leaf should do."},
-                    "doc_class": {"type": "string", "enum": sorted(policy.DOC_CLASSES.keys()), "default": "direct"},
-                    "leaf": {"type": "string", "description": "Force a specific leaf tool (else resolved from capability)."},
-                    "model": {"type": "string", "description": "Force a model (else the latest known for that leaf)."},
-                    "write_task": {"type": "string", "description": "For capability=write (readme, pr-description, translate, …)."},
-                    "gather": {"type": "string", "enum": ["facts", "code", "git"],
-                               "description": "Inject deterministic project context into the call."},
+                    "doc_class": {
+                        "type": "string",
+                        "enum": sorted(policy.DOC_CLASSES.keys()),
+                        "default": "direct",
+                    },
+                    "leaf": {
+                        "type": "string",
+                        "description": "Force a specific leaf tool (else resolved from capability).",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Force a model (else the latest known for that leaf).",
+                    },
+                    "write_task": {
+                        "type": "string",
+                        "description": "For capability=write (readme, pr-description, translate, …).",
+                    },
+                    "gather": {
+                        "type": "string",
+                        "enum": ["facts", "code", "git"],
+                        "description": "Inject deterministic project context into the call.",
+                    },
                     "project_root": {"type": "string", "default": "."},
-                    "context": {"type": "string", "description": "Prior findings / source text to pass forward."},
-                    "extra_args": {"type": "object", "description": "Extra leaf args (target_language, models, aspect_ratio, …)."},
+                    "context": {
+                        "type": "string",
+                        "description": "Prior findings / source text to pass forward.",
+                    },
+                    "extra_args": {
+                        "type": "object",
+                        "description": "Extra leaf args (target_language, models, aspect_ratio, …).",
+                    },
                 },
                 "required": ["instruction"],
                 "additionalProperties": False,
@@ -206,8 +268,16 @@ def tool_definitions() -> List[Dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
-                    "doc_class": {"type": "string", "enum": sorted(policy.DOC_CLASSES.keys()), "default": "durable"},
-                    "project_root": {"type": "string", "description": "If given, gathers facts to check tool names against.", "default": "."},
+                    "doc_class": {
+                        "type": "string",
+                        "enum": sorted(policy.DOC_CLASSES.keys()),
+                        "default": "durable",
+                    },
+                    "project_root": {
+                        "type": "string",
+                        "description": "If given, gathers facts to check tool names against.",
+                        "default": ".",
+                    },
                 },
                 "required": ["text"],
                 "additionalProperties": False,
@@ -237,8 +307,18 @@ def tool_definitions() -> List[Dict[str, Any]]:
                     "instruction": {"type": "string"},
                     "project_root": {"type": "string", "default": "."},
                     "bindings": {"type": "object", "additionalProperties": {"type": "string"}},
-                    "max_leaf_calls": {"type": "integer", "minimum": 1, "maximum": 100, "default": 24},
-                    "per_call_timeout": {"type": "number", "minimum": 5, "maximum": 600, "default": 180},
+                    "max_leaf_calls": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 24,
+                    },
+                    "per_call_timeout": {
+                        "type": "number",
+                        "minimum": 5,
+                        "maximum": 600,
+                        "default": 180,
+                    },
                 },
                 "required": ["recipe_id"],
                 "description": "Extra properties forward to the leaf tools (source_text, models, …).",
@@ -294,8 +374,22 @@ def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
 # a caller passes flows through to the leaf tool (source_text, target_language,
 # models, version, aspect_ratio, focus, …) so new domains need no schema change.
 _CONTROL_KEYS = frozenset(
-    {"recipe_id", "bindings", "project_root", "auto_local", "run_id", "state",
-     "stage_id", "result_text", "success", "error", "max_leaf_calls", "per_call_timeout"}
+    {
+        "recipe_id",
+        "bindings",
+        "project_root",
+        "auto_local",
+        "run_id",
+        "state",
+        "expected_revision",
+        "stage_id",
+        "result_text",
+        "success",
+        "error",
+        "handoff_drift_policy",
+        "max_leaf_calls",
+        "per_call_timeout",
+    }
 )
 
 
@@ -313,7 +407,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             return _ok(policy.get_policy(str(arguments.get("doc_class") or "")))
         if name == "orchestrate_plan_recipe":
             rid = str(arguments.get("recipe_id") or "")
-            bindings = arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            bindings = (
+                arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            )
             plan = recipes.plan_recipe(rid, args=_passthrough_args(arguments), bindings=bindings)
             plan["note"] = (
                 "Static plan. Prefer orchestrate_start_run for stateful supervised execution (v0.2)."
@@ -321,7 +417,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             return _ok(plan)
         if name == "orchestrate_start_run":
             rid = str(arguments.get("recipe_id") or "")
-            bindings = arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            bindings = (
+                arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            )
             return _ok(
                 runner.start_run(
                     rid,
@@ -335,18 +433,27 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             return _ok(
                 runner.continue_run(
                     run_id=arguments.get("run_id"),
-                    state=arguments.get("state") if isinstance(arguments.get("state"), dict) else None,
+                    state=arguments.get("state")
+                    if isinstance(arguments.get("state"), dict)
+                    else None,
                     stage_id=str(arguments.get("stage_id") or ""),
                     result_text=str(arguments.get("result_text") or ""),
                     success=bool(arguments.get("success", True)),
                     error=str(arguments.get("error") or ""),
                     auto_local=bool(arguments.get("auto_local", True)),
+                    expected_revision=arguments.get("expected_revision"),
+                    handoff_drift_policy=arguments.get("handoff_drift_policy"),
                 )
             )
         if name == "orchestrate_get_run":
             return _ok(runner.get_run(arguments.get("run_id")))
         if name == "orchestrate_fallback_chains":
-            return _ok({"fallback_chains": runner.FALLBACK_CHAINS, "default_bindings": recipes.DEFAULT_BINDINGS})
+            return _ok(
+                {
+                    "fallback_chains": runner.FALLBACK_CHAINS,
+                    "default_bindings": recipes.DEFAULT_BINDINGS,
+                }
+            )
         if name == "orchestrate_advise":
             avail = arguments.get("available_tools")
             avail = [str(t) for t in avail] if isinstance(avail, list) else None
@@ -377,7 +484,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     gather_kind=arguments.get("gather") or None,
                     project_root=str(arguments.get("project_root") or "."),
                     context=arguments.get("context") or None,
-                    extra_args=arguments.get("extra_args") if isinstance(arguments.get("extra_args"), dict) else None,
+                    extra_args=arguments.get("extra_args")
+                    if isinstance(arguments.get("extra_args"), dict)
+                    else None,
                 )
             )
         if name == "orchestrate_verify":
@@ -397,15 +506,21 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             return _ok(broker.probe_models())
         if name == "orchestrate_run":
             rid = str(arguments.get("recipe_id") or "")
-            binds = arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            binds = (
+                arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            )
             return _ok(
                 broker.run_auto(
                     rid,
                     args=_passthrough_args(arguments),
                     bindings=binds,
                     project_root=str(arguments.get("project_root") or "."),
-                    max_leaf_calls=int(arguments.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS),
-                    per_call_timeout=float(arguments.get("per_call_timeout") or broker.DEFAULT_PER_CALL_TIMEOUT),
+                    max_leaf_calls=int(
+                        arguments.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS
+                    ),
+                    per_call_timeout=float(
+                        arguments.get("per_call_timeout") or broker.DEFAULT_PER_CALL_TIMEOUT
+                    ),
                 )
             )
         if name == "orchestrate_check_leaves":
@@ -413,7 +528,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if name == "orchestrate_resolve_bindings":
             avail = arguments.get("available_tools")
             avail = [str(t) for t in avail] if isinstance(avail, list) else None
-            binds = arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            binds = (
+                arguments.get("bindings") if isinstance(arguments.get("bindings"), dict) else None
+            )
             return _ok(runner.resolve_bindings(avail, bindings=binds))
         raise ValueError(f"unknown tool: {name}")
     except Exception as exc:  # noqa: BLE001
@@ -440,7 +557,11 @@ def prompt_definitions() -> List[Dict[str, Any]]:
                 "name": r["id"],
                 "description": f"[{r['doc_class']}] {r['description']}",
                 "arguments": [
-                    {"name": "prompt", "description": "The request / instruction.", "required": True},
+                    {
+                        "name": "prompt",
+                        "description": "The request / instruction.",
+                        "required": True,
+                    },
                     {"name": "project_root", "description": "Workspace root.", "required": False},
                 ],
             }
@@ -469,8 +590,11 @@ def _run_ids() -> List[str]:
     valid_ids: List[str] = []
     for run_id in ids:
         try:
-            valid_ids.append(store.validate_run_id(run_id))
-        except ValueError:
+            validated = store.validate_run_id(run_id)
+            persisted = store.load_strict(validated)
+            runner._validate_fixed_run_state(persisted)
+            valid_ids.append(validated)
+        except (ValueError, store.RunStoreError):
             continue
     return sorted(valid_ids)
 
@@ -492,7 +616,7 @@ def resource_list() -> List[Dict[str, Any]]:
 def resource_read(uri: str) -> Dict[str, Any]:
     if not uri.startswith(_RUN_URI_PREFIX):
         raise RpcError(-32602, f"unknown resource uri: {uri}")
-    rid = uri[len(_RUN_URI_PREFIX):]
+    rid = uri[len(_RUN_URI_PREFIX) :]
     try:
         rid = store.validate_run_id(rid)
         state = runner.get_run(rid)
@@ -500,7 +624,11 @@ def resource_read(uri: str) -> Dict[str, Any]:
         raise RpcError(-32602, str(exc)) from exc
     return {
         "contents": [
-            {"uri": uri, "mimeType": "application/json", "text": json.dumps(state, ensure_ascii=False)}
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(state, ensure_ascii=False),
+            }
         ]
     }
 
@@ -514,7 +642,9 @@ def handle_request(message: Dict[str, Any]) -> Dict[str, Any] | None:
         if method == "initialize":
             params = message.get("params") or {}
             requested = str(params.get("protocolVersion") or DEFAULT_PROTOCOL_VERSION)
-            selected = requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+            selected = (
+                requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
+            )
             result = {
                 "protocolVersion": selected,
                 "capabilities": {
@@ -561,7 +691,11 @@ def handle_request(message: Dict[str, Any]) -> Dict[str, Any] | None:
             raise RpcError(-32601, f"unsupported method: {method}")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     except RpcError as exc:
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": exc.code, "message": str(exc)}}
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": exc.code, "message": str(exc)},
+        }
     except Exception as exc:  # noqa: BLE001
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
 

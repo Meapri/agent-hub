@@ -46,8 +46,8 @@ command = "uvx"
 args = ["basic-memory", "mcp"]
 
 [mcp_servers.memory.env]
-BASIC_MEMORY_CONFIG_DIR = "/Users/naen/Git/agent-hub-mono/memory/.basic-memory"
-BASIC_MEMORY_HOME = "/Users/naen/Git/agent-hub-mono/memory/data"
+BASIC_MEMORY_CONFIG_DIR = "/Users/naen/Git/agent-hub/memory/.basic-memory"
+BASIC_MEMORY_HOME = "/Users/naen/Git/agent-hub/memory/data"
 BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED = "false"
 
 # Unified model-access + orchestration: ONE server (agent_hub.server) exposes
@@ -55,4 +55,4 @@ BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED = "false"
 # shared core protocol (streaming, modern, discover). Tool names are unchanged.
 # Machine-specific venv path (see README).
 [mcp_servers.agent-hub]
-command = "/Users/naen/Git/agent-hub-mono/.venv/bin/agent-hub-mcp"
+command = "/Users/naen/Git/agent-hub/.venv/bin/agent-hub-mcp"

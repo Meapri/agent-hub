@@ -15,18 +15,21 @@ def _json(path: Path):
 
 def test_codex_and_claude_plugins_share_all_skill_contracts():
     shared = sorted((HUBS / "shared/skills").glob("*/SKILL.md"))
-    assert {path.parent.name for path in shared} == {"adaptive-orchestrate", "document-write"}
+    assert {path.parent.name for path in shared} == {
+        "adaptive-orchestrate",
+        "document-write",
+        "handoff",
+        "takeover",
+    }
     for canonical_path in shared:
         canonical = canonical_path.read_text(encoding="utf-8")
         for hub in ("codex", "claude-code"):
-            installed = (
-                HUBS / hub / "skills" / canonical_path.parent.name / "SKILL.md"
-            ).read_text(encoding="utf-8")
+            installed = (HUBS / hub / "skills" / canonical_path.parent.name / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
             assert installed == canonical
 
-    adaptive = (HUBS / "shared/skills/adaptive-orchestrate/SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    adaptive = (HUBS / "shared/skills/adaptive-orchestrate/SKILL.md").read_text(encoding="utf-8")
     assert 'workflow_id="adaptive"' in adaptive
     assert "agent_hub_plan_workflow" in adaptive
     assert "agent_hub_run_workflow" in adaptive
@@ -36,6 +39,13 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
     assert "quality_gate.passed" in document
     assert "user_facing=true" in document
     assert "독백체" in document
+
+    handoff = (HUBS / "shared/skills/handoff/SKILL.md").read_text(encoding="utf-8")
+    takeover = (HUBS / "shared/skills/takeover/SKILL.md").read_text(encoding="utf-8")
+    assert "agent_hub_prepare_handoff_update" in handoff
+    assert "expected_sha256" in handoff
+    assert "git add -A" not in handoff
+    assert "handoff_drift" in takeover
 
 
 def test_hub_plugins_register_only_unified_agent_hub_and_memory():

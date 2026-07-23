@@ -18,7 +18,7 @@ _OWNERS = [orchestrate, claude, grok, antigravity]
 def test_only_canonical_tools_are_public_or_callable():
     canonical = {t["name"] for t in operations.tool_definitions()}
     assert {t["name"] for t in server.tool_definitions()} == canonical
-    assert len(canonical) == 26
+    assert len(canonical) == 29
     assert set(server._REGISTRY) == canonical
 
     for old_name in (
@@ -195,9 +195,7 @@ def test_invalid_run_id_is_a_canonical_tool_error_not_a_jsonrpc_error():
     assert result["structuredContent"]["error"]["type"] == "ValueError"
 
 
-def test_canonical_jsonrpc_preserves_run_id_free_fixed_state_handoff(
-    tmp_path, monkeypatch
-):
+def test_canonical_jsonrpc_rejects_v2_fixed_state_without_run_id(tmp_path, monkeypatch):
     monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
     state = operations.runner.start_run(
         "direct_chat",
@@ -218,8 +216,67 @@ def test_canonical_jsonrpc_preserves_run_id_free_fixed_state_handoff(
     )
 
     result = response["result"]
-    assert result["isError"] is False
-    assert result["structuredContent"]["data"]["status"] == "completed"
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["type"] == "ValueError"
+
+
+def test_canonical_jsonrpc_rejects_explicit_legacy_v1_state_handoff(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    state = operations.runner.start_run(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(tmp_path),
+    )
+    for key in ("run_id", "run_kind", "state_schema_version", "store_revision", "handoff"):
+        state.pop(key, None)
+    state["state_schema_version"] = 1
+
+    response = _call(
+        server,
+        "agent_hub_continue_workflow",
+        {
+            "state": state,
+            "stage_id": "chat",
+            "result_text": "done",
+            "success": True,
+        },
+    )
+
+    result = response["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["type"] == "ValueError"
+
+
+def test_canonical_fixed_continue_enforces_expected_revision(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    state = operations.runner.start_run(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(tmp_path),
+    )
+    first = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {
+            "run_id": state["run_id"],
+            "stage_id": "chat",
+            "result_text": "first",
+            "expected_revision": 0,
+        },
+    )
+    stale = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {
+            "run_id": state["run_id"],
+            "stage_id": "chat",
+            "result_text": "stale",
+            "expected_revision": 0,
+        },
+    )
+
+    assert first["success"] is True
+    assert stale["success"] is False
+    assert stale["error"]["type"] == "run_revision_conflict"
+    assert operations.runner.get_run(state["run_id"])["artifacts"]["draft"] == "first"
 
 
 def test_google_mcp_result_is_unwrapped_before_canonical_envelope():

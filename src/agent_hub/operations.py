@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 import json
 import os
@@ -15,6 +16,7 @@ from agent_hub import (
     orchestrator,
     provider_settings,
 )
+from agent_hub.core import handoff as handoff_state
 from agent_hub.core import media, parallel
 from claude_codex import auth as claude_auth
 from claude_codex import models as claude_models
@@ -57,9 +59,7 @@ def _positive_float_env(name: str, default: float) -> float:
 PROVIDERS = ("claude", "grok", "gemini")
 ADAPTIVE_WORKFLOW_TIMEOUT_MIN = 30.0
 ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env("AGENT_HUB_MCP_CALL_TIMEOUT", 300.0)
-ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env(
-    "AGENT_HUB_TIMEOUT_RETURN_MARGIN", 10.0
-)
+ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env("AGENT_HUB_TIMEOUT_RETURN_MARGIN", 10.0)
 ADAPTIVE_WORKFLOW_TIMEOUT_MAX = max(
     ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
     ADAPTIVE_MCP_CALL_TIMEOUT - ADAPTIVE_TIMEOUT_RETURN_MARGIN,
@@ -69,6 +69,16 @@ ADAPTIVE_WORKFLOW_TIMEOUT_DEFAULT = min(
     ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
 )
 ADAPTIVE_MAX_WAVES_PER_CALL = 8
+ADAPTIVE_STATE_SCHEMA_VERSION = 2
+ADAPTIVE_CALL_ACCOUNTING_VERSION = 2
+ADAPTIVE_LEASE_GRACE_SECONDS = 30.0
+ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS = 24_000
+ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS = 48_000
+COMPARE_PARTICIPANT_MAX_CHARS = 4_000
+_PROVIDER_CALL_INTERNAL_KEYS = {
+    "_provider_call_budget",
+    "_provider_call_reservation",
+}
 PROVIDER_ALIASES = {
     "anthropic": "claude",
     "xai": "grok",
@@ -464,9 +474,7 @@ _BASIC_CHAT_KEYS = {
 }
 
 
-def _operation_provider(
-    args: Dict[str, Any], capability: str, *, default: str = "gemini"
-) -> str:
+def _operation_provider(args: Dict[str, Any], capability: str, *, default: str = "gemini") -> str:
     requested = _normalize_provider(args.get("provider") or "auto", allow_auto=True)
     if requested != "auto":
         capabilities.require(requested, capability)
@@ -488,7 +496,9 @@ def _operation_provider(
 
 def _prepare_multimodal(call_args: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(call_args)
-    images = media.normalize_images(out.pop("images", None), workspace_root=out.get("workspace_root"))
+    images = media.normalize_images(
+        out.pop("images", None), workspace_root=out.get("workspace_root")
+    )
     out.pop("workspace_root", None)
     if not images:
         return out
@@ -504,27 +514,52 @@ def _prepare_multimodal(call_args: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _provider_dispatch_scope(args: Dict[str, Any]) -> Any:
+    reservation = args.get("_provider_call_reservation")
+    if reservation is not None:
+        return reservation.dispatch()
+    budget = args.get("_provider_call_budget")
+    if budget is not None:
+        return budget.dispatch()
+    return nullcontext()
+
+
+def _clamp_provider_timeout(call_args: Dict[str, Any], remaining_seconds: float | None) -> None:
+    if remaining_seconds is None:
+        return
+    requested = float(call_args.get("timeout_sec") or remaining_seconds)
+    call_args["timeout_sec"] = max(0.001, min(requested, remaining_seconds))
+
+
 def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
     capabilities.require(provider, "chat")
-    call_args = {k: v for k, v in args.items() if k != "provider" and v is not None}
+    call_args = {
+        k: v
+        for k, v in args.items()
+        if k != "provider" and k not in _PROVIDER_CALL_INTERNAL_KEYS and v is not None
+    }
     if provider in {"claude", "grok"}:
         defaults = provider_settings.get(provider)
         for key, value in defaults.items():
             call_args.setdefault(key, value)
     call_args = _prepare_multimodal(call_args)
     call_args, provenance = consistency_gate.prepare_provider_call(call_args)
-    if provider == "claude":
-        raw = claude_mcp.dispatch_tool(
-            "claude_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
-        )
-    elif provider == "grok":
-        raw = grok_mcp.dispatch_tool(
-            "grok_codex_chat", {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS}
-        )
-    else:
-        if call_args.get("reasoning_effort") is not None:
-            call_args["thinking_level"] = call_args.pop("reasoning_effort")
-        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
+    with _provider_dispatch_scope(args) as remaining_seconds:
+        _clamp_provider_timeout(call_args, remaining_seconds)
+        if provider == "claude":
+            raw = claude_mcp.dispatch_tool(
+                "claude_codex_chat",
+                {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS},
+            )
+        elif provider == "grok":
+            raw = grok_mcp.dispatch_tool(
+                "grok_codex_chat",
+                {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS},
+            )
+        else:
+            if call_args.get("reasoning_effort") is not None:
+                call_args["thinking_level"] = call_args.pop("reasoning_effort")
+            raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
     result = dict(raw)
     existing = result.get("consistency") if isinstance(result.get("consistency"), dict) else {}
     result["consistency"] = {**existing, **provenance}
@@ -539,13 +574,19 @@ def _chat(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _search(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = _operation_provider(args, "search", default="gemini")
-    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
-    if provider == "claude":
-        raw = claude_search.run_search(call_args)
-    elif provider == "grok":
-        raw = grok_search.run_search(call_args)
-    else:
-        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_grounded_search", call_args))
+    call_args = {
+        key: value
+        for key, value in args.items()
+        if key != "provider" and key not in _PROVIDER_CALL_INTERNAL_KEYS and value is not None
+    }
+    with _provider_dispatch_scope(args) as remaining_seconds:
+        _clamp_provider_timeout(call_args, remaining_seconds)
+        if provider == "claude":
+            raw = claude_search.run_search(call_args)
+        elif provider == "grok":
+            raw = grok_search.run_search(call_args)
+        else:
+            raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_grounded_search", call_args))
     return envelope("search", raw, provider=provider)
 
 
@@ -570,6 +611,8 @@ def _write_call(
             "policy_mode": args.get("policy_mode"),
             "policy_file": args.get("policy_file"),
             "max_policy_chars": args.get("max_policy_chars"),
+            "_provider_call_budget": args.get("_provider_call_budget"),
+            "_provider_call_reservation": args.get("_provider_call_reservation"),
         },
     )
 
@@ -652,6 +695,7 @@ def _write(args: Dict[str, Any]) -> Dict[str, Any]:
                 else None
             ),
         },
+        "call_usage": {"provider_calls": 1 + rewrite_attempts},
         "warnings": warnings,
     }
     if provider_success and not quality_passed:
@@ -664,7 +708,9 @@ def _write(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _generate_image(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = _operation_provider(args, "image_generation", default="gemini")
-    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
+    call_args = {
+        key: value for key, value in args.items() if key != "provider" and value is not None
+    }
     if provider == "grok":
         raw = grok_image.generate_image(call_args)
     else:
@@ -715,6 +761,12 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
             provider = prefix
         capabilities.require(provider, "compare")
         targets.append((provider, model))
+    raw_min_successes = args.get("min_successes", min(2, len(targets)))
+    if isinstance(raw_min_successes, bool) or not isinstance(raw_min_successes, int):
+        raise ValueError("min_successes must be an integer")
+    min_successes = raw_min_successes
+    if not 1 <= min_successes <= len(targets):
+        raise ValueError(f"min_successes must be within 1..{len(targets)}")
     gate_value = args.get("consistency")
     gate_config = dict(gate_value) if isinstance(gate_value, dict) else {}
     gate_enabled = bool(gate_config.get("enabled", bool(gate_config)))
@@ -753,19 +805,38 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 "max_tokens": args.get("max_tokens"),
                 "reasoning_effort": args.get("reasoning_effort"),
                 "timeout_sec": args.get("timeout_sec") or 180,
-                "project_root": project_root if (gate_enabled or args.get("project_root")) else None,
+                "project_root": project_root
+                if (gate_enabled or args.get("project_root"))
+                else None,
                 "policy_mode": policy_mode,
                 "policy_file": policy_file or None,
                 "max_policy_chars": max_policy_chars,
+                "_provider_call_budget": args.get("_provider_call_budget"),
+                "_provider_call_reservation": active_reservation,
             },
         )
 
     execution = str(args.get("execution") or "parallel")
     max_concurrency = int(args.get("max_concurrency") or 3)
-    outcomes = parallel.run_ordered(
-        [lambda p=provider, m=model: call_target(p, m) for provider, model in targets],
-        execution=execution,
-        max_workers=max_concurrency,
+    active_reservation = args.get("_provider_call_reservation")
+    owned_reservation = None
+    if active_reservation is None and args.get("_provider_call_budget") is not None:
+        owned_reservation = args["_provider_call_budget"].reserve(len(targets))
+        active_reservation = owned_reservation
+    reservation_calls_before = active_reservation.used if active_reservation is not None else 0
+    try:
+        outcomes = parallel.run_ordered(
+            [lambda p=provider, m=model: call_target(p, m) for provider, model in targets],
+            execution=execution,
+            max_workers=max_concurrency,
+        )
+    finally:
+        if owned_reservation is not None:
+            owned_reservation.close()
+    provider_calls = (
+        active_reservation.used - reservation_calls_before
+        if active_reservation is not None
+        else len(targets)
     )
     results: List[Dict[str, Any]] = []
     for (provider, model), outcome in zip(targets, outcomes):
@@ -775,6 +846,8 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 "model": model,
                 "success": False,
                 "text": "",
+                "original_chars": 0,
+                "text_truncated": False,
                 "usage": {},
                 "warnings": ["provider_call_exception"],
                 "elapsed_ms": outcome.elapsed_ms,
@@ -788,7 +861,9 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 "provider": provider,
                 "model": provider_raw.get("model") or model,
                 "success": provider_ok,
-                "text": full_text[:4000],
+                "text": full_text[:COMPARE_PARTICIPANT_MAX_CHARS],
+                "original_chars": len(full_text),
+                "text_truncated": len(full_text) > COMPARE_PARTICIPANT_MAX_CHARS,
                 "usage": provider_raw.get("usage") or {},
                 "warnings": provider_raw.get("warnings") or [],
                 "finish_reason": provider_raw.get("finish_reason"),
@@ -809,9 +884,20 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
         results.append(provider_result)
 
     ok = sum(bool(item["success"]) for item in results)
-    warnings = [] if ok == len(results) else ["partial_compare_failures"]
+    if ok == len(results):
+        status = "complete"
+        warnings: List[str] = []
+    elif ok >= min_successes:
+        status = "partial"
+        warnings = ["partial_compare_failures"]
+    elif ok:
+        status = "insufficient"
+        warnings = ["partial_compare_failures", "insufficient_compare_responses"]
+    else:
+        status = "failed"
+        warnings = ["compare_provider_failures", "insufficient_compare_responses"]
     consistency_report: Dict[str, Any] | None = None
-    success = ok > 0
+    success = ok >= min_successes
     text = f"Compared {len(results)} provider/model targets ({ok} succeeded)."
     if gate_enabled:
         consistency_report = consistency_gate.evaluate_decisions(
@@ -820,12 +906,8 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
             require_all=bool(gate_config.get("require_all", True)),
             min_responses=int(gate_config.get("min_responses", 2)),
         )
-        policy_values = [
-            item.get("provenance", {}).get("policy_sha256") for item in results
-        ]
-        request_values = [
-            item.get("provenance", {}).get("request_sha256") for item in results
-        ]
+        policy_values = [item.get("provenance", {}).get("policy_sha256") for item in results]
+        request_values = [item.get("provenance", {}).get("request_sha256") for item in results]
         policy_hashes = {value for value in policy_values if value}
         request_hashes = {value for value in request_values if value}
         provenance_consistent = bool(
@@ -850,11 +932,11 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
             consistency_report["human_review"] = True
             consistency_report["decision"] = None
             consistency_report["review_reasons"].append("provenance_mismatch")
-        success = bool(consistency_report["passed"])
+        success = success and bool(consistency_report["passed"])
         if success:
             text = (
                 f'Consistency Gate passed with decision "{consistency_report["decision"]}" '
-                f'({consistency_report["valid_responses"]}/{len(results)} valid).'
+                f"({consistency_report['valid_responses']}/{len(results)} valid)."
             )
         else:
             warnings.append("consistency_gate_human_review")
@@ -864,11 +946,27 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
     raw = {
         "success": success,
         "text": text,
+        "schema": "compare_result_v1",
+        "status": status,
+        "requested": len(results),
+        "succeeded": ok,
+        "min_successes": min_successes,
+        "participants": results,
         "results": results,
+        "call_usage": {
+            "provider_calls": provider_calls,
+            "provider_attempts": len(targets),
+        },
         "execution": execution,
         "warnings": list(dict.fromkeys(warnings)),
         **({"consistency": consistency_report} if consistency_report is not None else {}),
     }
+    if any(
+        str(item.get("error") or "") == orchestrator.PROVIDER_CALL_DEADLINE_ERROR
+        for item in results
+    ):
+        raw["error"] = orchestrator.PROVIDER_CALL_DEADLINE_ERROR
+        raw["error_type"] = orchestrator.PROVIDER_CALL_DEADLINE_ERROR
     return envelope("compare_models", raw, provider="multiple")
 
 
@@ -939,6 +1037,8 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
             "policy_mode": args.get("policy_mode") or "auto",
             "policy_file": args.get("policy_file"),
             "max_policy_chars": args.get("max_policy_chars"),
+            "_provider_call_budget": args.get("_provider_call_budget"),
+            "_provider_call_reservation": args.get("_provider_call_reservation"),
         },
     )
     warnings = list(raw_chat.get("warnings") or [])
@@ -972,12 +1072,18 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _release_snapshot(args: Dict[str, Any]) -> Dict[str, Any]:
-    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
-    return envelope("release_snapshot", google_release.release_snapshot(call_args), provider="local")
+    call_args = {
+        key: value for key, value in args.items() if key != "provider" and value is not None
+    }
+    return envelope(
+        "release_snapshot", google_release.release_snapshot(call_args), provider="local"
+    )
 
 
 def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
-    call_args = {key: value for key, value in args.items() if key != "provider" and value is not None}
+    call_args = {
+        key: value for key, value in args.items() if key != "provider" and value is not None
+    }
     snapshot = google_release.collect_snapshot(call_args)
     draft = google_release.render_draft(snapshot, call_args)
     if not bool(args.get("polish")):
@@ -1007,6 +1113,8 @@ def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
             "policy_mode": args.get("policy_mode") or "auto",
             "policy_file": args.get("policy_file"),
             "max_policy_chars": args.get("max_policy_chars"),
+            "_provider_call_budget": args.get("_provider_call_budget"),
+            "_provider_call_reservation": args.get("_provider_call_reservation"),
         },
     )
     return envelope(
@@ -1143,6 +1251,64 @@ def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     return envelope("reset_settings", raw, provider="multiple" if provider == "all" else "gemini")
 
 
+def _get_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = handoff_state.load_handoff(
+        str(args.get("project_root") or "."),
+        mode=str(args.get("mode") or "auto"),
+        search=str(args.get("search") or "nearest"),
+        file=str(args.get("file") or ""),
+        max_chars=int(args.get("max_chars") or handoff_state.DEFAULT_MAX_CHARS),
+    )
+    return envelope(
+        "get_handoff",
+        {
+            "success": True,
+            "text": (
+                handoff_state.render_context(snapshot)
+                if snapshot.get("loaded")
+                else "No project handoff was found."
+            ),
+            "handoff": handoff_state.public_snapshot(snapshot),
+        },
+    )
+
+
+def _prepare_handoff_update(args: Dict[str, Any]) -> Dict[str, Any]:
+    prepared = handoff_state.prepare_handoff_update(
+        str(args.get("project_root") or "."),
+        body=str(args.get("body") or ""),
+        file=str(args.get("file") or ""),
+        search=str(args.get("search") or "project-only"),
+    )
+    return envelope(
+        "prepare_handoff_update",
+        {
+            "success": True,
+            "text": "Handoff update prepared; no file was changed.",
+            **prepared,
+        },
+    )
+
+
+def _apply_handoff_update(args: Dict[str, Any]) -> Dict[str, Any]:
+    if "expected_sha256" not in args:
+        raise ValueError("expected_sha256 is required; use null only for a new file")
+    applied = handoff_state.apply_handoff_update(
+        str(args.get("project_root") or "."),
+        file=str(args.get("file") or ""),
+        content=str(args.get("content") or ""),
+        expected_sha256=args.get("expected_sha256"),
+    )
+    return envelope(
+        "apply_handoff_update",
+        {
+            "success": True,
+            "text": "HANDOFF.md updated atomically.",
+            **applied,
+        },
+    )
+
+
 def _workflow_resolution(args: Dict[str, Any]) -> Dict[str, Any]:
     return recipes.resolve_workflow(
         str(args.get("workflow_id") or args.get("recipe_id") or ""),
@@ -1168,6 +1334,11 @@ _ADAPTIVE_RUN_OPTION_KEYS = {
     "policy_mode",
     "policy_file",
     "max_policy_chars",
+    "handoff_mode",
+    "handoff_search",
+    "handoff_file",
+    "handoff_drift_policy",
+    "max_handoff_chars",
 }
 
 
@@ -1190,18 +1361,10 @@ def _adaptive_run_options(
             if key in _ADAPTIVE_RUN_OPTION_KEYS and value is not None
         }
     )
-    options["project_root"] = str(
-        gather.validate_project_root(options.get("project_root") or ".")
-    )
-    options["workflow_timeout"] = _adaptive_workflow_timeout(
-        options.get("workflow_timeout")
-    )
-    options["per_call_timeout"] = max(
-        5.0, float(options.get("per_call_timeout") or 180)
-    )
-    options["max_concurrency"] = max(
-        1, min(int(options.get("max_concurrency") or 3), 3)
-    )
+    options["project_root"] = str(gather.validate_project_root(options.get("project_root") or "."))
+    options["workflow_timeout"] = _adaptive_workflow_timeout(options.get("workflow_timeout"))
+    options["per_call_timeout"] = max(5.0, float(options.get("per_call_timeout") or 180))
+    options["max_concurrency"] = max(1, min(int(options.get("max_concurrency") or 3), 3))
     options["max_leaf_calls"] = max(
         1,
         min(
@@ -1209,11 +1372,34 @@ def _adaptive_run_options(
             100,
         ),
     )
+    drift_policy = str(options.get("handoff_drift_policy") or "pause").strip().lower()
+    if drift_policy not in {"pause", "use-snapshot"}:
+        raise ValueError("handoff_drift_policy must be pause or use-snapshot")
+    options["handoff_drift_policy"] = drift_policy
     return options
+
+
+def _load_workflow_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
+    return handoff_state.load_handoff(
+        str(args.get("project_root") or "."),
+        mode=str(args.get("handoff_mode") or "auto"),
+        search=str(args.get("handoff_search") or "nearest"),
+        file=str(args.get("handoff_file") or ""),
+        max_chars=int(args.get("max_handoff_chars") or handoff_state.DEFAULT_MAX_CHARS),
+    )
 
 
 def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
     out = deepcopy(state)
+    lease = out.pop("_lease", None)
+    handoff_snapshot = out.pop("_handoff_snapshot", None)
+    if isinstance(handoff_snapshot, dict):
+        out["handoff"] = handoff_state.public_snapshot(handoff_snapshot)
+    try:
+        lease_expires_at = float(lease.get("expires_at") or 0) if isinstance(lease, dict) else 0.0
+    except (TypeError, ValueError):
+        lease_expires_at = 0.0
+    out["lease_active"] = lease_expires_at > time.time()
     plan = out.get("plan") if isinstance(out.get("plan"), dict) else {}
     completed = set((out.get("results") or {}).keys())
     out["pending_steps"] = [
@@ -1231,37 +1417,58 @@ def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
         out["next_action"] = {
             "type": "call_tool",
             "tool": "agent_hub_continue_workflow",
-            "arguments": {"run_id": str(out.get("run_id") or "")},
+            "arguments": {
+                "run_id": str(out.get("run_id") or ""),
+                "expected_revision": int(out.get("store_revision") or 0),
+            },
         }
     return out
 
 
 def _save_adaptive_state(state: Dict[str, Any]) -> Dict[str, Any]:
-    store.save(state)
-    run_id = str(state.get("run_id") or "")
-    if not isinstance(store.load(run_id), dict):
-        raise RuntimeError(f"adaptive run state could not be persisted: {run_id}")
-    return _adaptive_public_state(state)
+    return _adaptive_public_state(store.create(state))
 
 
-def _new_adaptive_state(plan: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
+def _new_adaptive_state(
+    plan: Dict[str, Any],
+    args: Dict[str, Any],
+    handoff_snapshot: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    snapshot = (
+        deepcopy(handoff_snapshot)
+        if isinstance(handoff_snapshot, dict)
+        else _load_workflow_handoff(args)
+    )
     state = {
         "run_id": uuid.uuid4().hex[:12],
         "workflow_id": "adaptive",
         "run_kind": "adaptive",
         "mode": "supervised",
+        "state_schema_version": ADAPTIVE_STATE_SCHEMA_VERSION,
+        "call_accounting_version": ADAPTIVE_CALL_ACCOUNTING_VERSION,
+        "call_accounting_unit": "provider_adapter_invocation",
+        "store_revision": 0,
         "created_at": time.time(),
         "status": "paused",
         "plan": plan,
         "options": _adaptive_run_options(args),
+        "_handoff_snapshot": snapshot,
         "results": {},
         "waves": [],
         "leaf_calls": 0,
+        "planner_calls": int(
+            (plan.get("planner") or {}).get("attempts", 0)
+            if isinstance(plan.get("planner"), dict)
+            else 0
+        ),
     }
     return state
 
 
-def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
+def _adaptive_plan(
+    args: Dict[str, Any],
+    handoff_snapshot: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     supplied = args.get("plan")
     max_steps = int(args.get("max_steps") or orchestrator.MAX_PLAN_STEPS)
     max_calls = int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS)
@@ -1277,13 +1484,12 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
         required=policy_mode == "required",
         max_chars=max_policy_chars,
     )
+    snapshot = (
+        handoff_snapshot if isinstance(handoff_snapshot, dict) else _load_workflow_handoff(args)
+    )
     if isinstance(supplied, dict):
-        raw_supplied = {
-            key: supplied.get(key) for key in ("schema", "goal", "rationale", "steps")
-        }
-        plan = orchestrator.validate_plan(
-            raw_supplied, max_steps=max_steps, max_calls=max_calls
-        )
+        raw_supplied = {key: supplied.get(key) for key in ("schema", "goal", "rationale", "steps")}
+        plan = orchestrator.validate_plan(raw_supplied, max_steps=max_steps, max_calls=max_calls)
         return {
             **plan,
             "planner": {
@@ -1306,6 +1512,9 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
     except (ValueError, OSError):
         facts_text = ""
     initial_prompt = orchestrator.planner_prompt(goal, facts=facts_text, max_steps=max_steps)
+    operational_handoff = handoff_state.render_context(snapshot)
+    if operational_handoff:
+        initial_prompt = f"{initial_prompt}\n\n{operational_handoff}"
     repairs = max(0, min(int(args.get("planner_repair_attempts", 1)), 2))
     attempts: List[Dict[str, Any]] = []
     previous_text = ""
@@ -1362,12 +1571,12 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
             plan = orchestrator.validate_plan(parsed, max_steps=max_steps, max_calls=max_calls)
         except ValueError as exc:
             validation_error = str(exc)
-            attempts.append(
-                {"attempt": attempt + 1, "success": False, "error": validation_error}
-            )
+            attempts.append({"attempt": attempt + 1, "success": False, "error": validation_error})
             continue
         attempts.append({"attempt": attempt + 1, "success": True})
-        provenance = response.get("consistency") if isinstance(response.get("consistency"), dict) else {}
+        provenance = (
+            response.get("consistency") if isinstance(response.get("consistency"), dict) else {}
+        )
         return {
             **plan,
             "planner": {
@@ -1381,6 +1590,58 @@ def _adaptive_plan(args: Dict[str, Any]) -> Dict[str, Any]:
             },
         }
     raise ValueError(f"adaptive planner failed validation: {validation_error}")
+
+
+def _render_compare_dependency(result: Dict[str, Any]) -> str:
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    participants = data.get("participants")
+    if not isinstance(participants, list):
+        participants = data.get("results")
+    lines = [
+        (
+            "Compare result "
+            f"(status={data.get('status') or 'unknown'}, "
+            f"succeeded={data.get('succeeded', '?')}/{data.get('requested', '?')}, "
+            f"minimum={data.get('min_successes', '?')})"
+        )
+    ]
+    for item in participants or []:
+        if not isinstance(item, dict):
+            continue
+        provider = str(item.get("provider") or "unknown")
+        model = str(item.get("model") or "default")
+        lines.append(f"Participant — {provider} / {model}")
+        if item.get("success"):
+            lines.append(str(item.get("text") or "[empty response]"))
+            if item.get("text_truncated"):
+                lines.append(
+                    f"[participant response truncated from {item.get('original_chars')} chars]"
+                )
+        else:
+            lines.append(f"ERROR: {item.get('error') or 'provider call failed'}")
+    return "\n".join(lines)
+
+
+def _render_dependency_outputs(
+    dependencies: Dict[str, Dict[str, Any]],
+    *,
+    max_chars: int = ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS,
+) -> str:
+    chunks: List[str] = []
+    for step_id, result in dependencies.items():
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        if data.get("schema") == "compare_result_v1":
+            body = _render_compare_dependency(result)
+        else:
+            body = str(result.get("text") or "")
+        bounded = body[:ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS]
+        if len(body) > ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS:
+            bounded += "\n[dependency output truncated]"
+        chunks.append(f"Dependency output — {step_id}:\n{bounded}")
+    rendered = "\n\n".join(chunks)
+    if len(rendered) > max_chars:
+        return rendered[:max_chars] + "\n[dependency context truncated]"
+    return rendered
 
 
 def _adaptive_context(
@@ -1398,8 +1659,8 @@ def _adaptive_context(
     if step.get("investigation_depth"):
         parts.append(f"Required investigation depth: {step['investigation_depth']}")
     parts.append(f"Reasoning effort selected by planner: {step.get('reasoning_effort', 'medium')}")
-    for step_id, result in dependencies.items():
-        parts.append(f"Dependency output — {step_id}:\n{str(result.get('text') or '')[:24000]}")
+    if dependencies:
+        parts.append(_render_dependency_outputs(dependencies))
     return "\n\n".join(parts)
 
 
@@ -1419,7 +1680,15 @@ def _adaptive_step_call(
         "policy_file": args.get("policy_file"),
         "max_policy_chars": args.get("max_policy_chars"),
     }
+    capability = step["capability"]
     context = _adaptive_context(goal, step, dependencies)
+    operational_handoff = handoff_state.render_context(args.get("_handoff_snapshot"))
+    if operational_handoff and capability not in {
+        "search",
+        "verify",
+        "release_snapshot",
+    }:
+        context = f"{context}\n\n{operational_handoff}"
     common = {
         "provider": provider,
         "model": selected_model,
@@ -1427,9 +1696,10 @@ def _adaptive_step_call(
         "reasoning_effort": step.get("reasoning_effort") or "medium",
         "timeout_sec": args.get("per_call_timeout") or 180,
         "project_root": root,
+        "_provider_call_budget": args.get("_provider_call_budget"),
+        "_provider_call_reservation": step.get("_provider_call_reservation"),
         **policy_args,
     }
-    capability = step["capability"]
     if capability == "chat":
         return _chat({**common, "prompt": context})
     if capability == "inspect_codebase":
@@ -1477,9 +1747,7 @@ def _adaptive_step_call(
                     else None
                 ),
                 "durable_read_bytes": durable_facts.get("durable_read_bytes"),
-                "durable_read_byte_limit": durable_facts.get(
-                    "durable_read_byte_limit"
-                ),
+                "durable_read_byte_limit": durable_facts.get("durable_read_byte_limit"),
                 "durable_text_truncated": durable_facts.get("text_truncated"),
             }
         )
@@ -1492,6 +1760,8 @@ def _adaptive_step_call(
                 "query": context,
                 "max_tokens": args.get("max_tokens"),
                 "timeout_sec": args.get("per_call_timeout") or 180,
+                "_provider_call_budget": args.get("_provider_call_budget"),
+                "_provider_call_reservation": step.get("_provider_call_reservation"),
             }
         )
         searched["warnings"].append("reasoning_effort_not_configurable_for_search")
@@ -1500,7 +1770,7 @@ def _adaptive_step_call(
         )
         return searched
     if capability == "write":
-        source = "\n\n".join(str(result.get("text") or "") for result in dependencies.values())
+        source = _render_dependency_outputs(dependencies)
         return _write(
             {
                 **common,
@@ -1510,6 +1780,7 @@ def _adaptive_step_call(
                 "task": "auto",
                 "instruction": context,
                 "source_text": source or None,
+                "quality_rewrite_attempts": step.get("quality_rewrite_attempts", 1),
             }
         )
     if capability == "review_diff":
@@ -1546,17 +1817,18 @@ def _adaptive_step_call(
                 "project_root": root,
                 "execution": "parallel",
                 "max_concurrency": args.get("max_concurrency") or 3,
+                "min_successes": step.get("min_successes", min(2, len(participants))),
                 "consistency": gate,
                 "max_tokens": args.get("max_tokens"),
                 "reasoning_effort": step.get("reasoning_effort") or "medium",
                 "timeout_sec": args.get("per_call_timeout") or 180,
+                "_provider_call_budget": args.get("_provider_call_budget"),
+                "_provider_call_reservation": step.get("_provider_call_reservation"),
                 **policy_args,
             }
         )
     if capability == "verify":
-        verified = _verify(
-            {"text": context, "doc_class": "durable", "project_root": root}
-        )
+        verified = _verify({"text": context, "doc_class": "durable", "project_root": root})
         if not bool(verified.get("data", {}).get("ok")):
             verified["success"] = False
             verified["error"] = {
@@ -1631,7 +1903,8 @@ def _get_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     if _is_adaptive(args):
-        plan = _adaptive_plan(args)
+        handoff_snapshot = _load_workflow_handoff(args)
+        plan = _adaptive_plan(args, handoff_snapshot)
         return envelope(
             "plan_workflow",
             {
@@ -1640,6 +1913,7 @@ def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
                 "workflow_id": "adaptive",
                 "dynamic": True,
                 "plan": plan,
+                "handoff": handoff_state.public_snapshot(handoff_snapshot),
             },
         )
     resolved = _workflow_resolution(args)
@@ -1656,8 +1930,9 @@ def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     if _is_adaptive(args):
-        plan = _adaptive_plan(args)
-        state = _save_adaptive_state(_new_adaptive_state(plan, args))
+        handoff_snapshot = _load_workflow_handoff(args)
+        plan = _adaptive_plan(args, handoff_snapshot)
+        state = _save_adaptive_state(_new_adaptive_state(plan, args, handoff_snapshot))
         return envelope(
             "start_workflow",
             {
@@ -1690,10 +1965,12 @@ def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _continue_adaptive_workflow(
-    args: Dict[str, Any], state: Dict[str, Any]
+    args: Dict[str, Any],
+    state: Dict[str, Any],
+    claim: store.RunClaim,
 ) -> Dict[str, Any]:
     if state.get("status") in {"completed", "failed"}:
-        public = _adaptive_public_state(state)
+        public = _adaptive_public_state(store.abort_claim(claim))
         return envelope(
             "continue_workflow",
             {
@@ -1706,8 +1983,60 @@ def _continue_adaptive_workflow(
                 **public,
             },
         )
+    if state.get("call_accounting_version") != ADAPTIVE_CALL_ACCOUNTING_VERSION:
+        public = _adaptive_public_state(store.abort_claim(claim))
+        return envelope(
+            "continue_workflow",
+            {
+                "success": False,
+                "text": (
+                    "This adaptive run uses legacy call accounting and cannot be resumed "
+                    "without risking an under-counted provider budget."
+                ),
+                "error": {
+                    "type": "legacy_call_accounting",
+                    "message": "Restart the adaptive workflow with state schema v2.",
+                    "retryable": False,
+                },
+                "pause_reason": "call_accounting_upgrade_required",
+                **public,
+            },
+        )
 
     options = _adaptive_run_options(args, state.get("options") or {})
+    handoff_snapshot = state.get("_handoff_snapshot")
+    handoff_drift = handoff_state.check_drift(
+        handoff_snapshot if isinstance(handoff_snapshot, dict) else None
+    )
+    if handoff_drift.get("drifted") and (options["handoff_drift_policy"] == "pause"):
+        released = store.abort_claim(claim)
+        public = _adaptive_public_state(released)
+        public["pause_reason"] = "handoff_drift"
+        public["handoff_drift"] = handoff_drift
+        return envelope(
+            "continue_workflow",
+            {
+                "success": False,
+                "text": (
+                    "HANDOFF.md changed after this run was planned. "
+                    "Review it, restore it, or continue with "
+                    "handoff_drift_policy=use-snapshot."
+                ),
+                "error": {
+                    "type": "handoff_drift",
+                    "message": "The persisted handoff snapshot no longer matches disk.",
+                    "retryable": True,
+                },
+                **public,
+            },
+        )
+    if handoff_drift.get("drifted"):
+        state["handoff_drift"] = handoff_drift
+        warnings = state.setdefault("warnings", [])
+        if "handoff_drift_using_snapshot" not in warnings:
+            warnings.append("handoff_drift_using_snapshot")
+    else:
+        state.pop("handoff_drift", None)
     workflow_timeout = float(options["workflow_timeout"])
     requested_per_call = float(options["per_call_timeout"])
     max_waves = max(
@@ -1720,6 +2049,12 @@ def _continue_adaptive_workflow(
     started = time.monotonic()
     plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
     executable = {key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")}
+    provider_budget = orchestrator.ProviderCallBudget(
+        int(options["max_leaf_calls"]),
+        used=int(state.get("leaf_calls") or 0),
+        max_concurrency=int(options["max_concurrency"]),
+        deadline_monotonic=(started + workflow_timeout - ADAPTIVE_TIMEOUT_RETURN_MARGIN),
+    )
 
     def invoke_with_budget(
         step: Dict[str, Any], provider: str, dependencies: Dict[str, Dict[str, Any]]
@@ -1734,6 +2069,8 @@ def _continue_adaptive_workflow(
         step_args = {
             **options,
             "per_call_timeout": min(requested_per_call, remaining),
+            "_provider_call_budget": provider_budget,
+            "_handoff_snapshot": state.get("_handoff_snapshot"),
         }
         return _adaptive_step_call(
             dict(step),
@@ -1756,6 +2093,7 @@ def _continue_adaptive_workflow(
         initial_waves=state.get("waves") or [],
         initial_call_count=int(state.get("leaf_calls") or 0),
         max_waves=max_waves,
+        call_budget=provider_budget,
     )
     successful_results = {
         step_id: item
@@ -1763,9 +2101,9 @@ def _continue_adaptive_workflow(
         if isinstance(item, dict) and item.get("success")
     }
     result_status = str(result.get("status") or "failed")
-    if result_status == "timed_out":
+    if result_status in {"timed_out", "budget_exhausted"}:
         persisted_status = "paused"
-        pause_reason = "workflow_timeout_exceeded"
+        pause_reason = str(result.get("error") or result_status)
     else:
         persisted_status = result_status
         pause_reason = "wave_limit" if result_status == "paused" else None
@@ -1792,7 +2130,7 @@ def _continue_adaptive_workflow(
     else:
         state.pop("text", None)
         state.pop("error", None)
-    public = _save_adaptive_state(state)
+    public = _adaptive_public_state(store.commit_claim(claim, state))
     return envelope(
         "continue_workflow",
         {
@@ -1811,9 +2149,81 @@ def _continue_adaptive_workflow(
     )
 
 
+def _run_store_error_response(
+    run_id: str,
+    error: store.RunStoreError,
+) -> Dict[str, Any]:
+    if isinstance(error, store.RunLeaseActive):
+        error_type = "run_lease_active"
+        retryable = True
+        revision = error.current_revision
+        details = {"retry_after_seconds": round(error.retry_after_seconds, 3)}
+    elif isinstance(error, store.RunRevisionConflict):
+        error_type = "run_revision_conflict"
+        retryable = True
+        revision = error.current
+        details = {"expected": error.expected, "current": error.current}
+    elif isinstance(error, store.RunLeaseLost):
+        error_type = "run_lease_lost"
+        retryable = True
+        revision = None
+        details = {}
+    elif isinstance(error, store.RunNotFound):
+        error_type = "run_not_found"
+        retryable = False
+        revision = None
+        details = {}
+    else:
+        error_type = "run_persistence_error"
+        retryable = False
+        revision = None
+        details = {}
+    raw_error = {
+        "type": error_type,
+        "message": str(error),
+        "retryable": retryable,
+        **details,
+    }
+    return envelope(
+        "continue_workflow",
+        {
+            "success": False,
+            "text": str(error),
+            "error": raw_error,
+            "run_id": run_id,
+            **({"store_revision": revision} if revision is not None else {}),
+        },
+    )
+
+
 def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     run_id = args.get("run_id")
     supplied_state = args.get("state") if isinstance(args.get("state"), dict) else None
+    supplied_is_adaptive = bool(
+        supplied_state is not None and supplied_state.get("run_kind") == "adaptive"
+    )
+    supplied_revision = (
+        supplied_state.get("store_revision")
+        if supplied_is_adaptive and supplied_state is not None
+        else None
+    )
+    expected_revision = args.get("expected_revision")
+    for field, value in (
+        ("expected_revision", expected_revision),
+        ("state.store_revision", supplied_revision),
+    ):
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise ValueError(f"{field} must be a non-negative integer")
+    if (
+        expected_revision is not None
+        and supplied_revision is not None
+        and expected_revision != supplied_revision
+    ):
+        raise ValueError("expected_revision does not match state.store_revision")
+    expected_revision = expected_revision if expected_revision is not None else supplied_revision
+
     if supplied_state is not None:
         raw_state_run_id = supplied_state.get("run_id")
         if raw_state_run_id not in (None, ""):
@@ -1828,21 +2238,81 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
                 raise ValueError("run_id does not match state.run_id")
             state_run_id = state_run_id or requested_run_id
         run_id = state_run_id
-        persisted = supplied_state
+        if supplied_is_adaptive:
+            try:
+                persisted = store.load_strict(run_id)
+            except store.RunStoreError as exc:
+                return _run_store_error_response(store.validate_run_id(run_id), exc)
+        else:
+            persisted = supplied_state
     else:
         run_id = store.validate_run_id(run_id)
-        persisted = store.load(run_id)
-    if isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive":
-        return _continue_adaptive_workflow(args, persisted)
-    state = runner.continue_run(
-        run_id=run_id,
-        state=supplied_state,
-        stage_id=str(args.get("stage_id") or ""),
-        result_text=str(args.get("result_text") or ""),
-        success=bool(args.get("success", True)),
-        error=str(args.get("error") or ""),
-        auto_local=bool(args.get("auto_local", True)),
-    )
+        try:
+            persisted = store.load_strict(run_id)
+        except store.RunStoreError as exc:
+            return _run_store_error_response(run_id, exc)
+    if supplied_is_adaptive or (
+        isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive"
+    ):
+        validated_run_id = store.validate_run_id(run_id)
+        lease_seconds = ADAPTIVE_WORKFLOW_TIMEOUT_MAX + ADAPTIVE_LEASE_GRACE_SECONDS
+        try:
+            claim = store.claim(
+                validated_run_id,
+                expected_revision=expected_revision,
+                lease_seconds=lease_seconds,
+            )
+        except store.RunStoreError as exc:
+            return _run_store_error_response(validated_run_id, exc)
+        if claim.state.get("run_kind") != "adaptive":
+            try:
+                store.abort_claim(claim)
+            except Exception:  # noqa: BLE001
+                pass
+            raise ValueError("persisted run is not adaptive")
+        try:
+            return _continue_adaptive_workflow(args, claim.state, claim)
+        except store.RunStoreError as exc:
+            try:
+                store.abort_claim(claim)
+            except Exception:  # noqa: BLE001
+                pass
+            return _run_store_error_response(validated_run_id, exc)
+        except Exception:
+            try:
+                store.abort_claim(claim)
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+    try:
+        state = runner.continue_run(
+            run_id=run_id,
+            state=supplied_state,
+            stage_id=str(args.get("stage_id") or ""),
+            result_text=str(args.get("result_text") or ""),
+            success=bool(args.get("success", True)),
+            error=str(args.get("error") or ""),
+            auto_local=bool(args.get("auto_local", True)),
+            expected_revision=expected_revision,
+            handoff_drift_policy=args.get("handoff_drift_policy"),
+        )
+    except handoff_state.HandoffDrift as exc:
+        return envelope(
+            "continue_workflow",
+            {
+                "success": False,
+                "text": str(exc),
+                "error": {
+                    "type": "handoff_drift",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+                "run_id": run_id,
+                "handoff_drift": exc.drift,
+            },
+        )
+    except store.RunStoreError as exc:
+        return _run_store_error_response(store.validate_run_id(run_id), exc)
     return envelope(
         "continue_workflow",
         {"success": state.get("status") != "failed", "text": "Workflow advanced.", **state},
@@ -1851,8 +2321,8 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _get_run(args: Dict[str, Any]) -> Dict[str, Any]:
     run_id = store.validate_run_id(args.get("run_id"))
-    persisted = store.load(run_id)
-    if isinstance(persisted, dict) and persisted.get("run_kind") == "adaptive":
+    persisted = store.load_strict(run_id)
+    if persisted.get("run_kind") == "adaptive":
         state = _adaptive_public_state(persisted)
     else:
         state = runner.get_run(run_id)
@@ -1876,10 +2346,16 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
                 ),
             ),
         }
-        plan = _adaptive_plan(planning_args)
-        executable = {
-            key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")
-        }
+        handoff_snapshot = _load_workflow_handoff(planning_args)
+        plan = _adaptive_plan(planning_args, handoff_snapshot)
+        executable = {key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")}
+        max_leaf_calls = int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS)
+        max_concurrency = int(args.get("max_concurrency") or 3)
+        provider_budget = orchestrator.ProviderCallBudget(
+            max_leaf_calls,
+            max_concurrency=max_concurrency,
+            deadline_monotonic=(started + workflow_timeout - ADAPTIVE_TIMEOUT_RETURN_MARGIN),
+        )
 
         def invoke_with_budget(
             step: Dict[str, Any], provider: str, dependencies: Dict[str, Dict[str, Any]]
@@ -1894,6 +2370,8 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             step_args = {
                 **args,
                 "per_call_timeout": min(requested_per_call, remaining),
+                "_provider_call_budget": provider_budget,
+                "_handoff_snapshot": handoff_snapshot,
             }
             return _adaptive_step_call(
                 dict(step),
@@ -1906,16 +2384,17 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
         result = orchestrator.execute_plan(
             executable,
             invoke=invoke_with_budget,
-            max_concurrency=int(args.get("max_concurrency") or 3),
-            max_calls=int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS),
+            max_concurrency=max_concurrency,
+            max_calls=max_leaf_calls,
             max_elapsed_seconds=max(
                 ADAPTIVE_TIMEOUT_RETURN_MARGIN,
                 workflow_timeout - (time.monotonic() - started),
             ),
+            call_budget=provider_budget,
         )
         resumable: Dict[str, Any] = {}
         if result.get("status") == "timed_out":
-            state = _new_adaptive_state(plan, args)
+            state = _new_adaptive_state(plan, args, handoff_snapshot)
             persisted = {
                 step_id: item
                 for step_id, item in (result.get("results") or {}).items()
@@ -1944,6 +2423,12 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
                 "workflow_id": "adaptive",
                 "dynamic": True,
                 "planner": plan.get("planner"),
+                "handoff": handoff_state.public_snapshot(handoff_snapshot),
+                "planner_calls": int(
+                    (plan.get("planner") or {}).get("attempts", 0)
+                    if isinstance(plan.get("planner"), dict)
+                    else 0
+                ),
                 "workflow_timeout": workflow_timeout,
                 "elapsed_ms": round((time.monotonic() - started) * 1000),
                 **resumable,
@@ -2128,6 +2613,13 @@ COMPARE_SCHEMA = _operation_schema(
             "default": "parallel",
         },
         "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
+        "min_successes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "default": 2,
+            "description": "Minimum successful provider responses required for an open compare.",
+        },
         "consistency": {
             "type": "object",
             "properties": {
@@ -2222,6 +2714,29 @@ WORKFLOW_BASE = {
     },
     "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
     **POLICY_CONTROL_SCHEMA,
+    "handoff_mode": {
+        "type": "string",
+        "enum": ["off", "auto", "required"],
+        "default": "auto",
+        "description": "Load project HANDOFF.md as untrusted operational context.",
+    },
+    "handoff_search": {
+        "type": "string",
+        "enum": ["project-only", "nearest"],
+        "default": "nearest",
+    },
+    "handoff_file": {"type": "string"},
+    "handoff_drift_policy": {
+        "type": "string",
+        "enum": ["pause", "use-snapshot"],
+        "default": "pause",
+    },
+    "max_handoff_chars": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": handoff_state.MAX_HANDOFF_CHARS,
+        "default": handoff_state.DEFAULT_MAX_CHARS,
+    },
 }
 ADAPTIVE_EXECUTION_CONTROL_SCHEMA = {
     "max_leaf_calls": {
@@ -2317,7 +2832,6 @@ TOOL_SPECS: List[Dict[str, Any]] = [
             required=("provider",),
         ),
         read_only=False,
-        destructive=True,
     ),
     _spec(
         "agent_hub_chat",
@@ -2414,6 +2928,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
             }
         ),
         read_only=False,
+        destructive=True,
     ),
     _spec(
         "agent_hub_reset_settings",
@@ -2440,6 +2955,74 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         idempotent=True,
     ),
     _spec(
+        "agent_hub_get_handoff",
+        "Get Project Handoff",
+        "Discover and read project-scoped HANDOFF.md as explicitly untrusted operational context.",
+        _object(
+            {
+                "project_root": {"type": "string", "default": "."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["off", "auto", "required"],
+                    "default": "auto",
+                },
+                "search": {
+                    "type": "string",
+                    "enum": ["project-only", "nearest"],
+                    "default": "nearest",
+                },
+                "file": {"type": "string"},
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": handoff_state.MAX_HANDOFF_CHARS,
+                    "default": handoff_state.DEFAULT_MAX_CHARS,
+                },
+            }
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    _spec(
+        "agent_hub_prepare_handoff_update",
+        "Prepare Handoff Update",
+        "Build a marker-managed HANDOFF.md update and SHA fence without writing it.",
+        _object(
+            {
+                "project_root": {"type": "string", "default": "."},
+                "body": {"type": "string"},
+                "file": {"type": "string"},
+                "search": {
+                    "type": "string",
+                    "enum": ["project-only", "nearest"],
+                    "default": "project-only",
+                },
+            },
+            required=("body",),
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    _spec(
+        "agent_hub_apply_handoff_update",
+        "Apply Handoff Update",
+        "Atomically apply a prepared HANDOFF.md update when the whole-file SHA matches.",
+        _object(
+            {
+                "project_root": {"type": "string", "default": "."},
+                "file": {"type": "string"},
+                "content": {"type": "string"},
+                "expected_sha256": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            required=("file", "content", "expected_sha256"),
+        ),
+        read_only=False,
+        destructive=True,
+    ),
+    _spec(
         "agent_hub_list_workflows",
         "List Workflows",
         "List real multi-stage workflow templates and presets.",
@@ -2462,7 +3045,14 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_plan_workflow",
         "Plan Workflow",
         "Resolve a static workflow or ask a planner LLM for a validated adaptive DAG.",
-        _object(WORKFLOW_BASE, required=("workflow_id",), additional=True),
+        _object(
+            {
+                **WORKFLOW_BASE,
+                "max_leaf_calls": deepcopy(ADAPTIVE_EXECUTION_CONTROL_SCHEMA["max_leaf_calls"]),
+            },
+            required=("workflow_id",),
+            additional=True,
+        ),
         read_only=False,
         open_world=True,
     ),
@@ -2491,12 +3081,31 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                     "type": "string",
                     "pattern": store.RUN_ID_PATTERN,
                 },
-                "state": {"type": "object"},
+                "state": {
+                    "type": "object",
+                    "description": (
+                        "Optional echoed state; it must contain the same run_id and cannot "
+                        "replace persisted state authority."
+                    ),
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Optional CAS fence for persisted state. A stale revision is "
+                        "rejected before any provider call."
+                    ),
+                },
                 "stage_id": {"type": "string"},
                 "result_text": {"type": "string"},
                 "success": {"type": "boolean", "default": True},
                 "error": {"type": "string"},
                 "auto_local": {"type": "boolean", "default": True},
+                "handoff_drift_policy": {
+                    "type": "string",
+                    "enum": ["pause", "use-snapshot"],
+                    "default": "pause",
+                },
                 **ADAPTIVE_EXECUTION_CONTROL_SCHEMA,
                 "max_waves_per_call": {
                     "type": "integer",
@@ -2623,6 +3232,9 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_get_settings": _get_settings,
     "agent_hub_update_settings": _update_settings,
     "agent_hub_reset_settings": _reset_settings,
+    "agent_hub_get_handoff": _get_handoff,
+    "agent_hub_prepare_handoff_update": _prepare_handoff_update,
+    "agent_hub_apply_handoff_update": _apply_handoff_update,
     "agent_hub_list_workflows": _list_workflows,
     "agent_hub_get_workflow": _get_workflow,
     "agent_hub_plan_workflow": _plan_workflow,

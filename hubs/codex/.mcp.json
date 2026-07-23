@@ -3,12 +3,12 @@
     "command": "uvx",
     "args": ["basic-memory", "mcp"],
     "env": {
-      "BASIC_MEMORY_CONFIG_DIR": "/Users/naen/Git/agent-hub-mono/memory/.basic-memory",
-      "BASIC_MEMORY_HOME": "/Users/naen/Git/agent-hub-mono/memory/data",
+      "BASIC_MEMORY_CONFIG_DIR": "/Users/naen/Git/agent-hub/memory/.basic-memory",
+      "BASIC_MEMORY_HOME": "/Users/naen/Git/agent-hub/memory/data",
       "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false"
     }
   },
   "agent-hub": {
-    "command": "/Users/naen/Git/agent-hub-mono/.venv/bin/agent-hub-mcp"
+    "command": "/Users/naen/Git/agent-hub/.venv/bin/agent-hub-mcp"
   }
 }
