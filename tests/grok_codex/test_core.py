@@ -183,6 +183,24 @@ def test_oauth_status_empty(monkeypatch, tmp_path):
     assert st["logged_in"] is False
 
 
+def test_oauth_status_reports_expiry_without_refresh(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    oauth_login.token_path().parent.mkdir(parents=True)
+    oauth_login.token_path().write_text(
+        (
+            '{"access_token":"test","refresh_token":"refresh",'
+            '"expires_in":3600,"last_refresh":"2020-01-01T00:00:00Z"}'
+        ),
+        encoding="utf-8",
+    )
+
+    state = oauth_login.status()
+
+    assert state["logged_in"] is True
+    assert state["token_valid"] is False
+    assert state["refresh_recommended"] is True
+
+
 def test_auth_prefers_oauth_token(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("GROK_CODEX_AUTH_MODE", "subscription")
@@ -192,3 +210,30 @@ def test_auth_prefers_oauth_token(monkeypatch, tmp_path):
     monkeypatch.setattr(oauth_login, "resolve_access_token", lambda: "oauth-access-token")
     ctx = auth.resolve_auth()
     assert ctx["mode"] == "subscription_oauth"
+
+
+def test_auth_status_never_resolves_or_refreshes_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        auth.oauth_login,
+        "status",
+        lambda: {
+            "logged_in": True,
+            "token_valid": False,
+            "mode": "subscription_oauth",
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        auth,
+        "resolve_auth",
+        lambda: pytest.fail("status must not resolve or refresh credentials"),
+    )
+
+    state = auth.status()
+
+    assert state["credentials_present"] is True
+    assert state["configured"] is True
+    assert state["ready"] is False
+    assert state["active_mode"] is None

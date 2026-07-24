@@ -81,22 +81,55 @@ def has_credentials() -> bool:
         return False
 
 
+def _api_key_context(key: str) -> Dict[str, Any] | None:
+    if not key:
+        return None
+    mode = (
+        "subscription_oauth"
+        if key.startswith(("sk-ant-oat", "sk-ant-ort"))
+        else "api_key"
+    )
+    return {
+        "mode": mode,
+        "source": API_KEY_ENV if os.getenv(API_KEY_ENV) else str(api_key_path()),
+    }
+
+
 def status() -> Dict[str, Any]:
+    """Report credential readiness without refreshing or writing credentials."""
+
     sub = subscription_auth.status()
     key = get_api_key()
-    configured = bool(sub.get("logged_in") or key)
-    active = None
-    try:
-        active = resolve_auth()
-    except RuntimeError:
-        active = None
+    subscription_ready = bool(
+        sub.get("logged_in") and sub.get("token_valid") is True
+    )
+    subscription_context = (
+        {
+            "mode": "subscription_oauth",
+            "source": sub.get("source"),
+        }
+        if subscription_ready
+        else None
+    )
+    key_context = _api_key_context(key)
+    active = (
+        subscription_context or key_context
+        if prefer_subscription()
+        else key_context or subscription_context
+    )
+    credentials_present = bool(sub.get("logged_in") or key)
+    ready = active is not None
     return {
         "text": (
             f"Auth ready ({active.get('mode')})."
             if active
+            else "Credentials are present but require an explicit refresh."
+            if credentials_present
             else "No credentials. Use Claude Code login or ANTHROPIC_API_KEY."
         ),
-        "configured": configured,
+        "configured": credentials_present,
+        "ready": ready,
+        "credentials_present": credentials_present,
         "active_mode": (active or {}).get("mode"),
         "active_source": (active or {}).get("source"),
         "subscription": sub,

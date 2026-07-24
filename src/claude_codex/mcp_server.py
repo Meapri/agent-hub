@@ -115,7 +115,7 @@ def _provider_status(_args: Dict[str, Any]) -> Dict[str, Any]:
         "text": status.get("text") or json.dumps(status, indent=2),
         **status,
         **response.standard_fields(
-            success=bool(status.get("configured")),
+            success=bool(status.get("ready")),
             provider="anthropic",
             backend="anthropic-messages",
         ),
@@ -125,7 +125,7 @@ def _provider_status(_args: Dict[str, Any]) -> Dict[str, Any]:
 def _doctor(_args: Dict[str, Any]) -> Dict[str, Any]:
     consent = security.consent_status()
     auth_state = auth.status()
-    ok = bool(consent.get("user_consent") and auth_state.get("configured"))
+    ok = bool(consent.get("user_consent") and auth_state.get("ready"))
     payload = {
         "ok": ok,
         "consent": consent,

@@ -26,7 +26,6 @@ from claude_codex import models as claude_models
 from claude_codex import mcp_server as claude_mcp
 from claude_codex import search as claude_search
 from claude_codex import security as claude_security
-from claude_codex import subscription_auth as claude_subscription
 from grok_codex import auth as grok_auth
 from grok_codex import models as grok_models
 from grok_codex import mcp_server as grok_mcp
@@ -287,34 +286,48 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
         if provider == "claude":
             consent = claude_security.consent_status()
             auth = claude_auth.status()
-            login = claude_subscription.status()
+            authenticated = bool(auth.get("ready"))
             states[provider] = {
                 "consent": bool(consent.get("user_consent")),
-                "authenticated": bool(auth.get("configured")),
-                "ready": bool(consent.get("user_consent") and auth.get("configured")),
-                "auth_mode": auth.get("mode") or login.get("mode"),
+                "configured": bool(auth.get("configured")),
+                "authenticated": authenticated,
+                "ready": bool(consent.get("user_consent") and authenticated),
+                "auth_mode": auth.get("active_mode"),
                 "default_model": claude_models.DEFAULT_MODEL,
                 "settings": provider_settings.get("claude"),
                 "capabilities": capabilities.provider_capabilities("claude"),
-                "warnings": [],
+                "warnings": []
+                if authenticated
+                else [
+                    "auth_refresh_required"
+                    if auth.get("credentials_present")
+                    else "credentials_missing"
+                ],
             }
         elif provider == "grok":
             consent = grok_security.consent_status()
             auth = grok_auth.status()
-            login = grok_oauth.status()
+            authenticated = bool(auth.get("ready"))
             states[provider] = {
                 "consent": bool(consent.get("user_consent")),
-                "authenticated": bool(auth.get("configured")),
-                "ready": bool(consent.get("user_consent") and auth.get("configured")),
-                "auth_mode": auth.get("mode") or login.get("mode"),
+                "configured": bool(auth.get("configured")),
+                "authenticated": authenticated,
+                "ready": bool(consent.get("user_consent") and authenticated),
+                "auth_mode": auth.get("active_mode"),
                 "default_model": grok_models.DEFAULT_MODEL,
                 "settings": provider_settings.get("grok"),
                 "capabilities": capabilities.provider_capabilities("grok"),
-                "warnings": [],
+                "warnings": []
+                if authenticated
+                else [
+                    "auth_refresh_required"
+                    if auth.get("credentials_present")
+                    else "credentials_missing"
+                ],
             }
         elif provider == "gpt":
             consent = openai_security.consent_status()
-            auth = openai_auth.status()
+            auth = openai_auth.status(refresh=False)
             warnings = [str(auth["warning"])] if auth.get("warning") else []
             if auth.get("error_type"):
                 warnings.append(str(auth["error_type"]))
@@ -332,8 +345,6 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
         else:
             consent = google_security.consent_status()
             provider_state = google_provider.status(probe=probe)
-            # A live provider probe can refresh an expired plugin token. Read the
-            # token state afterward so this same status call reflects the refresh.
             login = google_oauth.login_status()
             authenticated = bool(
                 login.get("credentials_readable") and login.get("expired") is not True

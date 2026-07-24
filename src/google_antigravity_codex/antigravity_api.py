@@ -117,12 +117,15 @@ def resolve_project_id(credentials: agy_auth.AgyCredentials) -> str:
 _project_id = resolve_project_id
 
 
-def _credentials_and_project() -> tuple[agy_auth.AgyCredentials, str]:
-    credentials = agy_auth.valid_credentials(refresh=True)
+def _credentials_and_project(
+    *,
+    refresh: bool = True,
+) -> tuple[agy_auth.AgyCredentials, str]:
+    credentials = agy_auth.valid_credentials(refresh=refresh)
     try:
         return credentials, resolve_project_id(credentials)
     except AntigravityApiError as exc:
-        if exc.code != "antigravity_unauthorized":
+        if exc.code != "antigravity_unauthorized" or not refresh:
             raise
     credentials = agy_auth.force_refresh_credentials()
     return credentials, resolve_project_id(credentials)
@@ -344,8 +347,8 @@ def generate_content_stream(
     raise last_error or AntigravityApiError("Antigravity stream request failed.")
 
 
-def list_models() -> List[Dict[str, Any]]:
-    credentials, project = _credentials_and_project()
+def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
+    credentials, project = _credentials_and_project(refresh=refresh)
     body = {"project": project, "requestId": "agent-" + str(uuid.uuid4())}
     try:
         payload = _post(
@@ -355,7 +358,7 @@ def list_models() -> List[Dict[str, Any]]:
             timeout=60.0,
         )
     except AntigravityApiError as exc:
-        if exc.code != "antigravity_unauthorized":
+        if exc.code != "antigravity_unauthorized" or not refresh:
             raise
         credentials = agy_auth.force_refresh_credentials()
         body["project"] = resolve_project_id(credentials)
@@ -417,10 +420,9 @@ def list_models() -> List[Dict[str, Any]]:
 
 
 def status(*, probe: bool = False) -> Dict[str, Any]:
-    # A live readiness probe may renew an expired plugin token. Keep a plain
-    # status call read-only, but make probe=True useful immediately after an
-    # app restart instead of requiring a separate manual refresh call.
-    auth_state = agy_auth.status(probe=probe)
+    # Status is advertised as read-only. Even a live probe must leave token
+    # renewal to the explicit auth-refresh operation.
+    auth_state = agy_auth.status(probe=False)
     state: Dict[str, Any] = {
         "configured": auth_state.get("enabled") is True and auth_state.get("token_file_present") is True,
         "provider": "agy-oauth",
@@ -432,7 +434,7 @@ def status(*, probe: bool = False) -> Dict[str, Any]:
     if not state["configured"] or not probe:
         return state
     try:
-        visible = list_models()
+        visible = list_models(refresh=False)
     except (agy_auth.AgyAuthError, AntigravityApiError) as exc:
         state.update({"healthy": False, "error_type": getattr(exc, "code", type(exc).__name__), "error": str(exc)})
     else:

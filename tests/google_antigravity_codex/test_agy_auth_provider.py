@@ -134,7 +134,7 @@ def test_provider_not_configured_without_token(tmp_path, monkeypatch):
     assert raised.value.code == "provider_not_configured"
 
 
-def test_live_status_probe_allows_plugin_token_refresh():
+def test_live_status_probe_never_refreshes_plugin_token():
     auth_state = {
         "enabled": True,
         "token_file_present": True,
@@ -145,12 +145,48 @@ def test_live_status_probe_allows_plugin_token_refresh():
         antigravity_api.agy_auth,
         "status",
         return_value=auth_state,
-    ) as status_call, patch.object(antigravity_api, "list_models", return_value=[]):
+    ) as status_call, patch.object(
+        antigravity_api,
+        "list_models",
+        return_value=[],
+    ) as list_call:
         state = antigravity_api.status(probe=True)
 
-    status_call.assert_called_once_with(probe=True)
+    status_call.assert_called_once_with(probe=False)
+    list_call.assert_called_once_with(refresh=False)
     assert state["configured"] is True
     assert state["healthy"] is True
+
+
+def test_read_only_model_probe_does_not_refresh_after_unauthorized():
+    credentials = agy_auth.AgyCredentials(
+        access_token="stale-token",
+        refresh_token="refresh-secret",
+        expires_at_ms=4102444800000,
+        project_id="project-one",
+    )
+    unauthorized = antigravity_api.AntigravityApiError(
+        "unauthorized",
+        code="antigravity_unauthorized",
+        status_code=401,
+    )
+    with patch.object(
+        antigravity_api.agy_auth,
+        "valid_credentials",
+        return_value=credentials,
+    ) as valid_call, patch.object(
+        antigravity_api.agy_auth,
+        "force_refresh_credentials",
+    ) as refresh_call, patch.object(
+        antigravity_api,
+        "_post",
+        side_effect=unauthorized,
+    ):
+        with pytest.raises(antigravity_api.AntigravityApiError):
+            antigravity_api.list_models(refresh=False)
+
+    valid_call.assert_called_once_with(refresh=False)
+    refresh_call.assert_not_called()
 
 
 def test_direct_transport_uses_token_in_memory_and_maps_default_model():

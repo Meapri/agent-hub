@@ -1,6 +1,59 @@
 # Agent Hub 검증 기록
 
-기준일: 2026-07-18
+기준일: 2026-07-24
+
+## 1.4.0 canonical GPT provider와 복구 가능한 run lifecycle
+
+GPT를 별도 플러그인이나 별도 공개 MCP로 추가하지 않고 Claude, Grok, Gemini와 같은 Agent Hub provider
+registry에 넣었다. 공개 도구는 계속 `agent_hub_*`만 사용하며, `provider="gpt"`가 status, model
+목록, chat, write, compare, review, release, fixed/adaptive workflow를 같은 계약으로 통과한다. 기본
+compare는 기존 Claude, Grok, Gemini를 유지하고, `provider="all"`일 때 GPT까지 네 provider를
+실행한다. GPT의 search와 image generation은 지원하지 않는 기능으로 fail-closed한다.
+
+인증은 공식 Codex CLI가 소유한다. Agent Hub는 OAuth token, Keychain 항목, `auth.json`을 읽거나
+복사하지 않고 redacted 계정 상태와 격리된 `codex exec`만 사용한다. Hermes Agent와 OpenAI Codex에서
+참고한 경계는 `model-access/gpt-provider.source-map.md`와 `NOTICE.md`에 upstream commit 단위로
+고정했다. GPT private leaf 이름은 내부 resolver에만 남고 plugin manifest나 public tool 목록에는
+노출하지 않는다.
+
+설치 smoke에서 `agent_hub_status`가 read-only 도구로 공개되면서도 Claude와 Grok의 만료 token을
+암묵적으로 refresh하고, Gemini의 `probe=true`도 credential을 갱신할 수 있는 계약 위반을 찾았다.
+Claude와 Grok status는 저장된 만료 상태와 API key 유무만 읽어 readiness를 계산하도록 바꿨다. Gemini
+live probe도 `refresh=False`로 현재 token만 확인하고, 갱신은 `agent_hub_auth_refresh`에서만
+수행한다. GPT status는 공식 Codex에 `refreshToken=false`를 명시한다.
+
+모든 provider가 공유하는 run lifecycle도 보강했다.
+
+- `cancel_run`은 revision fence 아래 활성 lease를 무효화해 늦게 도착한 provider 결과를 저장하지 않는다.
+  이미 시작된 네트워크 요청이나 사용량까지 강제 취소하는 기능은 아니다.
+- `archive_run`은 completed, failed, cancelled run만 받는다.
+- `gc_run`은 기본 dry-run이며 archived state의 project, revision, 전체 SHA, inode, owner, hardlink
+  조건이 모두 맞을 때만 명시적인 apply로 JSON을 삭제한다.
+- run event는 prompt, 결과 본문, token을 남기지 않고 lifecycle CAS와 같은 commit에 한 번만 기록한다.
+
+프로젝트별 `HANDOFF.md`는 짧은 파일에서도 managed block을 우선해서 읽는다. prepare와 apply가 원래
+목표, 현재 단계, 완료, 미완, 변경 파일, 검증, 위험, Do-Not-Repeat, 단 하나의 구체적인 다음 행동을
+검사한다. marker 밖 기록은 byte 단위로 보존하며, 전체 파일 SHA가 충돌해도 managed SHA가 그대로인
+경우에만 안전하게 재준비할 수 있다.
+
+주요 로컬 커밋은 GPT 공개 표면 수정 `a4df092`, run lifecycle `a80170d`, handoff 품질 계약
+`be750f6`, 1.4.0 문서·메타데이터 동기화 `e1d8f3b`다. 자동 검증 결과는 pytest
+`492 passed, 2 skipped`, Ruff 전체 통과, Hub plugin·Ruler sync·Phase 1 fixture 통과,
+release version 5개 필드 `1.4.0` 일치, README와 Hub 문서의 user-facing verify 경고 0건,
+sdist·wheel 생성 성공이다.
+
+현재 checkout의 editable package를 1.3.2에서 1.4.0으로 갱신했고 `uv` 0.11.32와
+`basic-memory` 0.22.1을 설치했다. machine-local 설정은 변경 0건으로 최신이었다. Codex와 Claude
+Code에는 `agent-hub@agent-hub` 1.4.0을 사용자 범위로 설치했다. 설치된 MCP의 `tools/list`는 공개
+도구 37개가 모두 `agent_hub_*`이고 status provider enum이 `all`, `claude`, `grok`, `gemini`,
+`gpt`임을 확인했다. 기본 doctor는 `8 pass, 0 warn, 0 fail`, 공식 Codex 구독까지 읽은 live
+doctor는 `9 pass, 0 warn, 0 fail`이었다.
+
+네 provider의 Agent Hub consent는 사용자를 대신해 `--i-understand-and-consent`를 선언하지 않았기
+때문에 그대로 꺼져 있다. GPT status smoke는 공식 Codex의 ChatGPT Pro 로그인을 인증했지만
+`consent=false`라 `ready=false`를 정확히 반환했다. Claude Code의 MCP 두 개도 새 interactive
+session에서 사용자가 승인해야 한다. 실제 generation, provider login/logout, release, deploy는
+수행하지 않았다.
 
 ## README 사람 문체 전면 개편
 

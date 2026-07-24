@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import inspect
 
+import pytest
+
 from agent_hub import server
 from agent_hub import operations
 from claude_codex import mcp_server as claude
@@ -337,9 +339,7 @@ def test_gemini_status_treats_unprobed_configured_session_as_ready(monkeypatch):
     assert state["warnings"] == []
 
 
-def test_gemini_status_probe_reports_token_refreshed_during_same_call(monkeypatch):
-    refreshed = {"value": False}
-
+def test_gemini_status_probe_uses_read_only_provider_probe(monkeypatch):
     monkeypatch.setattr(
         operations.google_security,
         "consent_status",
@@ -348,7 +348,6 @@ def test_gemini_status_probe_reports_token_refreshed_during_same_call(monkeypatc
 
     def provider_status(*, probe=False):
         assert probe is True
-        refreshed["value"] = True
         return {
             "configured": True,
             "healthy": True,
@@ -361,7 +360,7 @@ def test_gemini_status_probe_reports_token_refreshed_during_same_call(monkeypatc
         "login_status",
         lambda: {
             "credentials_readable": True,
-            "expired": not refreshed["value"],
+            "expired": False,
         },
     )
 
@@ -374,6 +373,114 @@ def test_gemini_status_probe_reports_token_refreshed_during_same_call(monkeypatc
     assert state["authenticated"] is True
     assert state["ready"] is True
     assert state["warnings"] == []
+
+
+def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
+    from claude_codex import subscription_auth as claude_subscription
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("read-only status must not refresh or write credentials")
+
+    monkeypatch.setattr(
+        operations.claude_security,
+        "consent_status",
+        lambda: {"user_consent": True},
+    )
+    monkeypatch.setattr(
+        claude_subscription,
+        "status",
+        lambda: {
+            "logged_in": True,
+            "token_valid": False,
+            "mode": "subscription_oauth",
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(operations.claude_auth, "get_api_key", lambda: "")
+    monkeypatch.setattr(claude_subscription, "resolve_access_token", forbidden)
+    monkeypatch.setattr(claude_subscription, "refresh_token_pure", forbidden)
+    monkeypatch.setattr(claude_subscription, "write_credentials", forbidden)
+
+    monkeypatch.setattr(
+        operations.grok_security,
+        "consent_status",
+        lambda: {"user_consent": True},
+    )
+    monkeypatch.setattr(
+        operations.grok_oauth,
+        "status",
+        lambda: {
+            "logged_in": True,
+            "token_valid": False,
+            "mode": "subscription_oauth",
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(operations.grok_auth, "get_api_key", lambda: "")
+    monkeypatch.setattr(operations.grok_oauth, "resolve_access_token", forbidden)
+    monkeypatch.setattr(operations.grok_oauth, "refresh_tokens", forbidden)
+    monkeypatch.setattr(operations.grok_oauth, "save_tokens", forbidden)
+
+    monkeypatch.setattr(
+        operations.google_security,
+        "consent_status",
+        lambda: {"user_consent": True, "agy_session_enabled": True},
+    )
+    monkeypatch.setattr(
+        operations.google_provider,
+        "status",
+        lambda probe=False: {
+            "configured": False,
+            "healthy": False,
+            "auth_method": "plugin_oauth_login",
+            "error_type": "agy_token_expired",
+        },
+    )
+    monkeypatch.setattr(
+        operations.google_oauth,
+        "login_status",
+        lambda: {"credentials_readable": True, "expired": True},
+    )
+    monkeypatch.setattr(operations.google_auth, "refresh_tool", forbidden)
+
+    refresh_args = []
+
+    def gpt_status(*, refresh=False):
+        refresh_args.append(refresh)
+        return {
+            "logged_in": True,
+            "configured": True,
+            "auth_mode": "chatgpt",
+            "plan_type": "pro",
+        }
+
+    monkeypatch.setattr(
+        operations.openai_security,
+        "consent_status",
+        lambda: {"user_consent": True},
+    )
+    monkeypatch.setattr(operations.openai_auth, "status", gpt_status)
+
+    result = operations.dispatch_tool(
+        "agent_hub_status",
+        {"provider": "all", "probe": True},
+    )
+
+    assert result["success"] is True
+    assert refresh_args == [False]
+    assert result["data"]["providers"]["claude"]["warnings"] == [
+        "auth_refresh_required"
+    ]
+    assert result["data"]["providers"]["grok"]["warnings"] == [
+        "auth_refresh_required"
+    ]
+    status_spec = next(
+        item
+        for item in operations.tool_definitions()
+        if item["name"] == "agent_hub_status"
+    )
+    assert status_spec["annotations"]["readOnlyHint"] is True
+    assert status_spec["annotations"]["idempotentHint"] is True
 
 
 def test_unknown_tool_errors():

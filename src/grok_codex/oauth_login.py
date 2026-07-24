@@ -146,6 +146,28 @@ def load_tokens() -> Optional[Dict[str, Any]]:
         return None
 
 
+def _token_timing(data: Dict[str, Any]) -> tuple[Optional[bool], Optional[bool]]:
+    """Return ``(valid, refresh_recommended)`` without refreshing the token."""
+
+    if not data.get("access_token"):
+        return False, None
+    last = data.get("last_refresh")
+    try:
+        expires_in = int(data.get("expires_in") or 0)
+        refreshed_at = datetime.fromisoformat(
+            str(last).replace("Z", "+00:00")
+        ).timestamp()
+    except (TypeError, ValueError):
+        return None, None
+    if expires_in <= 0:
+        return None, None
+    age = time.time() - refreshed_at
+    return (
+        age < expires_in,
+        age > max(60, expires_in - ACCESS_TOKEN_REFRESH_SKEW_SECONDS),
+    )
+
+
 def clear_tokens() -> bool:
     path = token_path()
     if path.is_file():
@@ -285,12 +307,15 @@ def status() -> Dict[str, Any]:
             "mode": "none",
             "hint": "python3 scripts/grok_codex_login.py interactive",
         }
+    token_valid, refresh_recommended = _token_timing(data)
     return {
         "logged_in": True,
         "mode": "subscription_oauth",
         "token_file": str(token_path()),
         "last_refresh": data.get("last_refresh"),
         "has_refresh_token": bool(data.get("refresh_token")),
+        "token_valid": token_valid,
+        "refresh_recommended": refresh_recommended,
         "token_prefix": str(data.get("access_token") or "")[:8] + "…",
         "source": data.get("source"),
     }

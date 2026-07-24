@@ -322,6 +322,18 @@ def test_gpt_chat_uses_canonical_agent_hub_envelope(monkeypatch):
 
 
 def test_gpt_status_models_and_auth_use_canonical_hub_envelopes(monkeypatch):
+    status_refresh_args = []
+
+    def fake_status(*, refresh=False):
+        status_refresh_args.append(refresh)
+        return {
+            "logged_in": True,
+            "configured": True,
+            "auth_mode": "chatgpt",
+            "plan_type": "pro",
+            "email": "must-not-leak@example.test",
+        }
+
     monkeypatch.setattr(
         operations.openai_security,
         "consent_status",
@@ -335,15 +347,10 @@ def test_gpt_status_models_and_auth_use_canonical_hub_envelopes(monkeypatch):
     monkeypatch.setattr(
         operations.openai_auth,
         "status",
-        lambda: {
-            "logged_in": True,
-            "configured": True,
-            "auth_mode": "chatgpt",
-            "plan_type": "pro",
-            "email": "must-not-leak@example.test",
-        },
+        fake_status,
     )
     status = operations.dispatch_tool("agent_hub_status", {"provider": "gpt"})
+    assert status_refresh_args == [False]
     assert status["success"] is True
     assert list(status["data"]["providers"]) == ["gpt"]
     assert status["data"]["providers"]["gpt"]["ready"] is True

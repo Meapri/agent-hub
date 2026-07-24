@@ -706,67 +706,54 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-24 Agent Hub 재개 안전성과 프로젝트별 HANDOFF 구현
+## 2026-07-24 Agent Hub 1.4.0 canonical GPT provider
 
-- **원래 목표**: 기존 Agent Hub를 조사해 개선안을 설계하고, 프로젝트마다 독립적인 `HANDOFF.md`를
-  두면서 Codex·Claude Code 등 다른 하네스가 안전하게 작업을 이어받을 수 있게 합니다.
-- **현재 단계**: provider 호출 계약, 재개 상태 v2, 프로젝트별 handoff lifecycle 구현과 로컬 검증을
-  완료했습니다. Agent Hub 설치·전역 설정 변경·원격 push는 사용자의 최신 요청에 따라 수행하지
-  않았습니다.
+- **원래 목표**: Agent Hub를 개선하고 Hermes Agent에서 필요한 설계를 가져오되, GPT를 별도
+  플러그인이 아니라 Claude, Grok, Gemini와 같은 canonical provider로 통합합니다.
+- **현재 단계**: GPT provider, 공통 run lifecycle, 프로젝트별 handoff 품질 계약, 1.4.0 문서와
+  배포 메타데이터 구현을 완료했습니다. Agent Hub 1.4.0과 공유 메모리, Codex·Claude Code
+  플러그인 설치 및 로컬 검증도 마쳤습니다.
 - **완료**:
-  - compare 참여자 수와 rewrite를 provider call 예산에 반영하고, workflow 전체가 같은 동시 실행
-    semaphore와 deadline을 공유하게 했습니다. compare 결과는 성공 수에 따라
-    `complete`·`partial`·`insufficient`·`failed`로 구분하며 provider/model별 답변을 보존합니다.
-  - fixed/adaptive run 상태를 revision·lease·CAS 기반 v2로 강화했습니다. 서로 다른 run 종류를 섞을 수
-    없고, stale 결과와 terminal state 재기록을 거부합니다. fixed continuation은 persisted `run_id`가
-    필수이며 caller가 보낸 state-only 결과는 완료로 인증하지 않습니다.
-  - `HANDOFF.md`는 프로젝트 루트 우선, 같은 Git 저장소의 가까운 상위 파일 차선으로 읽습니다. 갱신
-    prepare의 기본 대상은 현재 프로젝트 파일이며, apply는 prepare가 반환한 정확한 target과 전체 파일
-    SHA가 모두 맞을 때만 원자적으로 교체합니다.
-  - handoff 원문은 정책이나 검증된 fact가 아닌 quoted untrusted operational context로만 모델에
-    전달합니다. snapshot을 run 상태에 보관하고 내용 변경, 없음→생김, source 변경을 provider 호출 전에
-    drift로 감지합니다.
-  - `.git`, ignored 파일, 민감/skip 경로, symlink, hardlink, FIFO, 손상된 marker, caller가 위조한 내부
-    snapshot을 fail-closed합니다. temp 파일 작성 뒤에도 SHA와 inode metadata를 다시 확인해 비협조적
-    외부 편집을 덮어쓸 가능성을 줄였습니다.
-  - `agent_hub_get_handoff`, `agent_hub_prepare_handoff_update`,
-    `agent_hub_apply_handoff_update`를 추가해 공개 도구가 29개가 됐습니다. shared `handoff`·`takeover` skill과
-    adaptive skill, Ruler 정본, 생성 설정, README를 같은 계약으로 동기화했습니다.
+  - 공개 표면은 `agent_hub_*` 37개뿐이며 `provider="gpt"`가 status, models, chat, write,
+    compare, review, release, fixed/adaptive workflow를 기존 provider와 같은 registry로 통과합니다.
+  - 공식 Codex가 ChatGPT 로그인과 refresh를 계속 소유합니다. Agent Hub는 token, Keychain,
+    `auth.json`을 읽지 않고 격리된 `codex exec` 결과만 사용합니다.
+  - `agent_hub_status`는 네 provider 모두 credential을 갱신하지 않습니다. Claude·Grok은 저장된
+    만료 상태만 읽고, Gemini probe와 GPT account read도 refresh를 명시적으로 끕니다. token 갱신은
+    `agent_hub_auth_refresh`에서만 수행합니다.
+  - cancel은 active lease와 늦은 결과 commit을 막고, archive는 terminal run만 받으며, GC는
+    project·revision·전체 state SHA·파일 identity가 모두 맞을 때만 archived JSON을 삭제합니다.
+  - `HANDOFF.md` prepare/apply가 필수 9개 필드와 단일 구체 행동을 검사합니다. managed SHA가
+    그대로인 외부 편집만 안전하게 재준비하고 marker 밖 기록은 byte 단위로 보존합니다.
 - **미완**:
-  - Codex/Claude Code 플러그인을 실제 사용자 범위에 설치한 교차 앱 수동 smoke test는 하지 않았습니다.
-  - `./scripts/doctor.sh`는 5개 중 4개가 통과했지만 현재 PATH에 `uvx`가 없어 basic-memory 기동 검사만
-    실패했습니다. 사용자가 설치하지 말라고 정정했으므로 `uv`를 추가로 설치하지 않았습니다.
-  - 원격 push, release, deploy는 하지 않았습니다.
-- **주요 변경 파일**:
-  - 런타임: `src/agent_hub/core/handoff.py`, `src/agent_hub/core/repository_facts.py`,
-    `src/agent_hub/operations.py`, `src/agent_hub/orchestrator.py`
-  - 상태: `src/orchestrate_codex/store.py`, `src/orchestrate_codex/runner.py`,
-    `src/orchestrate_codex/mcp_server.py`, `src/orchestrate_codex/broker.py`
-  - 계약 테스트: `tests/agent_hub/test_handoff.py`,
-    `tests/agent_hub/test_adaptive_orchestration.py`, `tests/agent_hub/test_server.py`,
-    `tests/orchestrate_codex/test_core.py`와 관련 schema/plugin 테스트
-  - 문서·정본: `README.md`, `handoff/HANDOFF.template.md`, `instructions/.ruler/`,
-    `hubs/shared/skills/` 및 동기화된 Codex·Claude Code plugin/생성 파일
+  - 네 provider의 Agent Hub consent는 사용자의 명시적 동의가 필요한 상태라 꺼져 있습니다.
+  - Claude Code의 `agent-hub`·`memory` MCP는 새 interactive session에서 사용자 승인이 필요합니다.
+  - 실제 GPT generation, provider login/logout, release, deploy는 수행하지 않았습니다.
+- **변경 파일**: `src/openai_codex/`, `src/agent_hub/provider_registry.py`,
+  `src/agent_hub/core/run_lifecycle.py`, `src/agent_hub/core/handoff.py`,
+  `src/claude_codex/auth.py`, `src/grok_codex/auth.py`,
+  `src/google_antigravity_codex/antigravity_api.py`, `src/orchestrate_codex/store.py`,
+  `src/orchestrate_codex/runner.py`, `README.md`, `model-access/`, `hubs/`,
+  `instructions/.ruler/`와 관련 테스트를 갱신했습니다.
 - **검증 실행 결과**:
-  - `./.venv/bin/python -m pytest -q` → `390 passed, 11 skipped`
-  - `./.venv/bin/ruff check src tests` → 통과
-  - `./scripts/check-hub-plugins.sh`, `./scripts/check-sync.sh`, `./scripts/test-phase1.sh` → 통과
-  - README와 handoff template의 `document_quality` 및
-    `agent_hub_verify(user_facing=true)` → 경고 0건
-  - `./.venv/bin/python -m build` → sdist·wheel 생성 성공
-  - 실제 `agent-hub-mcp` console script의 `tools/list` → 공개 도구 29개와 handoff 도구 3개 확인
-  - 별도 읽기 전용 보안 재감사 → 남은 P1/P2 없음
-- **현재 위험**:
-  - fixed supervised provider 호출은 호스트 앱이 실행하므로 CAS가 stale 저장은 막아도 동시에 시작된
-    중복 provider 사용량 자체를 되돌리지는 못합니다.
-  - handoff apply는 temp 작성 후 두 번째 SHA/inode 검사를 하지만, advisory lock을 따르지 않는 편집기가
-    마지막 검사와 `replace` 사이에 쓰는 극히 좁은 경쟁창까지 파일시스템 수준에서 제거하지는 못합니다.
-  - provider 동시 실행 제한은 workflow 단위이며 여러 프로세스를 아우르는 전역 제한은 아닙니다.
-- **Do-Not-Repeat**:
-  - `HANDOFF.md`를 canonical policy나 현재 코드의 증거로 취급하지 마세요.
-  - fixed run을 전체 state만으로 재개하지 마세요. 항상 응답의 `run_id`와 `expected_revision`을 사용하세요.
-  - 사용자 승인 없이 Agent Hub·`uv`를 설치하거나 원격 push·release를 수행하지 마세요.
-- **기준**: 작업 시작 커밋은 `a06dcf9`이며, 이 기록과 검증된 변경은 같은 로컬 커밋에 포함합니다.
-- **다음 한 걸음**: 사용자가 설치를 다시 승인하면 `uvx`를 준비한 뒤 Codex에서 시작한 nested-project
-  handoff를 Claude Code에서 이어받는 실제 교차 앱 smoke test를 한 번 실행하세요.
+  - `PYTHONPATH=src ./.venv/bin/pytest -q` → `492 passed, 2 skipped`
+  - `./.venv/bin/ruff check .`, `git diff --check` → 통과
+  - `./scripts/check-hub-plugins.sh`, `./scripts/check-sync.sh`,
+    `./scripts/test-phase1.sh` → 통과
+  - release version 5개 필드 → 모두 `1.4.0`
+  - README·Hub README의 `agent_hub_verify(user_facing=true)` → 경고 0건
+  - `./.venv/bin/python -m build` → 1.4.0 sdist·wheel 생성 성공
+  - 설치된 MCP `tools/list` → 공개 도구 37개, 모두 `agent_hub_*`, 네 provider enum 확인
+  - 기본 doctor → `8 pass, 0 warn, 0 fail`; live GPT doctor → `9 pass, 0 warn, 0 fail`
+  - Codex·Claude Code plugin list → `agent-hub@agent-hub` 1.4.0 installed, enabled
+- **현재 리스크**: cancel은 늦은 결과 저장을 막지만 이미 시작된 provider 요청이나 사용량을 강제
+  회수하지 않습니다. 기본 compare는 의도적으로 Claude, Grok, Gemini만 사용하고 GPT는
+  `provider="all"`에서 참여합니다. 공식 Codex CLI 계약이 바뀌면 GPT adapter 재검증이 필요합니다.
+  설치 상태와 plugin cache는 Git 바깥의 machine-local 상태이므로 앱 재시작이나 업그레이드 뒤 doctor로
+  다시 확인해야 합니다.
+- **Do-Not-Repeat**: GPT용 별도 공개 MCP·플러그인을 만들지 마세요. Codex token이나 `auth.json`을
+  직접 읽지 말고, 사용자를 대신해 `--i-understand-and-consent`를 선언하거나 승인 없이
+  login/logout·release를 실행하지 마세요.
+- **다음 한 걸음**: `./.venv/bin/openai-codex-consent grant --i-understand-and-consent` 실행에
+  동의하는지 사용자에게 확인하세요.
 <!-- agent-hub:handoff:v1:end -->

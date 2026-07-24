@@ -182,3 +182,30 @@ def test_auth_prefers_subscription_when_token(monkeypatch, tmp_path):
     )
     ctx = auth.resolve_auth()
     assert ctx["mode"] == "subscription_oauth"
+
+
+def test_auth_status_never_resolves_or_refreshes_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(
+        auth.subscription_auth,
+        "status",
+        lambda: {
+            "logged_in": True,
+            "token_valid": False,
+            "mode": "subscription_oauth",
+            "source": "test",
+        },
+    )
+    monkeypatch.setattr(
+        auth,
+        "resolve_auth",
+        lambda: pytest.fail("status must not resolve or refresh credentials"),
+    )
+
+    state = auth.status()
+
+    assert state["credentials_present"] is True
+    assert state["configured"] is True
+    assert state["ready"] is False
+    assert state["active_mode"] is None
