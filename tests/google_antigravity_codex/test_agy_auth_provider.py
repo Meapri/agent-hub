@@ -221,6 +221,60 @@ def test_direct_transport_uses_token_in_memory_and_maps_default_model():
     assert "access-secret" not in json.dumps(payload)
 
 
+def test_dynamic_catalog_model_uses_internal_id_for_generation():
+    credentials = agy_auth.AgyCredentials(
+        access_token="access-secret",
+        expires_at_ms=4102444800000,
+        project_id="project-one",
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def fake_post(path, body, access_token, *, timeout):
+        del access_token, timeout
+        calls.append((path, body))
+        if path == "/v1internal:fetchAvailableModels":
+            return {
+                "models": {
+                    "gemini-3.6-flash-high": {
+                        "model": "MODEL_PLACEHOLDER_M71",
+                        "displayName": "Gemini 3.6 Flash (High)",
+                    }
+                }
+            }
+        return {"response": {"candidates": []}}
+
+    with (
+        patch.object(
+            antigravity_api,
+            "_MODEL_ALIAS_CACHE",
+            {},
+        ),
+        patch.object(
+            antigravity_api,
+            "_MODEL_ALIAS_CACHE_EXPIRES_AT",
+            0.0,
+        ),
+        patch.object(
+            antigravity_api.agy_auth,
+            "valid_credentials",
+            return_value=credentials,
+        ),
+        patch.object(antigravity_api, "_post", side_effect=fake_post),
+    ):
+        payload = antigravity_api.generate_content(
+            model="gemini-3.6-flash-high",
+            request={"contents": [{"parts": [{"text": "hello"}]}]},
+            max_retries=0,
+        )
+
+    assert [path for path, _body in calls] == [
+        "/v1internal:fetchAvailableModels",
+        "/v1internal:generateContent",
+    ]
+    assert calls[-1][1]["model"] == "MODEL_PLACEHOLDER_M71"
+    assert payload["_antigravity_diagnostics"]["used_model"] == "MODEL_PLACEHOLDER_M71"
+
+
 def test_direct_transport_capacity_fallback_to_next_model_tier():
     credentials = agy_auth.AgyCredentials(
         access_token="access-secret",
@@ -288,6 +342,103 @@ def test_direct_transport_refreshes_via_oauth_after_unauthorized():
 
     assert calls["n"] == 2
     assert payload["_antigravity_diagnostics"]["auth_refreshed"] is True
+
+
+def test_direct_transport_reresolves_dynamic_model_after_project_change():
+    stale = agy_auth.AgyCredentials(
+        access_token="stale-token",
+        refresh_token="refresh-secret",
+        expires_at_ms=4102444800000,
+        project_id="project-one",
+    )
+    fresh = agy_auth.AgyCredentials(
+        access_token="fresh-token",
+        refresh_token="refresh-secret",
+        expires_at_ms=4102444800000,
+        project_id="project-two",
+    )
+    current = {"credentials": stale}
+    generation_calls: list[tuple[str, str, str]] = []
+
+    def force_refresh():
+        current["credentials"] = fresh
+        return fresh
+
+    def fake_post(path, body, access_token, *, timeout):
+        del timeout
+        if path == "/v1internal:fetchAvailableModels":
+            internal = (
+                "MODEL_PROJECT_ONE"
+                if body["project"] == "project-one"
+                else "MODEL_PROJECT_TWO"
+            )
+            return {
+                "models": {
+                    "gemini-3.6-flash-high": {
+                        "model": internal,
+                        "displayName": "Gemini 3.6 Flash (High)",
+                    }
+                }
+            }
+        generation_calls.append(
+            (access_token, body["project"], body["model"])
+        )
+        if access_token == "stale-token":
+            raise antigravity_api.AntigravityApiError(
+                "unauthorized",
+                code="antigravity_unauthorized",
+                status_code=401,
+            )
+        return {"response": {"candidates": []}}
+
+    with (
+        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE", {}),
+        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_EXPIRES_AT", 0.0),
+        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_PROJECT", ""),
+        patch.object(
+            antigravity_api.agy_auth,
+            "valid_credentials",
+            side_effect=lambda **_kwargs: current["credentials"],
+        ),
+        patch.object(
+            antigravity_api.agy_auth,
+            "force_refresh_credentials",
+            side_effect=force_refresh,
+        ),
+        patch.object(antigravity_api, "_post", side_effect=fake_post),
+    ):
+        payload = antigravity_api.generate_content(
+            model="gemini-3.6-flash-high",
+            request={"contents": [{"parts": [{"text": "hello"}]}]},
+            max_retries=0,
+        )
+
+    assert generation_calls == [
+        ("stale-token", "project-one", "MODEL_PROJECT_ONE"),
+        ("fresh-token", "project-two", "MODEL_PROJECT_TWO"),
+    ]
+    assert payload["_antigravity_diagnostics"]["used_model"] == "MODEL_PROJECT_TWO"
+    assert payload["_antigravity_diagnostics"]["auth_refreshed"] is True
+
+
+def test_refresh_tool_uses_revision_fenced_force_refresh():
+    credentials = agy_auth.AgyCredentials(
+        access_token="fresh-token",
+        refresh_token="refresh-token",
+        expires_at_ms=4102444800000,
+        project_id="project-one",
+    )
+
+    with patch.object(
+        agy_auth,
+        "force_refresh_credentials",
+        return_value=credentials,
+    ) as refresh:
+        result = agy_auth.refresh_tool({})
+
+    refresh.assert_called_once_with()
+    assert result["success"] is True
+    assert result["access_token_present"] is True
 
 
 def test_http_error_does_not_include_request_body_or_token():

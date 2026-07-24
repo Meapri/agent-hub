@@ -7,12 +7,15 @@ from typing import Any, Dict, List
 from . import provider, response
 
 
-def _static_model_catalog() -> List[Dict[str, str]]:
+def static_model_catalog() -> List[Dict[str, str]]:
     # Curated catalog aligned with hermes-google-antigravity fallback_models
     # plus stable Gemini display aliases used by agy models.
     return [
         {"id": model_id, "source": "static"}
         for model_id in (
+            "gemini-3.6-flash-high",
+            "gemini-3.6-flash-medium",
+            "gemini-3.6-flash-low",
             "gemini-3.5-flash-high",
             "gemini-3.5-flash-medium",
             "gemini-3.5-flash-low",
@@ -65,7 +68,7 @@ def _provider_models() -> Dict[str, Any]:
 def list_models(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     if provider.configured():
         return _provider_models()
-    text_models = _static_model_catalog()
+    text_models = static_model_catalog()
     image_models: List[Dict[str, str]] = []
     return {
         "text": f"Listed {len(text_models)} text models and {len(image_models)} image models (static fallback).",

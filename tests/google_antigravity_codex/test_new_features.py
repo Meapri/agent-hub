@@ -43,8 +43,81 @@ def test_logout_removes_token_file(tmp_path, monkeypatch):
     ), patch.object(account.oauth_login, "pending_file_path", return_value=tmp_path / "pending.json"):
         result = account.logout({})
     assert result["success"] is True
+    assert result["failed_count"] == 0
     assert not token.exists()
     assert "secret" not in json.dumps(result)
+
+
+def test_logout_missing_credentials_is_idempotent(tmp_path, monkeypatch):
+    token = tmp_path / "missing-token.json"
+    pending = tmp_path / "missing-pending.json"
+    monkeypatch.setattr(account.agy_auth, "candidate_token_paths", lambda: [token])
+    monkeypatch.setattr(account.oauth_login, "pending_file_path", lambda: pending)
+    monkeypatch.setattr(account.paths, "config_dir", lambda: tmp_path)
+
+    result = account.logout({})
+
+    assert result["success"] is True
+    assert result["removed"] is False
+    assert result["removed_count"] == 0
+    assert result["failed_count"] == 0
+    assert str(tmp_path) not in json.dumps(result)
+
+
+def test_logout_permission_failure_is_not_success(tmp_path, monkeypatch):
+    token = tmp_path / "oauth-token.json"
+    token.write_text("token", encoding="utf-8")
+    pending = tmp_path / "missing-pending.json"
+    monkeypatch.setattr(account.agy_auth, "candidate_token_paths", lambda: [token])
+    monkeypatch.setattr(account.oauth_login, "pending_file_path", lambda: pending)
+    monkeypatch.setattr(account.paths, "config_dir", lambda: tmp_path)
+    original_unlink = account.Path.unlink
+
+    def fail_token(path, *args, **kwargs):
+        if path == token:
+            raise PermissionError("private path must not leak")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(account.Path, "unlink", fail_token)
+
+    result = account.logout({})
+
+    assert result["success"] is False
+    assert result["removed"] is False
+    assert result["failed_count"] == 1
+    assert result["error_type"] == "credential_removal_failed"
+    assert token.exists()
+    assert str(token) not in json.dumps(result)
+    assert "private path" not in json.dumps(result)
+
+
+def test_logout_partial_failure_is_incomplete(tmp_path, monkeypatch):
+    token = tmp_path / "oauth-token.json"
+    pending = tmp_path / "oauth-login-pending.json"
+    token.write_text("token", encoding="utf-8")
+    pending.write_text("pending", encoding="utf-8")
+    monkeypatch.setattr(account.agy_auth, "candidate_token_paths", lambda: [token])
+    monkeypatch.setattr(account.oauth_login, "pending_file_path", lambda: pending)
+    monkeypatch.setattr(account.paths, "config_dir", lambda: tmp_path)
+    original_unlink = account.Path.unlink
+
+    def fail_pending(path, *args, **kwargs):
+        if path == pending:
+            raise PermissionError("private path must not leak")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(account.Path, "unlink", fail_pending)
+
+    result = account.logout({})
+
+    assert result["success"] is False
+    assert result["removed"] is True
+    assert result["removed_count"] == 1
+    assert result["failed_count"] == 1
+    assert result["warnings"] == ["credential_removal_incomplete"]
+    assert not token.exists()
+    assert pending.exists()
+    assert str(pending) not in json.dumps(result)
 
 
 def test_whoami_without_token(tmp_path, monkeypatch):
@@ -55,6 +128,57 @@ def test_whoami_without_token(tmp_path, monkeypatch):
         result = account.whoami({})
     assert result["token_file_present"] is False
     assert result["success"] is False
+
+
+def test_whoami_is_read_only_and_never_refreshes_or_rewrites_token(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("GOOGLE_ANTIGRAVITY_USER_CONSENT", "1")
+    token = tmp_path / "oauth-token.json"
+    token.write_text(
+        json.dumps(
+            {
+                "access": "access",
+                "refresh": "refresh",
+                "expires": 9e12,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    token.chmod(0o600)
+    before = token.read_bytes()
+    refresh_flags = []
+
+    monkeypatch.setattr(account.agy_auth, "token_file_path", lambda: token)
+    monkeypatch.setattr(
+        account.agy_auth,
+        "valid_credentials",
+        lambda *, refresh: refresh_flags.append(refresh)
+        or account.agy_auth.AgyCredentials(
+            access_token="access",
+            refresh_token="refresh",
+            expires_at_ms=int(9e12),
+            project_id="project",
+        ),
+    )
+    monkeypatch.setattr(
+        account,
+        "_safe_get_json",
+        lambda *_args, **_kwargs: {
+            "email": "user@example.test",
+            "name": "User",
+            "email_verified": True,
+        },
+    )
+
+    result = account.whoami({})
+
+    assert result["success"] is True
+    assert refresh_flags == [False]
+    assert token.read_bytes() == before
 
 
 def test_compare_models_two_paths(tmp_path, monkeypatch):

@@ -150,6 +150,53 @@ def test_api_key_login_is_not_treated_as_subscription(monkeypatch):
     assert result["warning"] == "codex_api_key_mode_not_subscription"
 
 
+def test_auth_status_falls_back_to_official_cli(monkeypatch):
+    def fail_app_server(*_args, **_kwargs):
+        raise RuntimeError("state database unavailable")
+
+    monkeypatch.setattr(client, "app_server_request", fail_app_server)
+    monkeypatch.setattr(client, "codex_binary", lambda: "/test/codex")
+    monkeypatch.setattr(
+        client,
+        "run_bounded",
+        lambda argv, **_kwargs: (
+            "Logged in using ChatGPT\n",
+            "",
+            0,
+        ),
+    )
+
+    result = auth.status()
+
+    assert result["configured"] is True
+    assert result["logged_in"] is True
+    assert result["auth_mode"] == "chatgpt"
+    assert result["status_source"] == "codex_cli"
+    assert result["status_warning"] == "codex_app_server_unavailable"
+
+
+def test_auth_status_does_not_treat_not_logged_in_cli_output_as_login(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "app_server_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("state database unavailable")
+        ),
+    )
+    monkeypatch.setattr(client, "codex_binary", lambda: "/test/codex")
+    monkeypatch.setattr(
+        client,
+        "run_bounded",
+        lambda *_args, **_kwargs: ("Not logged in\n", "", 0),
+    )
+
+    result = auth.status()
+
+    assert result["configured"] is False
+    assert result["logged_in"] is False
+    assert result["auth_mode"] is None
+
+
 def test_model_list_uses_official_catalog_and_no_curated_synthetic(monkeypatch):
     monkeypatch.setattr(models.security, "require_consent", lambda: None)
     monkeypatch.setattr(models.auth, "require_subscription", lambda **_kwargs: {})
@@ -176,6 +223,38 @@ def test_model_list_uses_official_catalog_and_no_curated_synthetic(monkeypatch):
     assert result["default_model"] == "gpt-current"
     assert [item["id"] for item in result["models"]] == ["gpt-current"]
     assert result["models"][0]["source"] == "codex-app-server"
+
+
+def test_model_list_follows_bounded_catalog_pagination(monkeypatch):
+    monkeypatch.setattr(models.security, "require_consent", lambda: None)
+    monkeypatch.setattr(models.auth, "require_subscription", lambda **_kwargs: {})
+    calls = []
+
+    def list_page(_method, params, **_kwargs):
+        calls.append(dict(params))
+        if not params.get("cursor"):
+            return {
+                "data": [{"model": "gpt-page-1"}],
+                "nextCursor": "page-2",
+            }
+        return {
+            "data": [{"model": "gpt-page-2"}],
+            "nextCursor": None,
+        }
+
+    monkeypatch.setattr(models.client, "app_server_request", list_page)
+
+    result = models.list_models()
+
+    assert [item["id"] for item in result["models"]] == [
+        "gpt-page-1",
+        "gpt-page-2",
+    ]
+    assert calls == [
+        {"includeHidden": False, "limit": 100},
+        {"includeHidden": False, "limit": 100, "cursor": "page-2"},
+    ]
+    assert "model_catalog_truncated" not in result["warnings"]
 
 
 def test_model_list_can_include_hidden_catalog_entries(monkeypatch):

@@ -24,10 +24,37 @@ def test_local_consent_file_grant_and_revoke(tmp_path, monkeypatch):
     assert security.cli_bridge_enabled() is True
     assert security.agy_session_enabled() is True
     assert security.consent_status()["consent_source"] == "user-consent.json"
+    before = path.read_bytes()
+    revision = security.consent_revision()
+    assert consent_cli.grant() == path
+    assert path.read_bytes() == before
+    assert security.consent_revision() == revision
 
     assert consent_cli.revoke() == path
     assert path.exists() is False
     assert security.user_consent_enabled() is False
+
+
+@pytest.mark.parametrize("invalid_version", ["oops", "1", True, 1.9])
+def test_invalid_consent_version_is_disabled_and_regrant_repairs(
+    tmp_path,
+    monkeypatch,
+    invalid_version,
+):
+    path = tmp_path / "consent.json"
+    monkeypatch.setenv("GOOGLE_ANTIGRAVITY_CONSENT_FILE", str(path))
+    monkeypatch.delenv("GOOGLE_ANTIGRAVITY_USER_CONSENT", raising=False)
+    path.write_text(
+        json.dumps({"accepted": True, "version": invalid_version}),
+        encoding="utf-8",
+    )
+
+    assert security.user_consent_enabled() is False
+
+    consent_cli.grant()
+
+    assert security.user_consent_enabled() is True
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS filesystem mode hardening")

@@ -46,6 +46,27 @@ Codex, Claude Code, Cursor, Gemini와 공통 MCP 설정의 변경 계획을 먼�
 네 provider를 한꺼번에 연결할 필요는 없습니다. 처음에는 자주 쓰는 모델 하나만 설정해도 됩니다. 각 연결은
 로컬 사용 동의를 받은 뒤 로그인하도록 되어 있습니다.
 
+터미널 명령 대신 연결 관리 화면에서 네 provider의 동의, 로그인, 연결 테스트와 해제를 한곳에서 처리할 수
+있습니다.
+
+```bash
+./.venv/bin/agent-hub-connect
+```
+
+연결 관리 서버는 `127.0.0.1`에만 열리고, 실행할 때 만든 난수 세션을 브라우저 탭의 `sessionStorage`와
+요청 header로 확인합니다. OAuth token은 화면으로 전달하지 않으며, Claude와 GPT 로그인은 각각
+Claude Code와 공식 Codex가 계속 관리합니다. Grok과 Gemini는 Agent Hub가 저장한 로컬 로그인 정보만
+별도의 확인 뒤 삭제할 수 있습니다.
+
+같은 화면에서 provider별 **Agent Hub 기본 텍스트 모델**도 선택할 수 있습니다. 로그인 전에는 로컬 안전
+목록을 보여 주고, 연결된 provider는 첫 조회부터 현재 계정의 최신 모델 목록을 가져옵니다. live 조회가
+일시적으로 실패하면 이유와 함께 로컬 목록으로 되돌아갑니다. 저장한 모델은 기본 대화와 문서 작업에
+사용되며, 특정 작업에서 모델을 직접 지정하면 그 값이 우선합니다. 기본값으로 복원해도 온도나 출력 길이
+같은 다른 provider 설정은 유지됩니다. 실행 중인 adaptive workflow는 시작할 때 선택된 네 provider
+모델을 함께 저장하므로, 화면에서 기본 모델을 바꿔도 이미 진행 중인 작업은 같은 모델로 이어집니다.
+
+아래 명령은 GUI를 사용할 수 없는 환경을 위한 수동 방법입니다.
+
 ```bash
 ./.venv/bin/claude-codex-consent grant --i-understand-and-consent
 ./.venv/bin/grok-codex-consent grant --i-understand-and-consent
@@ -218,7 +239,8 @@ Gemini 세 번을 사용하고, `provider=all`이면 GPT까지 네 번을 사용
 workflow 계획에서 쓰는 `reasoning_effort`의 공통 값은 `low`, `medium`, `high`입니다.
 `agent_hub_chat`이나 `agent_hub_write`로 GPT를 직접 부를 때는 `xhigh`, `max`, `ultra`도 사용할 수
 있습니다. 서버는 값을 각 서비스가 이해하는 요청 형식으로 바꾸며, 선택한 provider나 모델이 해당 설정을
-지원하지 않으면 조용히 무시하지 않고 오류를 반환합니다.
+지원하지 않으면 조용히 무시하지 않습니다. 사용자가 직접 지정한 값은 오류를 반환하고, workflow가 자동으로
+고른 값만 해당 모델에서 사용할 수 없을 때 경고와 함께 생략합니다.
 
 ## 공개 도구 37개
 
@@ -227,7 +249,7 @@ workflow 계획에서 쓰는 `reasoning_effort`의 공통 값은 `low`, `medium`
 | 구분 | 도구 |
 |---|---|
 | 상태 확인 | `agent_hub_status`, `agent_hub_list_models` |
-| 로그인 | `agent_hub_auth_start`, `agent_hub_auth_complete`, `agent_hub_auth_refresh`, `agent_hub_auth_logout` |
+| 연결 관리 안내 | `agent_hub_auth_start`, `agent_hub_auth_complete`, `agent_hub_auth_refresh`, `agent_hub_auth_logout` |
 | 대화와 생성 | `agent_hub_chat`, `agent_hub_search`, `agent_hub_write`, `agent_hub_generate_image` |
 | 검토와 릴리스 | `agent_hub_compare_models`, `agent_hub_review_diff`, `agent_hub_release_snapshot`, `agent_hub_release_draft` |
 | 설정 | `agent_hub_get_settings`, `agent_hub_update_settings`, `agent_hub_reset_settings` |
@@ -238,6 +260,10 @@ workflow 계획에서 쓰는 `reasoning_effort`의 공통 값은 `low`, `medium`
 
 `agent_hub_release_snapshot`과 `agent_hub_verify`는 모델을 부르지 않고 로컬에서 처리합니다. 이처럼 외부
 호출이 필요한 일과 그렇지 않은 일을 구분해 두어서 사용량과 실패 지점을 확인하기 쉽습니다.
+`agent_hub_auth_*` 도구는 OAuth code나 token을 MCP로 받지 않고 `agent-hub-connect` 실행 경로만
+안내합니다. 실제 동의, 로그인, 다시 로그인과 로컬 로그인 정보 삭제는 연결 관리 화면에서 사용자가 직접
+확인해야 합니다. 별도로 실행한 Grok·Google provider MCP의 인증 변경 도구도 같은 화면만 안내합니다.
+브라우저를 열 수 없는 환경에서는 위의 consent·login 스크립트를 사용자가 터미널에서 직접 실행하세요.
 
 ## 문서를 쓸 때 지키는 것
 

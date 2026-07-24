@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "1.4.0"
+version = "1.4.2"
 description = "Unified personal multi-model coding hub: instruction consistency, cross-harness handoff, shared memory, and the orchestrate-codex conductor + provider leaf model-access stack in one project."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,10 +20,14 @@ dev = ["build>=1.2", "pytest>=8", "pytest-cov>=5", "ruff>=0.12"]
 agent-hub-mcp = "agent_hub.server:serve"
 agent-hub-setup = "agent_hub.local_setup:main"
 agent-hub-doctor = "agent_hub.doctor:main"
+agent-hub-connect = "agent_hub.connect_app:main"
 claude-codex-consent = "claude_codex.consent_cli:main"
 grok-codex-consent = "grok_codex.consent_cli:main"
 google-antigravity-consent = "google_antigravity_codex.consent_cli:main"
 openai-codex-consent = "openai_codex.consent_cli:main"
+
+[tool.setuptools.package-data]
+agent_hub = ["connect_ui/*.html", "connect_ui/*.css", "connect_ui/*.js"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

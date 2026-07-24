@@ -62,6 +62,64 @@ def test_public_schemas_expose_real_provider_capabilities():
     ]["default"] == 1
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "supported"),
+    [
+        ("claude", "claude-haiku-4-5-20251001", False),
+        ("claude", "claude-sonnet-5", True),
+        ("grok", "grok-4.3", False),
+        ("grok", "grok-4.5", True),
+        ("gemini", "claude-sonnet-4-6-thinking", False),
+        ("gemini", "gemini-3.5-flash-high", True),
+        ("gpt", "gpt-5.6-sol", True),
+    ],
+)
+def test_reasoning_effort_support_uses_adapter_model_truth(provider, model, supported):
+    assert capabilities.supports_reasoning_effort(provider, model) is supported
+
+
+def test_chat_raw_omits_only_implicit_effort_for_saved_unsupported_model(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        operations.provider_settings,
+        "get",
+        lambda provider: {"model": "claude-haiku-4-5-20251001"}
+        if provider == "claude"
+        else {},
+    )
+    monkeypatch.setattr(
+        operations.consistency_gate,
+        "prepare_provider_call",
+        lambda args: (args, {}),
+    )
+    monkeypatch.setattr(
+        operations.claude_mcp,
+        "dispatch_tool",
+        lambda _name, arguments: calls.append(dict(arguments))
+        or {"success": True, "text": "ok", "warnings": []},
+    )
+
+    automatic = operations._chat_raw(
+        "claude",
+        {
+            "prompt": "automatic",
+            "reasoning_effort": "high",
+            "_reasoning_effort_implicit": True,
+        },
+    )
+    operations._chat_raw(
+        "claude",
+        {"prompt": "explicit", "reasoning_effort": "high"},
+    )
+
+    assert "reasoning_effort" not in calls[0]
+    assert calls[1]["reasoning_effort"] == "high"
+    assert automatic["warnings"] == [
+        "automatic_reasoning_effort_omitted:claude:claude-haiku-4-5-20251001"
+    ]
+
+
 def test_write_routes_common_prompt_to_claude(monkeypatch):
     seen = {}
 
@@ -289,6 +347,35 @@ def test_explicit_all_compare_includes_opt_in_gpt(monkeypatch):
     assert [item["provider"] for item in result["data"]["results"]] == called
 
 
+def test_compare_surfaces_participant_model_compatibility_warnings(monkeypatch):
+    def fake_chat(provider, _arguments):
+        return {
+            "success": True,
+            "text": provider,
+            "model": f"{provider}-test",
+            "warnings": (
+                ["automatic_reasoning_effort_omitted:claude:claude-haiku-test"]
+                if provider == "claude"
+                else []
+            ),
+        }
+
+    monkeypatch.setattr(operations, "_chat_raw", fake_chat)
+    result = operations.dispatch_tool(
+        "agent_hub_compare_models",
+        {
+            "providers": ["claude", "grok"],
+            "prompt": "compare",
+            "min_successes": 2,
+        },
+    )
+
+    assert (
+        "automatic_reasoning_effort_omitted:claude:claude-haiku-test"
+        in result["warnings"]
+    )
+
+
 def test_gpt_aliases_and_model_routing_are_canonical():
     assert provider_registry.normalize("codex") == "gpt"
     assert provider_registry.normalize("chatgpt") == "gpt"
@@ -321,7 +408,7 @@ def test_gpt_chat_uses_canonical_agent_hub_envelope(monkeypatch):
     assert result["data"]["provider"] == "gpt"
 
 
-def test_gpt_status_models_and_auth_use_canonical_hub_envelopes(monkeypatch):
+def test_gpt_status_models_and_gui_auth_guidance_use_canonical_envelopes(monkeypatch):
     status_refresh_args = []
 
     def fake_status(*, refresh=False):
@@ -371,24 +458,19 @@ def test_gpt_status_models_and_auth_use_canonical_hub_envelopes(monkeypatch):
     )
     assert models["data"]["models"]["gpt"]["provider"] == "gpt"
 
-    monkeypatch.setattr(
-        operations.openai_auth,
-        "login_action",
-        lambda *, device=False: {
-            "success": True,
-            "text": "Run official Codex login.",
-            "next_action": {
-                "type": "external_cli",
-                "command": "codex login --device-auth" if device else "codex login",
-            },
-        },
-    )
     auth = operations.dispatch_tool(
         "agent_hub_auth_start",
-        {"provider": "gpt", "device": True},
+        {"provider": "gpt"},
     )
+    assert auth["success"] is False
+    assert auth["data"]["error"] == "provider_gui_required"
     assert auth["provider"] == "gpt"
-    assert auth["data"]["next_action"]["command"] == "codex login --device-auth"
+    next_action = auth["data"]["next_action"]
+    assert next_action["type"] == "local_gui"
+    assert next_action["provider"] == "gpt"
+    assert next_action["args"] == []
+    assert Path(next_action["command"]).is_absolute()
+    assert Path(next_action["command"]).name == "agent-hub-connect"
 
     logout = operations.dispatch_tool(
         "agent_hub_auth_logout",
@@ -396,13 +478,50 @@ def test_gpt_status_models_and_auth_use_canonical_hub_envelopes(monkeypatch):
     )
     assert logout["success"] is False
     assert logout["provider"] == "gpt"
-    assert logout["data"]["error"] == "shared_codex_logout_refused"
+    assert logout["data"]["error"] == "provider_gui_required"
+    assert "token" not in str(logout).lower()
 
 
 def test_private_gpt_leaf_is_inprocess_only_not_a_public_hub_tool():
     assert make_resolver()("openai_codex_chat") is not None
     with pytest.raises(ValueError, match="unknown canonical tool"):
         operations.dispatch_tool("openai_codex_chat", {"prompt": "question"})
+
+
+def test_public_auth_tools_are_read_only_gui_guidance():
+    auth_tools = [
+        item
+        for item in operations.tool_definitions()
+        if item["name"].startswith("agent_hub_auth_")
+    ]
+
+    assert len(auth_tools) == 4
+    for item in auth_tools:
+        assert item["inputSchema"]["required"] == ["provider"]
+        assert item["annotations"]["readOnlyHint"] is True
+        assert item["annotations"]["destructiveHint"] is False
+        assert item["annotations"]["idempotentHint"] is True
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "agent_hub_auth_start",
+        "agent_hub_auth_complete",
+        "agent_hub_auth_refresh",
+        "agent_hub_auth_logout",
+    ],
+)
+def test_public_auth_tools_never_report_gui_guidance_as_success(tool):
+    result = operations.dispatch_tool(tool, {"provider": "gpt"})
+
+    assert result["success"] is False
+    assert result["error"]["type"] == "provider_gui_required"
+    assert result["data"]["error"] == "provider_gui_required"
+    next_action = result["data"]["next_action"]
+    assert Path(next_action["command"]).is_absolute()
+    assert Path(next_action["command"]).name == "agent-hub-connect"
+    assert next_action["args"] == []
 
 
 def test_fixed_workflow_provider_maps_to_private_gpt_binding(tmp_path, monkeypatch):
@@ -473,22 +592,267 @@ def test_provider_settings_are_persistent_and_scoped(tmp_path, monkeypatch):
     }
     loaded = operations.dispatch_tool("agent_hub_get_settings", {"provider": "grok"})
     assert loaded["data"]["providers"]["grok"]["overrides"]["api_mode"] == "responses"
+    operations.dispatch_tool(
+        "agent_hub_reset_settings",
+        {"provider": "grok", "reset": "model"},
+    )
+    assert provider_settings.get("grok") == {"api_mode": "responses"}
     operations.dispatch_tool("agent_hub_reset_settings", {"provider": "grok"})
     assert provider_settings.get("grok") == {}
+
+
+def test_all_provider_model_reset_preserves_non_model_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path / "agent-hub"))
+    monkeypatch.setenv(
+        "GOOGLE_ANTIGRAVITY_CONFIG_DIR",
+        str(tmp_path / "google"),
+    )
+    provider_settings.update(
+        "claude",
+        {"model": "claude-sonnet-5", "temperature": 0.2},
+    )
+    provider_settings.update(
+        "grok",
+        {"model": "grok-4.5", "api_mode": "responses"},
+    )
+    provider_settings.update("gpt", {"model": "gpt-5.6-sol"})
+    operations.google_model_prefs.set_model(
+        model="gemini-3.1-pro-high",
+        task="chat",
+        validate=False,
+    )
+
+    reset = operations.dispatch_tool(
+        "agent_hub_reset_settings",
+        {"provider": "all", "reset": "model", "task": "chat"},
+    )
+
+    assert reset["success"] is True
+    assert provider_settings.get("claude") == {"temperature": 0.2}
+    assert provider_settings.get("grok") == {"api_mode": "responses"}
+    assert provider_settings.get("gpt") == {}
+    assert "chat" not in operations.google_model_prefs.load_prefs()["task_models"]
+
+
+def test_gemini_model_reset_without_task_clears_web_and_global_defaults(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "GOOGLE_ANTIGRAVITY_CONFIG_DIR",
+        str(tmp_path / "google"),
+    )
+    operations.google_model_prefs.set_model(
+        model="gemini-3.1-pro-high",
+        validate=False,
+    )
+    operations.google_model_prefs.set_model(
+        model="gemini-3.5-flash-high",
+        task="chat",
+        validate=False,
+    )
+    operations.google_model_prefs.set_model(
+        model="claude-opus-4-6-thinking",
+        task="code",
+        validate=False,
+    )
+
+    reset = operations.dispatch_tool(
+        "agent_hub_reset_settings",
+        {"provider": "gemini", "reset": "model"},
+    )
+
+    assert reset["success"] is True
+    prefs = operations.google_model_prefs.load_prefs()
+    assert prefs["default_model"] == ""
+    assert prefs["task_models"] == {"code": "claude-opus-4-6-thinking"}
+
+
+def test_settings_validation_is_exact_and_text_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path))
+
+    image = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"provider": "grok", "model": "grok-imagine-image"},
+    )
+    unknown = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"provider": "gpt", "model": "gpt-made-up"},
+    )
+
+    assert image["success"] is False
+    assert unknown["success"] is False
+    assert provider_settings.get("grok") == {}
+    assert provider_settings.get("gpt") == {}
+
+    unchecked = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"provider": "gpt", "model": "gpt-provider-preview", "validate": False},
+    )
+    assert unchecked["success"] is True
+    assert provider_settings.get("gpt") == {"model": "gpt-provider-preview"}
+
+
+def test_gemini_status_and_fixed_default_share_profile_precedence(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "GOOGLE_ANTIGRAVITY_CONFIG_DIR",
+        str(tmp_path / "google"),
+    )
+    operations.google_model_prefs.set_model(
+        model="gemini-3.5-flash-high",
+        task="chat",
+        validate=False,
+    )
+    operations.google_profiles.use_profile_tool(
+        {
+            "name": "coding",
+            "apply_model_pref": False,
+            "apply_provider": False,
+        }
+    )
+
+    saved = operations._gemini_model_state()
+    assert saved["default_model"] == "gemini-3.5-flash-high"
+    assert saved["model_source"] == "saved_chat"
+
+    operations.google_model_prefs.clear_prefs(default_scopes=True)
+    profile = operations._gemini_model_state()
+    assert profile["default_model"] == "gemini-3.1-pro-high"
+    assert profile["model_source"] == "profile"
+    assert profile["model_override_scope"] == "profile:coding"
+
+
+def test_non_gemini_transport_reset_is_rejected_without_deleting_settings(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path))
+    provider_settings.update(
+        "grok",
+        {"model": "grok-4.5", "api_mode": "responses"},
+    )
+
+    reset = operations.dispatch_tool(
+        "agent_hub_reset_settings",
+        {"provider": "grok", "reset": "transport"},
+    )
+
+    assert reset["success"] is False
+    assert provider_settings.get("grok") == {
+        "model": "grok-4.5",
+        "api_mode": "responses",
+    }
+
+
+def test_saved_model_precedence_and_source_are_explicit(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CODEX_MODEL", "claude-env")
+    provider_settings.update("claude", {"model": "claude-saved"})
+
+    saved = operations._provider_model_state(
+        "claude",
+        fallback="claude-default",
+        environment_name="CLAUDE_CODEX_MODEL",
+    )
+    assert saved["default_model"] == "claude-saved"
+    assert saved["model_source"] == "saved"
+    assert saved["model_managed_by_environment"] is False
+
+    provider_settings.remove("claude", {"model"})
+    environment = operations._provider_model_state(
+        "claude",
+        fallback="claude-default",
+        environment_name="CLAUDE_CODEX_MODEL",
+    )
+    assert environment["default_model"] == "claude-env"
+    assert environment["model_source"] == "environment"
+    assert environment["model_managed_by_environment"] is True
+
+
+def test_saved_model_is_injected_into_delegate_and_fixed_workflow(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path / "config"))
+    provider_settings.update("claude", {"model": "claude-fable-5"})
+
+    delegated = operations.dispatch_tool(
+        "agent_hub_delegate",
+        {
+            "capability": "chat",
+            "instruction": "hello",
+            "leaf": "claude_codex_chat",
+            "project_root": str(tmp_path),
+        },
+    )
+    assert delegated["data"]["arguments"]["model"] == "claude-fable-5"
+
+    captured = {}
+
+    def fake_run_auto(_recipe_id, **kwargs):
+        captured.update(kwargs)
+        return {"success": True, "artifact": "done"}
+
+    monkeypatch.setattr(operations.broker, "run_auto", fake_run_auto)
+    result = operations.dispatch_tool(
+        "agent_hub_run_workflow",
+        {
+            "workflow_id": "repo_document",
+            "preset": "proposal",
+            "provider": "claude",
+            "prompt": "question",
+            "project_root": str(tmp_path),
+        },
+    )
+
+    assert result["success"] is True
+    assert captured["args"]["_provider_models"]["claude"] == "claude-fable-5"
+
+
+def test_saved_text_model_is_not_injected_into_image_delegate(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "GOOGLE_ANTIGRAVITY_CONFIG_DIR",
+        str(tmp_path / "google"),
+    )
+    operations.google_model_prefs.set_model(
+        model="gemini-3.5-flash-high",
+        task="chat",
+        validate=False,
+    )
+
+    delegated = operations.dispatch_tool(
+        "agent_hub_delegate",
+        {
+            "capability": "image",
+            "instruction": "make an image",
+            "leaf": "google_antigravity_generate_image",
+            "project_root": str(tmp_path),
+        },
+    )
+
+    assert "model" not in delegated["data"]["arguments"]
 
 
 def test_gpt_settings_aliases_use_the_canonical_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path))
     updated = operations.dispatch_tool(
         "agent_hub_update_settings",
-        {"provider": "chatgpt", "model": "gpt-test"},
+        {"provider": "chatgpt", "model": "gpt-test", "validate": False},
     )
     assert updated["provider"] == "gpt"
     assert provider_settings.get("gpt") == {"model": "gpt-test"}
 
     refused = operations.dispatch_tool(
         "agent_hub_update_settings",
-        {"provider": "gpt", "model": "gpt-test", "temperature": 0.2},
+        {
+            "provider": "gpt",
+            "model": "gpt-test",
+            "temperature": 0.2,
+            "validate": False,
+        },
     )
     assert refused["success"] is False
     assert refused["text"] == "unsupported gpt settings: temperature"

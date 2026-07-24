@@ -1,6 +1,6 @@
 {
   "name": "agent-hub",
-  "version": "1.4.0",
+  "version": "1.4.2",
   "description": "Use one Agent Hub MCP for LLM-planned adaptive workflows, cross-model consistency, shared memory, and Git-artifact handoff in Codex.",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",

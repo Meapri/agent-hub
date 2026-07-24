@@ -67,3 +67,86 @@ def test_generate_content_stream_yields_chunks_and_diagnostics():
         )
     assert events[0]["response"]["candidates"][0]["content"]["parts"][0]["text"] == "S"
     assert events[-1]["_antigravity_diagnostics"]["streamed"] is True
+
+
+def test_stream_refresh_reresolves_dynamic_model_after_project_change():
+    stale = agy_auth.AgyCredentials(
+        access_token="stale-token",
+        refresh_token="refresh-secret",
+        expires_at_ms=4102444800000,
+        project_id="project-one",
+    )
+    fresh = agy_auth.AgyCredentials(
+        access_token="fresh-token",
+        refresh_token="refresh-secret",
+        expires_at_ms=4102444800000,
+        project_id="project-two",
+    )
+    current = {"credentials": stale}
+    stream_calls: list[tuple[str, str, str]] = []
+
+    def force_refresh():
+        current["credentials"] = fresh
+        return fresh
+
+    def fake_catalog(path, body, access_token, *, timeout):
+        del access_token, timeout
+        assert path == "/v1internal:fetchAvailableModels"
+        internal = (
+            "MODEL_PROJECT_ONE"
+            if body["project"] == "project-one"
+            else "MODEL_PROJECT_TWO"
+        )
+        return {
+            "models": {
+                "gemini-3.6-flash-high": {
+                    "model": internal,
+                    "displayName": "Gemini 3.6 Flash (High)",
+                }
+            }
+        }
+
+    def fake_stream(path, body, access_token, *, timeout):
+        del path, timeout
+        stream_calls.append(
+            (access_token, body["project"], body["model"])
+        )
+        if access_token == "stale-token":
+            raise antigravity_api.AntigravityApiError(
+                "unauthorized",
+                code="antigravity_unauthorized",
+                status_code=401,
+            )
+        yield {"response": {"candidates": []}}
+
+    with (
+        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE", {}),
+        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_EXPIRES_AT", 0.0),
+        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_PROJECT", ""),
+        patch.object(
+            antigravity_api.agy_auth,
+            "valid_credentials",
+            side_effect=lambda **_kwargs: current["credentials"],
+        ),
+        patch.object(
+            antigravity_api.agy_auth,
+            "force_refresh_credentials",
+            side_effect=force_refresh,
+        ),
+        patch.object(antigravity_api, "_post", side_effect=fake_catalog),
+        patch.object(antigravity_api, "_stream_post", side_effect=fake_stream),
+    ):
+        events = list(
+            antigravity_api.generate_content_stream(
+                model="gemini-3.6-flash-high",
+                request={"contents": [{"parts": [{"text": "hello"}]}]},
+            )
+        )
+
+    assert stream_calls == [
+        ("stale-token", "project-one", "MODEL_PROJECT_ONE"),
+        ("fresh-token", "project-two", "MODEL_PROJECT_TWO"),
+    ]
+    diagnostics = events[-1]["_antigravity_diagnostics"]
+    assert diagnostics["used_model"] == "MODEL_PROJECT_TWO"
+    assert diagnostics["auth_refreshed"] is True

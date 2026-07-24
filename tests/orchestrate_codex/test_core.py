@@ -135,6 +135,17 @@ def test_catalog_latest_for():
     assert catalog.latest_for("unknown") is None
 
 
+def test_antigravity_keeps_explicit_cross_family_catalog_model():
+    assert (
+        runner._resolve_model_for_tool(  # noqa: SLF001 - provider contract boundary
+            "google_antigravity_chat",
+            "claude-opus-4-6-thinking",
+            provider_models={"gemini": "gemini-3.5-flash-high"},
+        )
+        == "claude-opus-4-6-thinking"
+    )
+
+
 def test_ok_text_is_full_json_even_when_payload_has_text(tmp_path):
     # Regression: verify's payload carries its own "text" ("verify ok"); it must NOT clobber
     # the canonical JSON serialization that the stdio content[] and handoff depend on.
@@ -2296,3 +2307,95 @@ def test_continue_success_completes_direct(tmp_path):
     )
     assert state2["done"] is True
     assert state2["status"] == "completed"
+
+
+def test_fixed_step_omits_only_automatic_effort_for_unsupported_model(tmp_path):
+    step = {
+        "id": "analyze",
+        "capability": "chat",
+        "instruction": "Analyze.",
+        "reasoning_effort": "high",
+    }
+    args = runner._args_for_tool(
+        step,
+        "claude_codex_chat",
+        user_args={
+            "instruction": "Analyze.",
+            "project_root": str(tmp_path),
+            "_provider_models": {"claude": "claude-haiku-4-5-20251001"},
+        },
+        pol=policy.get_policy("direct"),
+        artifacts={},
+    )
+
+    assert "reasoning_effort" not in args
+    assert args["model"] == "claude-haiku-4-5-20251001"
+    assert step["warnings"] == [
+        "automatic_reasoning_effort_omitted:claude:claude-haiku-4-5-20251001"
+    ]
+
+
+def test_fixed_step_preserves_explicit_effort_for_unsupported_model(tmp_path):
+    step = {
+        "id": "analyze",
+        "capability": "chat",
+        "instruction": "Analyze.",
+        "reasoning_effort": "medium",
+    }
+    args = runner._args_for_tool(
+        step,
+        "claude_codex_chat",
+        user_args={
+            "instruction": "Analyze.",
+            "project_root": str(tmp_path),
+            "reasoning_effort": "high",
+            "_provider_models": {"claude": "claude-haiku-4-5-20251001"},
+        },
+        pol=policy.get_policy("direct"),
+        artifacts={},
+    )
+
+    assert args["reasoning_effort"] == "high"
+    assert "warnings" not in step
+
+
+def test_deep_readme_real_path_omits_automatic_effort_for_saved_haiku(tmp_path):
+    state = runner.start_run(
+        "deep_readme",
+        args={
+            "prompt": "Write the README.",
+            "_provider_models": {"claude": "claude-haiku-4-5-20251001"},
+        },
+        project_root=str(tmp_path),
+    )
+
+    action = state["next_action"]
+    assert action["tool"] == "claude_codex_chat"
+    assert action["arguments"]["model"] == "claude-haiku-4-5-20251001"
+    assert "reasoning_effort" not in action["arguments"]
+    assert action["warnings"] == [
+        "automatic_reasoning_effort_omitted:claude:claude-haiku-4-5-20251001"
+    ]
+
+
+def test_deep_readme_real_path_preserves_explicit_effort_for_saved_haiku(tmp_path):
+    state = runner.start_run(
+        "deep_readme",
+        args={
+            "prompt": "Write the README.",
+            "reasoning_effort": "high",
+            "_provider_models": {"claude": "claude-haiku-4-5-20251001"},
+        },
+        project_root=str(tmp_path),
+    )
+
+    assert state["next_action"]["arguments"]["reasoning_effort"] == "high"
+
+
+def test_recipe_plan_preserves_automatic_reasoning_effort():
+    plan = recipes.plan_recipe("deep_readme")
+    by_id = {step["id"]: step for step in plan["steps"]}
+
+    assert by_id["investigate_arch"]["reasoning_effort"] == "high"
+    assert by_id["investigate_usage"]["reasoning_effort"] == "high"
+    assert by_id["draft"]["reasoning_effort"] == "high"

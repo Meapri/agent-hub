@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
@@ -438,20 +440,20 @@ TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     "google_antigravity_agy_auth_refresh": {
-        "title": "Refresh Plugin OAuth Token",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "title": "Open Login Manager to Refresh",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     "google_antigravity_login_status": {
         "title": "Check Direct Antigravity Login",
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     "google_antigravity_login_start": {
-        "title": "Start Antigravity Google Login",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "title": "Open Antigravity Login Manager",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     "google_antigravity_login_complete": {
-        "title": "Complete Antigravity Google Login",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "title": "Complete Login in Manager",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     "google_antigravity_chat": {
         "title": "Chat with Antigravity",
@@ -522,8 +524,8 @@ TOOL_METADATA: Dict[str, Dict[str, Any]] = {
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
     },
     "google_antigravity_logout": {
-        "title": "Logout / Forget Tokens",
-        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+        "title": "Disconnect in Login Manager",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     },
     "google_antigravity_compare_models": {
         "title": "Compare Models",
@@ -567,7 +569,8 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "google_antigravity_agy_auth_refresh",
             "description": (
-                "Refresh the plugin OAuth access token via Google's token endpoint using the stored refresh token."
+                "Return the Agent Hub connection-manager command. OAuth refresh requires "
+                "a visible user action in the local GUI."
             ),
             "inputSchema": _schema_auth_empty(),
         },
@@ -582,20 +585,18 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": "google_antigravity_login_start",
             "description": (
-                "Start a direct Google Antigravity OAuth login (same PKCE flow as the Hermes "
-                "google-antigravity plugin). Returns an auth_url for the user to open; finish with "
-                "google_antigravity_login_complete. Requires prior consent grant."
+                "Return the Agent Hub connection-manager command. Google login starts only "
+                "from a visible user action in the local GUI."
             ),
-            "inputSchema": LOGIN_START_SCHEMA,
+            "inputSchema": _schema_auth_empty(),
         },
         {
             "name": "google_antigravity_login_complete",
             "description": (
-                "Complete a direct Google Antigravity OAuth login by providing the browser redirect "
-                "URL or authorization code from google_antigravity_login_start. Saves tokens for "
-                "the agy-oauth provider (chat, grounding, image)."
+                "Return the Agent Hub connection-manager command without accepting OAuth "
+                "codes through MCP."
             ),
-            "inputSchema": LOGIN_COMPLETE_SCHEMA,
+            "inputSchema": _schema_auth_empty(),
         },
         {
             "name": "google_antigravity_chat",
@@ -699,8 +700,11 @@ def tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "google_antigravity_logout",
-            "description": "Delete local plugin OAuth tokens (not Google revoke, not agy Keychain).",
-            "inputSchema": LOGOUT_SCHEMA,
+            "description": (
+                "Return the Agent Hub connection-manager command. Local credential deletion "
+                "requires a visible confirmation in the GUI."
+            ),
+            "inputSchema": _schema_auth_empty(),
         },
         {
             "name": "google_antigravity_compare_models",
@@ -808,6 +812,34 @@ def _provider_status(_: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _provider_gui_required(_arguments: Dict[str, Any]) -> Dict[str, Any]:
+    console_script = Path(sys.executable).with_name("agent-hub-connect")
+    if console_script.is_file() and os.access(console_script, os.X_OK):
+        command = str(console_script)
+        command_args: list[str] = []
+    else:
+        command = sys.executable
+        command_args = ["-m", "agent_hub.connect_app"]
+    return {
+        "text": (
+            "Open the local Agent Hub connection manager and confirm the account "
+            "action in its browser tab."
+        ),
+        "error": "provider_gui_required",
+        "error_type": "provider_gui_required",
+        "next_action": {
+            "type": "local_gui",
+            "command": command,
+            "args": command_args,
+            "provider": "gemini",
+        },
+        **response.standard_fields(
+            success=False,
+            backend="local-connection-manager",
+        ),
+    }
+
+
 def dispatch_tool(
     name: str,
     arguments: Dict[str, Any],
@@ -821,10 +853,10 @@ def dispatch_tool(
         },
         "google_antigravity_provider_status": _provider_status,
         "google_antigravity_agy_auth_status": agy_auth.status_tool,
-        "google_antigravity_agy_auth_refresh": agy_auth.refresh_tool,
+        "google_antigravity_agy_auth_refresh": _provider_gui_required,
         "google_antigravity_login_status": oauth_login.status_tool,
-        "google_antigravity_login_start": oauth_login.start_tool,
-        "google_antigravity_login_complete": oauth_login.complete_tool,
+        "google_antigravity_login_start": _provider_gui_required,
+        "google_antigravity_login_complete": _provider_gui_required,
         "google_antigravity_chat": chat.run_chat,
         "google_grounded_search": grounding.run_grounded_search,
         "google_antigravity_generate_image": image.generate_image,
@@ -842,7 +874,7 @@ def dispatch_tool(
         "google_antigravity_use_profile": profiles.use_profile_tool,
         "google_antigravity_save_profile": profiles.save_custom_profile_tool,
         "google_antigravity_whoami": account.whoami,
-        "google_antigravity_logout": account.logout,
+        "google_antigravity_logout": _provider_gui_required,
         "google_antigravity_compare_models": compare.compare_models,
         "google_antigravity_review_diff": diff_review.review_diff,
         "google_antigravity_quota_status": quota.quota_status,

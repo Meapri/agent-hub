@@ -21,6 +21,8 @@ MCP cannot drive an interactive browser alone, so this module exposes:
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager, nullcontext
+import fcntl
 import hashlib
 import http.server
 import json
@@ -33,7 +35,9 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple
+
+from agent_hub.core.auth_state import file_revision
 
 from . import io_util, paths, security
 
@@ -70,6 +74,7 @@ _BUILTIN_CLIENTS: Tuple[Dict[str, str], ...] = (
 )
 
 PENDING_TTL_SEC = 900
+PENDING_VERSION = 2
 
 
 class OAuthLoginError(RuntimeError):
@@ -112,6 +117,83 @@ def token_file_path() -> Path:
 
 def pending_file_path() -> Path:
     return paths.config_dir() / "oauth-login-pending.json"
+
+
+@contextmanager
+def _pending_lock():
+    path = pending_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(
+        path.parent / ".oauth-login-pending.lock",
+        os.O_CREAT | os.O_RDWR,
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def clear_pending_login(*, expected_flow_id: str | None = None) -> bool:
+    path = pending_file_path()
+    with _pending_lock():
+        if expected_flow_id:
+            pending = _read_json_object(path)
+            current_flow_id = (
+                str(pending.get("flow_id") or "") if pending is not None else ""
+            )
+            if not current_flow_id or not secrets.compare_digest(
+                current_flow_id,
+                expected_flow_id,
+            ):
+                return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
+
+def clear_unusable_pending_login() -> bool:
+    """Remove only stale or unowned pending state so the GUI can safely recover."""
+
+    path = pending_file_path()
+    with security.auth_state_lock():
+        with _pending_lock():
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return False
+            try:
+                pending = json.loads(raw)
+            except (ValueError, TypeError):
+                pending = None
+            unusable = not isinstance(pending, dict)
+            if isinstance(pending, dict):
+                try:
+                    created_at = float(pending.get("created_at") or 0)
+                except (TypeError, ValueError):
+                    created_at = 0
+                consent_revision = str(pending.get("consent_revision") or "")
+                unusable = bool(
+                    pending.get("version") != PENDING_VERSION
+                    or not str(pending.get("flow_id") or "")
+                    or not consent_revision
+                    or not created_at
+                    or time.time() - created_at > PENDING_TTL_SEC
+                    or not secrets.compare_digest(
+                        consent_revision,
+                        security.consent_revision(),
+                    )
+                )
+            if not unusable:
+                return False
+            path.unlink()
+            return True
 
 
 def _pkce() -> Tuple[str, str]:
@@ -197,8 +279,9 @@ def save_tokens(
     expires_in: int = 3600,
     project_id: str = "",
     email: str = "",
+    destination: Path | None = None,
 ) -> Path:
-    path = token_file_path()
+    path = destination or token_file_path()
     existing = _read_json_object(path) or {}
     if not email:
         email = str(existing.get("email") or "")
@@ -273,13 +356,8 @@ def _exchange(
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")[:300]
-        except Exception:
-            detail = str(exc)
         raise OAuthLoginError(
-            f"Token exchange failed (HTTP {exc.code}). {detail}",
+            f"Token exchange failed (HTTP {exc.code}).",
             code="oauth_token_exchange_failed",
         ) from exc
     except urllib.error.URLError as exc:
@@ -289,7 +367,49 @@ def _exchange(
     return payload
 
 
-def refresh_access_token(*, refresh_token: str, client: Optional[OAuthClient] = None) -> Dict[str, Any]:
+def refresh_access_token(
+    *,
+    refresh_token: str,
+    client: Optional[OAuthClient] = None,
+    expected_credential_revision: str | None = None,
+) -> Dict[str, Any]:
+    with security.auth_state_lock():
+        if not security.agy_session_enabled():
+            raise OAuthLoginError(
+                "Direct Antigravity token refresh requires consent.",
+                code="consent_required",
+            )
+        consent_revision = security.consent_revision()
+        from . import agy_auth
+
+        credential_path = agy_auth.token_file_path()
+        credential_revision = file_revision(credential_path)
+        if expected_credential_revision is not None and not secrets.compare_digest(
+            credential_revision,
+            expected_credential_revision,
+        ):
+            raise OAuthLoginError(
+                "Direct Antigravity credentials changed before refresh.",
+                code="credentials_changed",
+            )
+        try:
+            stored_credentials = agy_auth.load_credentials()
+        except Exception as exc:
+            raise OAuthLoginError(
+                "Direct Antigravity credentials are no longer available.",
+                code="credentials_changed",
+            ) from exc
+        if (
+            not stored_credentials.refresh_token
+            or not secrets.compare_digest(
+                stored_credentials.refresh_token,
+                refresh_token,
+            )
+        ):
+            raise OAuthLoginError(
+                "Direct Antigravity credentials changed before refresh.",
+                code="credentials_changed",
+            )
     clients = [client] if client else resolve_oauth_clients()
     last_error: Optional[Exception] = None
     for candidate in clients:
@@ -314,15 +434,38 @@ def refresh_access_token(*, refresh_token: str, client: Optional[OAuthClient] = 
             last_error = exc
             continue
         if isinstance(payload, dict) and payload.get("access_token"):
-            save_oauth_client(candidate)
-            path = save_tokens(
-                access_token=str(payload["access_token"]),
-                refresh_token=str(payload.get("refresh_token") or refresh_token),
-                expires_in=int(payload.get("expires_in") or 3600),
-            )
+            with security.auth_state_lock():
+                if not security.agy_session_enabled():
+                    raise OAuthLoginError(
+                        "Direct Antigravity token refresh consent was revoked.",
+                        code="consent_required",
+                    )
+                if not secrets.compare_digest(
+                    security.consent_revision(),
+                    consent_revision,
+                ):
+                    raise OAuthLoginError(
+                        "Direct Antigravity token refresh consent changed.",
+                        code="consent_changed",
+                    )
+                if not secrets.compare_digest(
+                    file_revision(credential_path),
+                    credential_revision,
+                ):
+                    raise OAuthLoginError(
+                        "Direct Antigravity credentials changed during refresh.",
+                        code="credentials_changed",
+                    )
+                save_oauth_client(candidate)
+                save_tokens(
+                    access_token=str(payload["access_token"]),
+                    refresh_token=str(payload.get("refresh_token") or refresh_token),
+                    expires_in=int(payload.get("expires_in") or 3600),
+                    destination=credential_path,
+                )
             return {
                 "success": True,
-                "token_file": str(path),
+                "token_file_present": credential_path.is_file(),
                 "client_label": candidate.label,
                 "expires_in": int(payload.get("expires_in") or 3600),
             }
@@ -340,53 +483,135 @@ def start_login(*, use_local_redirect: bool = True) -> Dict[str, Any]:
             "`python3 scripts/google_antigravity_consent.py grant --i-understand-and-consent` first.",
             code="consent_required",
         )
+    path = pending_file_path()
     clients = resolve_oauth_clients()
     client = clients[0]
     verifier, challenge = _pkce()
     state = secrets.token_urlsafe(16)
+    flow_id = secrets.token_urlsafe(18)
     redirect = LOCAL_REDIRECT if use_local_redirect else EXTERNAL_REDIRECT
-    auth_url = _build_auth_url(client, redirect_uri=redirect, challenge=challenge, state=state)
-    # Do not persist client_secret on disk in the pending file; re-resolve at complete.
-    pending = {
-        "created_at": time.time(),
-        "state": state,
-        "verifier": verifier,
-        "redirect_uri": redirect,
-        "client_id": client.client_id,
-        "client_label": client.label,
-        "candidate_client_ids": [c.client_id for c in clients],
-    }
-    path = pending_file_path()
-    io_util.write_json_secure(path, pending)
+    auth_url = _build_auth_url(
+        client,
+        redirect_uri=redirect,
+        challenge=challenge,
+        state=state,
+    )
+    with security.auth_state_lock():
+        if not security.agy_session_enabled():
+            raise OAuthLoginError(
+                "Direct Antigravity login requires consent.",
+                code="consent_required",
+            )
+        consent_revision = security.consent_revision()
+        with _pending_lock():
+            if path.exists():
+                existing = _read_json_object(path)
+                if existing is None:
+                    raise OAuthLoginError(
+                        "Existing login state is invalid; clear it before starting again.",
+                        code="oauth_pending_invalid",
+                    )
+                if (
+                    existing.get("version") != PENDING_VERSION
+                    or not existing.get("flow_id")
+                ):
+                    raise OAuthLoginError(
+                        "Existing login state must be cleared before starting again.",
+                        code="oauth_pending_restart_required",
+                    )
+                created_at = float(existing.get("created_at") or 0)
+                if created_at and time.time() - created_at <= PENDING_TTL_SEC:
+                    raise OAuthLoginError(
+                        "A Google login is already in progress; complete or cancel it first.",
+                        code="oauth_login_in_progress",
+                    )
+                path.unlink(missing_ok=True)
+            # Do not persist client_secret on disk in the pending file; re-resolve at complete.
+            pending = {
+                "version": PENDING_VERSION,
+                "flow_id": flow_id,
+                "consent_revision": consent_revision,
+                "created_at": time.time(),
+                "state": state,
+                "verifier": verifier,
+                "redirect_uri": redirect,
+                "client_id": client.client_id,
+                "client_label": client.label,
+                "candidate_client_ids": [c.client_id for c in clients],
+            }
+            io_util.write_json_secure(path, pending)
     return {
         "text": (
-            "Open the authorization URL in a browser, sign in with Google, then call "
-            "google_antigravity_login_complete with the full redirect URL or the code= value."
+            "Open the authorization URL in a browser, sign in with Google, then return "
+            "the redirect URL to Agent Hub 연결 관리 or the login script."
         ),
         "success": True,
+        "flow_id": flow_id,
         "auth_url": auth_url,
         "redirect_uri": redirect,
         "state": state,
         "client_label": client.label,
-        "pending_file": str(path),
         "expires_in_sec": PENDING_TTL_SEC,
         "instructions": [
             "1. Open auth_url in a browser and sign in with your Google account.",
             "2. After redirect, copy the full URL (or the code= value).",
-            "3. Call google_antigravity_login_complete with that value.",
+            "3. Paste that value into Agent Hub 연결 관리 or the login script.",
             "Local callback port 51121 also works if you tunnel: ssh -L 51121:localhost:51121 <host>",
         ],
     }
 
 
-def _load_pending() -> Dict[str, Any]:
+def _load_pending(*, expected_flow_id: str | None = None) -> Dict[str, Any]:
     data = _read_json_object(pending_file_path())
     if not data:
         raise OAuthLoginError("No pending login. Call google_antigravity_login_start first.", code="oauth_pending_missing")
+    flow_id = str(data.get("flow_id") or "")
+    if (
+        data.get("version") != PENDING_VERSION
+        or not flow_id
+        or not data.get("consent_revision")
+    ):
+        raise OAuthLoginError(
+            "Pending login state must be cleared and restarted.",
+            code="oauth_pending_restart_required",
+        )
+    if expected_flow_id and not secrets.compare_digest(flow_id, expected_flow_id):
+        raise OAuthLoginError(
+            "The pending login flow was replaced. Start again.",
+            code="oauth_flow_replaced",
+        )
     created = float(data.get("created_at") or 0)
     if created and time.time() - created > PENDING_TTL_SEC:
         raise OAuthLoginError("Pending login expired. Start again.", code="oauth_pending_expired")
     return data
+
+
+def validate_callback_state(
+    code_or_url: str,
+    *,
+    require_state: bool = False,
+    expected_flow_id: str | None = None,
+) -> None:
+    """Validate a callback against the pending OAuth state without consuming it."""
+    code, returned_state = _parse_code(code_or_url)
+    if not code:
+        raise OAuthLoginError(
+            "No authorization code found in the callback.",
+            code="oauth_code_missing",
+        )
+    with _pending_lock():
+        pending = _load_pending(expected_flow_id=expected_flow_id)
+    expected_state = str(pending.get("state") or "")
+    is_redirect_url = bool(
+        urllib.parse.urlparse(str(code_or_url or "")).scheme
+    )
+    state_missing = not returned_state and (require_state or is_redirect_url)
+    state_mismatch = bool(returned_state) and not secrets.compare_digest(
+        returned_state,
+        expected_state,
+    )
+    if expected_state and (state_missing or state_mismatch):
+        raise OAuthLoginError("OAuth state mismatch.", code="oauth_state_mismatch")
 
 
 def _probe_login(*, timeout: float = 45.0) -> Dict[str, Any]:
@@ -433,16 +658,31 @@ def _probe_login(*, timeout: float = 45.0) -> Dict[str, Any]:
             }
 
 
-def complete_login(code_or_url: str, *, probe: bool = True) -> Dict[str, Any]:
+def complete_login(
+    code_or_url: str,
+    *,
+    probe: bool = True,
+    expected_flow_id: str | None = None,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
+) -> Dict[str, Any]:
     """Finish a started login with a pasted redirect URL or authorization code."""
     if not security.agy_session_enabled():
         raise OAuthLoginError("Direct Antigravity login requires consent.", code="consent_required")
+    validate_callback_state(
+        code_or_url,
+        expected_flow_id=expected_flow_id,
+    )
     code, rstate = _parse_code(code_or_url)
-    if not code:
-        raise OAuthLoginError("No authorization code found in the pasted value.", code="oauth_code_missing")
-    pending = _load_pending()
+    with _pending_lock():
+        pending = _load_pending(expected_flow_id=expected_flow_id)
+    flow_id = str(pending["flow_id"])
     expected_state = str(pending.get("state") or "")
-    if rstate and expected_state and rstate != expected_state:
+    if (
+        rstate
+        and expected_state
+        and not secrets.compare_digest(rstate, expected_state)
+    ):
         raise OAuthLoginError("OAuth state mismatch.", code="oauth_state_mismatch")
 
     pending_client_id = str(pending.get("client_id") or "").strip()
@@ -492,19 +732,44 @@ def complete_login(code_or_url: str, *, probe: bool = True) -> Dict[str, Any]:
             code="oauth_token_exchange_failed",
         )
 
-    path = save_tokens(
-        access_token=str(token_payload["access_token"]),
-        refresh_token=str(token_payload.get("refresh_token") or ""),
-        expires_in=int(token_payload.get("expires_in") or 3600),
-    )
-    save_oauth_client(used)
-    try:
-        pending_file_path().unlink(missing_ok=True)
-    except TypeError:
-        if pending_file_path().exists():
-            pending_file_path().unlink()
-    except OSError:
-        pass
+    warnings: List[str] = []
+    with security.auth_state_lock():
+        with _pending_lock():
+            current = _load_pending(expected_flow_id=flow_id)
+            if not security.agy_session_enabled():
+                raise OAuthLoginError(
+                    "Direct Antigravity login consent was revoked.",
+                    code="consent_required",
+                )
+            current_revision = security.consent_revision()
+            if not secrets.compare_digest(
+                current_revision,
+                str(current["consent_revision"]),
+            ):
+                raise OAuthLoginError(
+                    "Direct Antigravity login consent changed.",
+                    code="consent_changed",
+                )
+            guard = commit_guard() if commit_guard is not None else nullcontext()
+            with guard:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise OAuthLoginError(
+                        "Direct Antigravity login was cancelled.",
+                        code="oauth_login_cancelled",
+                    )
+                save_tokens(
+                    access_token=str(token_payload["access_token"]),
+                    refresh_token=str(token_payload.get("refresh_token") or ""),
+                    expires_in=int(token_payload.get("expires_in") or 3600),
+                )
+                try:
+                    save_oauth_client(used)
+                except OSError:
+                    warnings.append("oauth_client_persist_failed")
+                try:
+                    pending_file_path().unlink()
+                except OSError:
+                    warnings.append("pending_cleanup_failed")
 
     result: Dict[str, Any] = {
         "text": (
@@ -512,15 +777,20 @@ def complete_login(code_or_url: str, *, probe: bool = True) -> Dict[str, Any]:
             f"(client={used.label}). Provider auto-selects agy-oauth for grounding/image."
         ),
         "success": True,
-        "token_file": str(path),
+        "token_file_present": token_file_path().is_file(),
         "client_label": used.label,
         "access_token_present": True,
         "refresh_token_present": bool(token_payload.get("refresh_token")),
         "provider_hint": "agy-oauth",
+        "warnings": warnings,
     }
     if probe:
         probe_result = _probe_login()
-        result["probe"] = probe_result
+        result["probe"] = {
+            "success": bool(probe_result.get("success")),
+            "method": probe_result.get("method"),
+            "model_count": probe_result.get("model_count"),
+        }
         if probe_result.get("success"):
             count = probe_result.get("model_count")
             extra = f" Probe OK ({probe_result.get('method')}"
@@ -533,7 +803,7 @@ def complete_login(code_or_url: str, *, probe: bool = True) -> Dict[str, Any]:
                 " Tokens saved, but live probe failed — re-check project/network "
                 f"({probe_result.get('error_type') or 'probe_failed'})."
             )
-            result["warnings"] = ["login_probe_failed"]
+            result.setdefault("warnings", []).append("login_probe_failed")
     return result
 
 
@@ -548,10 +818,6 @@ def run_interactive_login(
     if not security.agy_session_enabled():
         raise OAuthLoginError("Direct Antigravity login requires consent.", code="consent_required")
 
-    clients = resolve_oauth_clients()
-    client = clients[0]
-    verifier, challenge = _pkce()
-    state = secrets.token_urlsafe(16)
     box: Dict[str, str] = {}
     server: Optional[http.server.HTTPServer] = None
     redirect = LOCAL_REDIRECT if use_local_server else EXTERNAL_REDIRECT
@@ -580,20 +846,15 @@ def run_interactive_login(
             server = None
             redirect = EXTERNAL_REDIRECT
 
-    auth_url = _build_auth_url(client, redirect_uri=redirect, challenge=challenge, state=state)
-    # Persist pending so complete_login path stays consistent if user pastes later via MCP.
-    # Never write client_secret into the pending file.
-    io_util.write_json_secure(
-        pending_file_path(),
-        {
-            "created_at": time.time(),
-            "state": state,
-            "verifier": verifier,
-            "redirect_uri": redirect,
-            "client_id": client.client_id,
-            "client_label": client.label,
-        },
-    )
+    try:
+        started = start_login(use_local_redirect=redirect == LOCAL_REDIRECT)
+    except Exception:
+        if server is not None:
+            server.server_close()
+        raise
+    auth_url = str(started["auth_url"])
+    state = str(started["state"])
+    flow_id = str(started["flow_id"])
 
     print_fn("\n[1] Open this URL in a browser and sign in with Google:\n")
     print_fn(auth_url + "\n")
@@ -638,48 +899,31 @@ def run_interactive_login(
 
     if not code:
         raise OAuthLoginError("No authorization code received.", code="oauth_code_missing")
-    if rstate and rstate != state:
+    if rstate and not secrets.compare_digest(rstate, state):
         raise OAuthLoginError("OAuth state mismatch.", code="oauth_state_mismatch")
 
-    # Prefer the client used to start; fall back across candidates on exchange failure.
-    last_error: Optional[Exception] = None
-    for candidate in clients:
-        try:
-            payload = _exchange(
-                client=candidate,
-                code=code,
-                verifier=verifier,
-                redirect_uri=redirect,
-            )
-            path = save_tokens(
-                access_token=str(payload["access_token"]),
-                refresh_token=str(payload.get("refresh_token") or ""),
-                expires_in=int(payload.get("expires_in") or 3600),
-            )
-            save_oauth_client(candidate)
-            try:
-                pending_file_path().unlink()
-            except OSError:
-                pass
-            print_fn(f"\n[OK] Logged in → {path}  (client={candidate.label})")
-            return {
-                "success": True,
-                "token_file": str(path),
-                "client_label": candidate.label,
-                "access_token": payload["access_token"],
-                "refresh_token": payload.get("refresh_token") or "",
-            }
-        except OAuthLoginError as exc:
-            last_error = exc
-            continue
-    raise OAuthLoginError(str(last_error or "login failed"), code="oauth_token_exchange_failed")
+    callback_url = redirect + "?" + urllib.parse.urlencode(
+        {"code": code, "state": rstate or state}
+    )
+    result = complete_login(
+        callback_url,
+        probe=False,
+        expected_flow_id=flow_id,
+    )
+    print_fn(
+        "\n[OK] Logged in"
+        f"  (client={result.get('client_label') or 'configured'})"
+    )
+    return result
 
 
 def login_status() -> Dict[str, Any]:
-    token_path = token_file_path()
+    from . import agy_auth
+
+    token_path = agy_auth.token_file_path()
     client_path = client_file_path()
     pending_path = pending_file_path()
-    token_present = token_path.is_file()
+    token_present = any(path.is_file() for path in agy_auth.candidate_token_paths())
     readable = False
     expired: Optional[bool] = None
     refresh_present = False
@@ -705,12 +949,10 @@ def login_status() -> Dict[str, Any]:
             else "Direct OAuth token is not ready; run login."
         ),
         "consent": security.agy_session_enabled(),
-        "token_file": str(token_path),
         "token_file_present": token_present,
         "credentials_readable": readable,
         "refresh_token_present": refresh_present,
         "expired": expired,
-        "client_file": str(client_path),
         "client_file_present": client_path.is_file(),
         "pending_login": pending_path.is_file(),
         "success": readable and expired is not True,

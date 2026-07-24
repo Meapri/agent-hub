@@ -43,8 +43,10 @@ def main(argv: list[str] | None = None) -> int:
         if command == "status":
             state = login_status()
             print(state["text"])
-            print(f"token_file={state['token_file']}")
-            print(f"present={state['token_file_present']} readable={state['credentials_readable']}")
+            print(
+                f"stored_locally={state['token_file_present']} "
+                f"readable={state['credentials_readable']}"
+            )
             return 0 if state.get("success") else 1
         if command == "start":
             result = start_login(use_local_redirect=not args.external_redirect)
@@ -54,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         if command == "complete":
             result = complete_login(args.code_or_url)
             print(result["text"])
-            print(f"token_file={result['token_file']}")
+            print(f"stored_locally={result['token_file_present']}")
             return 0
         # interactive (default)
         if command == "interactive":
@@ -62,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
                 use_local_server=not args.external_redirect,
                 open_browser=not args.no_browser,
             )
-            print(f"token_file={result['token_file']}")
+            print(f"stored_locally={result['token_file_present']}")
             return 0
     except OAuthLoginError as exc:
         print(f"ERROR ({exc.code}): {exc}", file=sys.stderr)

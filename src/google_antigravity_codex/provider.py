@@ -83,7 +83,7 @@ def selected_provider() -> str:
     raise ProviderError(
         "No Google Antigravity OAuth session. Run: "
         "python3 scripts/google_antigravity_login.py interactive "
-        "(or MCP google_antigravity_login_start / login_complete).",
+        "(or Agent Hub 연결 관리).",
         code="provider_not_configured",
     )
 

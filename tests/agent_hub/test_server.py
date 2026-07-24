@@ -185,6 +185,15 @@ def test_canonical_results_have_envelope_and_mcp_error_signal():
     assert failed["structuredContent"]["success"] is False
     assert failed["structuredContent"]["error"]["message"]
 
+    start = _call(
+        server,
+        "agent_hub_auth_start",
+        {"provider": "gpt"},
+    )["result"]
+    assert start["isError"] is True
+    assert start["structuredContent"]["success"] is False
+    assert start["structuredContent"]["error"]["type"] == "provider_gui_required"
+
 
 def test_invalid_run_id_is_a_canonical_tool_error_not_a_jsonrpc_error():
     response = _call(
@@ -321,7 +330,12 @@ def test_gemini_status_treats_unprobed_configured_session_as_ready(monkeypatch):
     monkeypatch.setattr(
         operations.google_oauth,
         "login_status",
-        lambda: {"credentials_readable": True, "expired": False},
+        lambda: {
+            "credentials_readable": True,
+            "expired": False,
+            "token_file_present": True,
+            "pending_login": True,
+        },
     )
     monkeypatch.setattr(
         operations.google_provider,
@@ -337,6 +351,8 @@ def test_gemini_status_treats_unprobed_configured_session_as_ready(monkeypatch):
     assert state["authenticated"] is True
     assert state["ready"] is True
     assert state["warnings"] == []
+    assert state["local_credentials_present"] is True
+    assert state["pending_login_present"] is True
 
 
 def test_gemini_status_probe_uses_read_only_provider_probe(monkeypatch):
@@ -375,6 +391,67 @@ def test_gemini_status_probe_uses_read_only_provider_probe(monkeypatch):
     assert state["warnings"] == []
 
 
+@pytest.mark.parametrize(
+    ("subscription", "active_mode", "expected_present", "expected_pending"),
+    [
+        (
+            {
+                "logged_in": False,
+                "token_file_present": False,
+                "pending_login_present": False,
+            },
+            "api_key",
+            False,
+            False,
+        ),
+        (
+            {
+                "logged_in": False,
+                "token_file_present": True,
+                "pending_login_present": True,
+            },
+            None,
+            True,
+            True,
+        ),
+    ],
+)
+def test_grok_status_preserves_plugin_owned_local_state(
+    monkeypatch,
+    tmp_path,
+    subscription,
+    active_mode,
+    expected_present,
+    expected_pending,
+):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path / "agent-hub"))
+    monkeypatch.setattr(
+        operations.grok_security,
+        "consent_status",
+        lambda: {"user_consent": True},
+    )
+    monkeypatch.setattr(
+        operations.grok_auth,
+        "status",
+        lambda: {
+            "configured": bool(active_mode),
+            "ready": bool(active_mode),
+            "credentials_present": bool(active_mode),
+            "active_mode": active_mode,
+            "subscription": subscription,
+        },
+    )
+
+    result = operations.dispatch_tool(
+        "agent_hub_status",
+        {"provider": "grok"},
+    )
+
+    state = result["data"]["providers"]["grok"]
+    assert state["local_credentials_present"] is expected_present
+    assert state["pending_login_present"] is expected_pending
+
+
 def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
     from claude_codex import subscription_auth as claude_subscription
 
@@ -407,7 +484,7 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
         lambda: {"user_consent": True},
     )
     monkeypatch.setattr(
-        operations.grok_oauth,
+        operations.grok_auth.oauth_login,
         "status",
         lambda: {
             "logged_in": True,
@@ -417,9 +494,21 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
         },
     )
     monkeypatch.setattr(operations.grok_auth, "get_api_key", lambda: "")
-    monkeypatch.setattr(operations.grok_oauth, "resolve_access_token", forbidden)
-    monkeypatch.setattr(operations.grok_oauth, "refresh_tokens", forbidden)
-    monkeypatch.setattr(operations.grok_oauth, "save_tokens", forbidden)
+    monkeypatch.setattr(
+        operations.grok_auth.oauth_login,
+        "resolve_access_token",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        operations.grok_auth.oauth_login,
+        "refresh_tokens",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        operations.grok_auth.oauth_login,
+        "save_tokens",
+        forbidden,
+    )
 
     monkeypatch.setattr(
         operations.google_security,
@@ -441,7 +530,11 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
         "login_status",
         lambda: {"credentials_readable": True, "expired": True},
     )
-    monkeypatch.setattr(operations.google_auth, "refresh_tool", forbidden)
+    monkeypatch.setattr(
+        operations.google_oauth,
+        "refresh_access_token",
+        forbidden,
+    )
 
     refresh_args = []
 

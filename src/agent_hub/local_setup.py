@@ -214,8 +214,13 @@ def _strip_managed_toml(text: str) -> str:
         if begin_count != 1 or end_count != 1:
             raise SetupError("Codex config has malformed Agent Hub managed markers")
         before, remainder = text.split(MANAGED_TOML_BEGIN, 1)
-        _managed, after = remainder.split(MANAGED_TOML_END, 1)
-        return f"{before.rstrip()}\n{after.lstrip()}".strip()
+        managed, after = remainder.split(MANAGED_TOML_END, 1)
+        # Older generated files could contain user-owned top-level settings
+        # before the first managed MCP table. Keep those settings while
+        # removing only the tables Agent Hub owns.
+        text = "\n".join(
+            part for part in (before.rstrip(), managed.strip(), after.lstrip()) if part
+        )
 
     kept: list[str] = []
     dropping = False

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Agent Hub · 모델 연결 관리</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32">
+            <path d="M16 3.5 27 9.8v12.4L16 28.5 5 22.2V9.8Z"></path>
+            <path d="m16 9 5.4 3.1v6.1L16 21.4l-5.4-3.2v-6.1Z"></path>
+          </svg>
+        </span>
+        <strong>Agent Hub</strong>
+        <span class="brand-divider" aria-hidden="true"></span>
+        <span>로컬 연결 관리</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-button" id="refresh-button" type="button" aria-label="상태 새로고침">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 11a8.1 8.1 0 0 0-14.9-4M4 4.5V9h4.5M4 13a8.1 8.1 0 0 0 14.9 4M20 19.5V15h-4.5"></path>
+          </svg>
+        </button>
+        <span class="runtime-status"><i></i>로컬 관리 실행 중</span>
+        <button class="quiet-button" id="shutdown-button" type="button">종료</button>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <section class="page-intro">
+        <h1>모델 연결 관리</h1>
+        <p>사용할 제공자를 연결하고, 동의 범위와 로그인 상태를 한곳에서 관리하세요.</p>
+      </section>
+
+      <section class="summary-rail" aria-label="연결 요약">
+        <div><i class="status-dot status-ready"></i><span>준비됨</span><strong id="summary-ready">—</strong></div>
+        <div><i class="status-dot status-auth"></i><span>로그인됨</span><strong id="summary-auth">—</strong></div>
+        <div><i class="status-dot status-consent"></i><span>동의 필요</span><strong id="summary-consent">—</strong></div>
+      </section>
+
+      <section class="workspace" aria-label="제공자 연결 관리">
+        <aside class="provider-panel">
+          <h2>제공자</h2>
+          <nav id="provider-list" aria-label="제공자 목록"></nav>
+        </aside>
+        <section class="detail-panel" id="detail-panel">
+          <div class="loading-state">
+            <span class="spinner" aria-hidden="true"></span>
+            <p>연결 상태를 확인하고 있습니다.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="security-footer">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="5" y="10" width="14" height="10" rx="2"></rect>
+        <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"></path>
+      </svg>
+      <span>토큰은 이 화면에 표시되지 않으며 각 제공자의 공식 로그인 도구가 계속 관리합니다.</span>
+    </footer>
+
+    <dialog class="modal" id="consent-dialog" aria-labelledby="consent-title">
+      <form method="dialog" class="modal-card" id="consent-form">
+        <header>
+          <h2 id="consent-title">사용 동의</h2>
+          <button class="icon-button modal-close" value="cancel" aria-label="닫기" type="submit">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+          </button>
+        </header>
+        <p class="modal-copy" id="consent-copy"></p>
+        <div class="scope-list">
+          <div>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-9 8.5 9.7 9.7 0 0 1-4-.9L3 21l1.6-4.5A8.5 8.5 0 1 1 21 11.5Z"></path></svg>
+            <span>허용되는 작업</span>
+            <strong id="consent-capabilities">대화, 비교, 코드 검토, 문서 작성</strong>
+          </div>
+          <div>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"></ellipse><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"></path></svg>
+            <span>저장되는 정보</span>
+            <strong id="consent-storage-copy">동의 여부와 연결 상태를 로컬에서 관리</strong>
+          </div>
+          <div>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.6 10.6 0 0 1 12 4c5.5 0 9.5 5.5 9.5 5.5a14.2 14.2 0 0 1-2.4 2.9M6.2 6.2A15 15 0 0 0 2.5 9.5S6.5 15 12 15c.7 0 1.4-.1 2-.3"></path></svg>
+            <span>화면에 표시하지 않음</span>
+            <strong>OAuth 토큰, Keychain 내용, 인증 코드</strong>
+          </div>
+        </div>
+        <div class="security-callout">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+          <span id="consent-owner-copy"></span>
+        </div>
+        <label class="consent-check">
+          <input type="checkbox" id="modal-consent-check">
+          <span id="modal-consent-label"></span>
+        </label>
+        <p class="form-error" id="consent-error" role="alert" hidden></p>
+        <p class="revoke-note">언제든 연결 관리에서 동의를 철회할 수 있습니다.</p>
+        <footer>
+          <button class="secondary-button" value="cancel" type="submit">취소</button>
+          <button class="primary-button" id="modal-consent-submit" value="default" type="submit" disabled>동의하고 계속</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="modal compact-modal" id="disconnect-dialog" aria-labelledby="disconnect-title">
+      <form method="dialog" class="modal-card" id="disconnect-form">
+        <header>
+          <h2 id="disconnect-title">Agent Hub 연결 해제</h2>
+        </header>
+        <p class="modal-copy" id="disconnect-copy"></p>
+        <div class="security-callout neutral-callout">
+          공식 서비스의 로그인은 유지되며 Agent Hub 사용 동의만 철회합니다.
+        </div>
+        <footer>
+          <button class="secondary-button" value="cancel" type="submit">취소</button>
+          <button class="danger-button" value="default" type="submit">연결 해제</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog class="modal compact-modal" id="forget-dialog" aria-labelledby="forget-title">
+      <form method="dialog" class="modal-card" id="forget-form">
+        <header><h2 id="forget-title">로컬 로그인 정보 삭제</h2></header>
+        <p class="modal-copy" id="forget-copy"></p>
+        <div class="warning-callout">삭제 후 다시 사용하려면 브라우저 로그인이 필요합니다.</div>
+        <footer>
+          <button class="secondary-button" value="cancel" type="submit">취소</button>
+          <button class="danger-button" value="default" type="submit">로컬 정보 삭제</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

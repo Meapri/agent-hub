@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 from google_antigravity_codex import mcp_server
@@ -46,6 +47,34 @@ def test_initialize_and_tools_list():
     assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
     assert by_name["google_antigravity_write"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
     assert by_name["google_antigravity_compare_models"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
+    for name in (
+        "google_antigravity_agy_auth_refresh",
+        "google_antigravity_login_start",
+        "google_antigravity_login_complete",
+        "google_antigravity_logout",
+    ):
+        assert by_name[name]["annotations"]["readOnlyHint"] is True
+        assert by_name[name]["annotations"]["destructiveHint"] is False
+        assert by_name[name]["inputSchema"]["properties"] == {}
+
+
+def test_auth_mutations_require_visible_connection_manager():
+    for name in (
+        "google_antigravity_agy_auth_refresh",
+        "google_antigravity_login_start",
+        "google_antigravity_login_complete",
+        "google_antigravity_logout",
+    ):
+        result = mcp_server.dispatch_tool(name, {})
+        payload = result["structuredContent"]
+        assert result["isError"] is True
+        assert payload["error"] == "provider_gui_required"
+        next_action = payload["next_action"]
+        assert next_action["type"] == "local_gui"
+        assert next_action["provider"] == "gemini"
+        assert next_action["args"] == []
+        assert Path(next_action["command"]).is_absolute()
+        assert Path(next_action["command"]).name == "agent-hub-connect"
 
 
 def modern_request(request_id, method, params=None, *, version="2026-07-28"):

@@ -37,3 +37,27 @@ def require(provider: str, capability: str) -> None:
     detail = CAPABILITIES.get(provider, {}).get(capability, {})
     reason = str(detail.get("reason") or "adapter does not implement this capability")
     raise ValueError(f"{provider} does not support {capability}: {reason}")
+
+
+def supports_reasoning_effort(provider: str, model: str) -> bool:
+    """Return the selected adapter/model's actual reasoning control support."""
+
+    normalized_provider = provider_registry.normalize(provider)
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return False
+    if normalized_provider == "claude":
+        from claude_codex import chat
+
+        return chat.supports_reasoning_effort(normalized_model)
+    if normalized_provider == "grok":
+        from grok_codex import chat
+
+        return chat.supports_reasoning_effort(normalized_model)
+    if normalized_provider == "gemini":
+        from google_antigravity_codex import chat
+
+        return chat.supports_thinking_level(normalized_model)
+    if normalized_provider == "gpt":
+        return True
+    return False

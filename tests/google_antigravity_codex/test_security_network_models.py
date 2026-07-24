@@ -148,3 +148,8 @@ def test_models_static_fallback_when_not_configured(monkeypatch):
         result = models.list_models()
     assert result["source"] == "static_fallback"
     assert result["text_models"]
+    assert [item["id"] for item in result["text_models"][:3]] == [
+        "gemini-3.6-flash-high",
+        "gemini-3.6-flash-medium",
+        "gemini-3.6-flash-low",
+    ]

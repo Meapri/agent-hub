@@ -17,6 +17,8 @@ import stat
 import time
 from typing import Any, Dict, Optional
 
+from agent_hub.core.auth_state import file_revision
+
 from . import security
 
 # Direct plugin OAuth login (PKCE) writes here by default.
@@ -176,7 +178,11 @@ def load_credentials() -> AgyCredentials:
     return AgyCredentials(access_token=access, refresh_token=refresh, expires_at_ms=expires, project_id=project)
 
 
-def _refresh_via_oauth_client(credentials: AgyCredentials) -> Optional[AgyCredentials]:
+def _refresh_via_oauth_client(
+    credentials: AgyCredentials,
+    *,
+    expected_credential_revision: str,
+) -> Optional[AgyCredentials]:
     """Refresh using this plugin's OAuth client credentials (never agy CLI)."""
     if not credentials.refresh_token:
         return None
@@ -185,7 +191,10 @@ def _refresh_via_oauth_client(credentials: AgyCredentials) -> Optional[AgyCreden
     except Exception:
         return None
     try:
-        oauth_login.refresh_access_token(refresh_token=credentials.refresh_token)
+        oauth_login.refresh_access_token(
+            refresh_token=credentials.refresh_token,
+            expected_credential_revision=expected_credential_revision,
+        )
         return load_credentials()
     except Exception:
         return None
@@ -193,13 +202,18 @@ def _refresh_via_oauth_client(credentials: AgyCredentials) -> Optional[AgyCreden
 
 def force_refresh_credentials() -> AgyCredentials:
     """Force a Google token refresh (plugin OAuth only)."""
-    credentials = load_credentials()
+    with security.auth_state_lock():
+        credentials = load_credentials()
+        credential_revision = file_revision(token_file_path())
     if not credentials.refresh_token:
         raise AgyAuthError(
             "No refresh token stored. Run: python3 scripts/google_antigravity_login.py interactive",
             code="agy_refresh_missing",
         )
-    refreshed = _refresh_via_oauth_client(credentials)
+    refreshed = _refresh_via_oauth_client(
+        credentials,
+        expected_credential_revision=credential_revision,
+    )
     if refreshed is None or not refreshed.access_token:
         raise AgyAuthError(
             "OAuth refresh failed. Run: python3 scripts/google_antigravity_login.py interactive",
@@ -224,7 +238,6 @@ def status(*, probe: bool = False) -> Dict[str, Any]:
     path = token_file_path()
     result: Dict[str, Any] = {
         "enabled": security.agy_session_enabled(),
-        "token_file": str(path),
         "token_file_present": path.is_file(),
         "credentials_readable": False,
         "access_token_present": False,
@@ -260,8 +273,8 @@ def status_tool(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
         text = "Plugin OAuth token exists but is not ready; inspect the reported validation error."
     else:
         text = (
-            "No plugin OAuth token. Sign in with google_antigravity_login_start/"
-            "login_complete or scripts/google_antigravity_login.py."
+            "No plugin OAuth token. Sign in with Agent Hub 연결 관리 "
+            "or scripts/google_antigravity_login.py."
         )
     return {
         "text": text,
@@ -271,12 +284,7 @@ def status_tool(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
 
 def refresh_tool(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Refresh the access token using the stored refresh_token (OAuth only)."""
-    credentials = valid_credentials(refresh=True)
-    # Force a refresh attempt when still unexpired so users can renew early.
-    if credentials.refresh_token:
-        refreshed = _refresh_via_oauth_client(credentials)
-        if refreshed is not None:
-            credentials = refreshed
+    credentials = force_refresh_credentials()
     return {
         "text": "Plugin OAuth token refreshed via Google token endpoint.",
         "success": True,

@@ -11,7 +11,160 @@
 
 - **현재 단계**
 
-  **[2026-07-23 run state·저장소 조사 경계 보강 — 이 블록이 최신]**
+  **[2026-07-24 Agent Hub 1.4.2 provider 연결·웹 모델 설정 전수 수정 — 이 블록이 최신]**
+
+  원래 목표는 Claude, Grok, Gemini, GPT의 동의·로그인·다시 로그인 버튼을 실제로 동작하게 고치고,
+  같은 웹 화면에서 provider별 기본 LLM 모델까지 안전하게 선택하도록 만드는 것입니다. 공식 로그인
+  소유권은 유지하고, 계정 변경은 사용자가 보는 로컬 GUI에서만 일어나게 했습니다.
+
+  완료한 내용:
+
+  - `agent-hub-connect`와 `python -m agent_hub.connect_app`가 `127.0.0.1` 전용 연결 관리 화면을 엽니다.
+    네 provider의 동의, 로그인·다시 로그인, 연결 테스트, 연결 해제, 로컬 자격 증명 삭제를 한 화면에서
+    처리합니다. Claude와 GPT는 각각 Claude Code와 공식 Codex 로그인을 실행하고, Agent Hub가 공동
+    세션을 삭제하지 않습니다. Grok device code와 Google PKCE는 Agent Hub가 소유한 로컬 흐름입니다.
+  - 브라우저 fragment의 난수 session을 `sessionStorage`로 옮긴 뒤 `X-Agent-Hub-Session` header로만
+    전송합니다. 상태 변경 요청은 exact Origin, session, `X-Agent-Hub-Intent`, 화면에 표시한 provider별
+    confirmation을 모두 확인합니다. cookie나 OAuth token을 브라우저 응답에 넣지 않습니다.
+  - provider별 **Agent Hub 기본 텍스트 모델** 선택기를 추가했습니다. 로그인 전에는 설치된 안전 목록,
+    준비된 연결에서는 live 목록을 사용하며, 목록 revision과 TTL을 확인한 정확한 text model ID만
+    저장합니다. 환경변수로 관리되는 값, 목록에서 사라진 값, image model, 만료된 목록은 fail closed합니다.
+    초기화는 모델 값만 지우고 다른 provider 설정은 보존합니다.
+  - 저장 모델은 fixed/delegate/adaptive 실행 경로에 공통으로 주입됩니다. 호출자가 직접 지정한 모델이
+    최우선이고, Gemini는 saved chat 모델·환경변수·활성 profile의 우선순위를 한 규칙으로 맞췄습니다.
+    adaptive 실행은 시작 시점의 네 provider 모델을 모두 저장해 이어서 실행할 때 설정 변경의 영향을 받지
+    않습니다. partial compare model map의 빈 자리도 보존합니다. Claude 계열 모델에는 profile이 넣은
+    Gemini 전용 `thinking_level`을 전달하지 않습니다.
+  - workflow가 자동으로 선택한 `reasoning_effort`는 최종 모델의 실제 adapter capability를 확인합니다.
+    미지원 모델에서는 provider·model이 포함된 경고와 함께 자동값만 생략하고, 사용자가 직접 지정한 값은
+    기존처럼 fail closed합니다. fixed recipe의 stage 값, adaptive write/review/release, participant별
+    compare까지 같은 기준을 사용합니다.
+  - non-Gemini 설정과 Gemini model preference는 process lock과 atomic replace로 저장합니다. 중첩 값의
+    타입·허용 field·범위를 엄격히 검사해 손상된 설정을 덮어쓰거나 list/dict를 모델 문자열로 바꾸지
+    않습니다.
+  - Grok·Google pending OAuth에 `flow_id`, format version, 시작 시점 consent revision을 저장합니다.
+    완료·취소·manager 종료는 자신이 시작한 flow만 조건부로 처리하고, token commit 직전에 같은 pending,
+    같은 consent revision, 현재 consent를 provider별 cross-process auth lock 아래에서 다시 검사합니다.
+    다른 창의 새 flow나 revoke/regrant 경계를 지난 응답은 token을 저장하지 않습니다.
+    manager 종료의 cancel event와 token commit도 같은 manager lock으로 선형화해 종료가 먼저 이긴
+    로그인은 credential을 저장할 수 없습니다. 기본 Claude·Codex 로그인 subprocess는 process group
+    단위로 추적해 종료 시 bounded SIGTERM/SIGKILL로 정리합니다.
+  - refresh 시작 시 token 파일 revision도 함께 기록합니다. 사용자가 GUI에서 로컬 로그인 정보를 삭제하거나
+    다른 로그인이 token을 교체하면 진행 중이던 Google·Grok refresh는 새 token을 저장하지 않습니다.
+    Google `whoami`는 refresh와 token 파일 보정을 하지 않는 읽기 전용 호출로 고정했습니다.
+  - GUI 로그인 시작은 손상·구버전·만료·동의 revision 불일치 pending만 lock 안에서 자동 정리하고, 현재
+    version의 정상 active flow는 보존합니다. token commit 뒤 pending 정리나 Google client 사본 저장만
+    실패하면 로그인 성공을 유지하고 안정된 warning을 반환하며 manager가 소유권을 보존해 다시 정리합니다.
+  - Google callback은 정확한 path와 OAuth state, 내부 flow 소유권을 확인한 single-winner job만 처리합니다.
+    port 51121이 사용 중이면 기존 listener를 종료하지 않고 redirect URL/code 붙여넣기로 전환합니다.
+  - 통합 `agent_hub_auth_*`와 별도 Grok·Google leaf MCP의 login/complete/refresh/logout은 자격 증명을
+    직접 바꾸지 않고 `agent-hub-connect`만 안내하는 read-only 도구입니다. 네 통합 auth 도구는 실제
+    로그인을 시작한 것처럼 성공을 반환하지 않고 모두 `provider_gui_required`를 사용합니다. GUI가 없는
+    환경의 실제 변경은 사용자가 provider별 CLI script를 직접 실행해야 합니다.
+  - status·job·logout 응답에서 token, verifier, credential 절대경로, account email, provider 원문 오류를
+    제거했습니다. 로그인 URL은 지정한 Google/xAI HTTPS host와 기본 443 port만 허용합니다.
+  - provider별 로그인 시작·테스트 시작·삭제 동작을 하나의 상태 머신으로 묶어, 시작 중 중복 click과
+    consent 철회·credential 삭제가 서로 앞지르지 못하게 했습니다. UI도 provider가 busy일 때 login,
+    test, delete, model control을 함께 비활성화합니다.
+    로컬 credential 삭제 dialog는 전역 in-flight guard와 요청 시점 provider를 고정해 이중 제출,
+    Escape 뒤 다른 provider 삭제, 실패 뒤 job/poll 관측 손실을 막습니다.
+  - 모델 catalog는 provider 인증 세대에 묶었습니다. 동의 변경, 로그인 시작·종료, 연결 해제, 로컬
+    credential 삭제 때 서버와 UI가 해당 catalog와 진행 중인 응답을 즉시 폐기합니다. 인증 변경과 겹친
+    모델 목록 요청은 이전 계정의 revision을 되살리지 못하며 새 목록을 요구합니다.
+  - 연결된 provider의 첫 모델 조회부터 live catalog를 사용하도록 고쳤습니다. GPT는 공식 Codex
+    app-server에서 8개 모델, Gemini는 Antigravity에서 23개 모델을 읽었고
+    `gemini-3.6-flash-{high,medium,low}`가 모두 표시되는 것을 로컬 브라우저에서 확인했습니다.
+    Gemini의 로그인 전 fallback에도 같은 세 tier를 추가했습니다. Gemini live catalog의 public ID와
+    내부 실행 ID가 다른 경우 project-scoped cache로 매핑하고, 새 process의 첫 generation에서도
+    catalog를 다시 읽어 내부 ID를 사용합니다.
+    GPT live catalog에 표시명이 같은 두 Luna 항목은 model ID를 함께 표시해 구분합니다.
+  - consent version은 정확한 정수 현재 버전만 허용합니다. 손상됐거나 문자열·boolean·float로 저장된
+    version은 미동의로 처리하고 재동의 시 원자적으로 복구하며, 이미 유효한 동의는 grant ID와 revision을
+    유지합니다.
+  - 이전 managed TOML block 안의 사용자 top-level 설정을 보존한 채 MCP block만 갱신하도록
+    `agent-hub-setup` migration을 보강했습니다. 실제 설정 동기화에서 `approval_policy`와
+    `sandbox_mode`를 block 밖으로 옮겨 보존했습니다.
+  - Codex·Claude Code·공용 hub에 같은 `provider-connect` 스킬을 추가했고, README의 첫 경로를 GUI로
+    바꿨습니다. 새 외부 runtime dependency는 추가하지 않았습니다.
+  - release version을 1.4.2로 맞추고 Python editable package, Codex plugin cache, Claude Code user
+    plugin을 업데이트했습니다. 설치된 MCP의 stdio initialize와 `tools/list`도 직접 확인했습니다.
+
+  변경 파일:
+
+  - 연결 GUI·서버: `src/agent_hub/connect_app.py`, `src/agent_hub/connect_service.py`,
+    `src/agent_hub/connect_ui/{index.html,styles.css,app.js}`
+  - 인증·동의: `src/agent_hub/core/{auth_state.py,consent.py}`,
+    `src/google_antigravity_codex/{account.py,agy_auth.py,consent_cli.py,mcp_server.py,oauth_login.py,security.py}`,
+    `src/grok_codex/{mcp_server.py,oauth_login.py,security.py}`, `src/openai_codex/auth.py`
+  - 모델 설정·실행: `src/agent_hub/{capabilities.py,operations.py,orchestrator.py,provider_settings.py}`,
+    `src/google_antigravity_codex/{chat.py,model_prefs.py,models.py}`, `src/openai_codex/models.py`,
+    `src/orchestrate_codex/{recipes.py,runner.py}`
+  - 설치·버전: `src/agent_hub/{__init__.py,local_setup.py}`, `pyproject.toml`,
+    `.claude-plugin/marketplace.json`,
+    `hubs/{codex/.codex-plugin/plugin.json,claude-code/.claude-plugin/plugin.json}`
+  - 스킬·문서: `hubs/shared/skills/provider-connect/SKILL.md`,
+    `hubs/codex/skills/provider-connect/SKILL.md`,
+    `hubs/claude-code/skills/provider-connect/SKILL.md`, `README.md`, `HANDOFF.md`
+  - 회귀 테스트: `tests/agent_hub/{test_connect_app.py,test_connect_service.py,test_hub_plugins.py,
+    test_provider_expansion.py,test_adaptive_orchestration.py,test_server.py,test_setup.py}`,
+    `tests/google_antigravity_codex/{test_agy_auth_provider.py,test_mcp_server.py,test_model_prefs.py,
+    test_new_features.py,test_oauth_login.py,test_security_network_models.py}`,
+    `tests/grok_codex/test_core.py`, `tests/openai_codex/test_core.py`,
+    `tests/orchestrate_codex/test_core.py`
+
+  검증:
+
+  - credential 경로를 임시 디렉터리로 격리한 `./.venv/bin/python -m pytest -q` →
+    `675 passed, 2 skipped`
+  - `./.venv/bin/python -m ruff check .` → 통과
+  - `node --check src/agent_hub/connect_ui/app.js` → 통과
+  - `./scripts/check-hub-plugins.sh` → 통과
+  - `./scripts/check-sync.sh` → 통과
+  - `git diff --check` → 통과
+  - `./.venv/bin/python -m orchestrate_codex.document_quality README.md`와 `HANDOFF.md` → 통과
+  - `agent_hub_verify(user_facing=true)` → `README.md`와 최신 HANDOFF 블록 모두 경고 0건
+  - `./scripts/test-phase1.sh` → disposable fixture acceptance 통과
+  - release version 5개 필드 → 모두 `1.4.2`
+  - `./.venv/bin/python -m build` → 1.4.2 sdist·wheel 생성 성공
+  - wheel 확인 → `src/agent_hub/connect_ui/index.html`, `src/agent_hub/connect_ui/styles.css`,
+    `src/agent_hub/connect_ui/app.js`의 배포 사본과
+    `agent-hub-connect = agent_hub.connect_app:main` 포함
+  - `./.venv/bin/agent-hub-connect --help` → 통과
+  - 설치된 MCP stdio initialize와 `tools/list` → 37개, 모두 `agent_hub_*`
+  - Codex·Claude Code plugin list → 1.4.2 installed, enabled
+  - `agent-hub-setup --check --json` → changed 0
+  - `agent-hub-doctor --json` → `8 pass, 0 warn, 0 fail`
+
+  미완과 현재 위험:
+
+  - 실제 provider 로그인·다시 로그인·동의 변경·모델 저장·generation은 계정 상태나 외부 사용량을
+    바꾸므로 실행하지 않았습니다. 최종 read-only status에서 Claude·Grok·GPT는 ready이고 Gemini는
+    consent가 있지만 로그인을 다시 완료해야 합니다.
+  - Codex Desktop과 Claude Code의 실행 중 process는 설치 전 플러그인을 적재했을 수 있습니다. 설치된
+    1.4.2 plugin과 MCP를 새 process에서 확실히 사용하려면 앱 또는 세션을 재시작해야 합니다.
+
+  Do-Not-Repeat:
+
+  - consent grant, OAuth code 교환, refresh, logout을 MCP tool 안에서 직접 실행하지 마세요.
+  - GUI 실행 안내에 bare `agent-hub-connect`나 `python`이 PATH에 있다고 가정하지 말고 MCP가 반환한
+    absolute `next_action.command`와 분리된 `next_action.args`를 사용하세요.
+  - manager cleanup에서 provider 이름만 보고 pending을 지우지 말고 반드시 시작한 `flow_id`를 비교하세요.
+  - token을 저장하기 전에 현재 pending과 consent revision을 auth-state lock 아래에서 다시 확인하세요.
+  - 네트워크 refresh 뒤 token을 저장할 때는 시작 시 token 파일 revision도 비교하세요. GUI 삭제를 단순히
+    같은 lock으로 직렬화하는 것만으로는 삭제 뒤 stale refresh가 token을 되살리는 일을 막지 못합니다.
+  - Claude/GPT 공동 로그인을 Agent Hub의 연결 해제로 삭제하지 마세요.
+  - Google port 51121의 기존 listener를 종료하지 말고 paste fallback을 유지하세요.
+  - managed TOML block을 통째로 삭제해 block 안에 잘못 들어간 사용자 top-level 설정을 잃지 마세요.
+  - 연결된 provider의 첫 모델 버튼을 정적 catalog 전용으로 되돌리거나 GPT·Gemini live ID를 고정
+    allowlist로 제한하지 마세요.
+
+  **다음 한 걸음:** Codex Desktop을 재시작한 뒤 `http://127.0.0.1:8765/`의 Gemini 카드에서
+  `로그인`으로 Google PKCE를 완료하고 `최신 모델 목록 새로고침`의 출처가 live인지와
+  `gemini-3.6-flash-high`, `-medium`, `-low`가 표시되는지 확인하세요.
+
+  ---
+
+  **[2026-07-23 run state·저장소 조사 경계 보강 — 이전 기록]**
 
   사용자 요청에 따라 현재 구현을 다시 조사했고, 우선순위가 높은 보안 경계 문제를 수정했습니다.
 
@@ -706,54 +859,37 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-24 Agent Hub 1.4.0 canonical GPT provider
+## 2026-07-24 Agent Hub 1.4.2 provider 연결·인증 경계·동적 모델 catalog 완성
 
-- **원래 목표**: Agent Hub를 개선하고 Hermes Agent에서 필요한 설계를 가져오되, GPT를 별도
-  플러그인이 아니라 Claude, Grok, Gemini와 같은 canonical provider로 통합합니다.
-- **현재 단계**: GPT provider, 공통 run lifecycle, 프로젝트별 handoff 품질 계약, 1.4.0 문서와
-  배포 메타데이터 구현을 완료했습니다. Agent Hub 1.4.0과 공유 메모리, Codex·Claude Code
-  플러그인 설치 및 로컬 검증도 마쳤습니다.
+- **원래 목표**: Claude, Grok, Gemini, GPT를 같은 Agent Hub provider 계약으로 관리하고, 사용자가 로컬 웹 화면에서 동의·로그인·재로그인·연결 확인·로컬 credential 정리와 기본 LLM 모델 선택을 안전하게 처리하도록 완성합니다.
+- **현재 단계**: provider 연결 GUI, 공통 모델 설정, GPT/Gemini 동적 catalog, OAuth 취소·refresh·logout 경계, 로컬 설치와 플러그인 배포를 1.4.2로 마쳤습니다. Python editable package와 Codex·Claude Code 플러그인은 모두 1.4.2이며, 최신 연결 관리 서버가 `127.0.0.1:8765`에서 실행 중입니다.
 - **완료**:
-  - 공개 표면은 `agent_hub_*` 37개뿐이며 `provider="gpt"`가 status, models, chat, write,
-    compare, review, release, fixed/adaptive workflow를 기존 provider와 같은 registry로 통과합니다.
-  - 공식 Codex가 ChatGPT 로그인과 refresh를 계속 소유합니다. Agent Hub는 token, Keychain,
-    `auth.json`을 읽지 않고 격리된 `codex exec` 결과만 사용합니다.
-  - `agent_hub_status`는 네 provider 모두 credential을 갱신하지 않습니다. Claude·Grok은 저장된
-    만료 상태만 읽고, Gemini probe와 GPT account read도 refresh를 명시적으로 끕니다. token 갱신은
-    `agent_hub_auth_refresh`에서만 수행합니다.
-  - cancel은 active lease와 늦은 결과 commit을 막고, archive는 terminal run만 받으며, GC는
-    project·revision·전체 state SHA·파일 identity가 모두 맞을 때만 archived JSON을 삭제합니다.
-  - `HANDOFF.md` prepare/apply가 필수 9개 필드와 단일 구체 행동을 검사합니다. managed SHA가
-    그대로인 외부 편집만 안전하게 재준비하고 marker 밖 기록은 byte 단위로 보존합니다.
+  - `agent-hub-connect`의 네 provider 카드에서 동의, 공식 또는 provider-owned 로그인, 다시 로그인, 연결 테스트, 연결 해제와 허용된 로컬 credential 삭제를 한 화면에서 처리합니다. Claude와 GPT 공동 세션은 각각 공식 Claude Code와 Codex가 계속 소유합니다.
+  - provider별 Agent Hub 기본 텍스트 모델을 선택·저장·초기화하고 fixed, delegate, adaptive 실행에 같은 우선순위로 적용합니다. 인증 세대와 catalog revision/TTL로 stale 목록과 계정 변경 경합을 차단합니다.
+  - GPT는 공식 Codex app-server `model/list`를 동적으로 사용합니다. 최종 설치본 브라우저 QA에서 `gpt-5.6-sol`, `gpt-5.6-terra`, 두 Luna ID, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`의 8개 항목을 확인했습니다. 같은 표시명의 Luna 항목은 model ID를 함께 표시해 구분합니다.
+  - Gemini는 Antigravity `fetchAvailableModels` 결과를 동적으로 사용하고 public ID를 project-scoped internal execution ID로 매핑합니다. 401 뒤 project가 바뀌면 catalog와 매핑을 다시 읽습니다. 이 작업 앞선 read-only live QA에서는 23개와 `gemini-3.6-flash-{high,medium,low}`를 확인했고, 최종 설치 QA 시 현재 Gemini 로그인이 준비되지 않은 상태에서도 static fallback에 세 tier가 모두 표시됐습니다.
+  - OAuth pending은 `flow_id`, format version, consent revision으로 소유권을 확인합니다. manager `close()`의 cancel event와 token commit을 같은 manager lock으로 선형화해 종료가 먼저 이긴 Grok·Gemini 로그인이 credential을 저장하지 못하게 했습니다. Grok은 성공 응답 직후에도 취소를 재확인합니다.
+  - Google·Grok refresh는 시작 시 credential revision을 기록하고 commit 직전에 다시 비교해 삭제·교체된 credential을 되살리지 않습니다. Google은 실제 선택된 canonical/override token 경로를 같은 규칙으로 처리합니다.
+  - OAuth HTTP 오류는 status와 안정된 error code만 노출하고 provider 응답 본문을 예외·CLI·GUI로 전달하지 않습니다. status와 logout도 token, account email, credential 절대경로를 반환하지 않습니다.
+  - 손상된 consent JSON과 문자열·boolean·float version은 안전하게 미동의로 취급하고 재동의로 원자적으로 복구합니다. 이미 유효한 consent는 grant ID와 revision을 바꾸지 않습니다.
+  - 로컬 credential 삭제는 provider별 서버 lock과 UI 전역 in-flight guard를 사용합니다. 이중 제출, Escape로 dialog를 닫은 뒤 다른 provider 삭제를 시작하는 경합, 실패 시 현재 job/poll 관측 손실을 막고 요청 시점에 브라우저 model catalog를 폐기합니다.
+  - Google logout은 일부 파일 삭제 실패를 typed `credential_removal_failed`로 반환하고 성공/실패 수만 공개합니다. Grok도 실패 여부와 무관하게 model catalog를 무효화합니다. 손상·만료 credential과 pending state는 로그인 완료 여부와 별도로 GUI에 표시해 복구 버튼을 제공합니다.
+  - 기본 Claude/Codex 로그인 subprocess를 manager가 추적하고 종료 시 process group을 bounded SIGTERM/SIGKILL로 정리합니다. callback·worker 등록과 close를 같은 lock으로 묶어 미등록 helper가 남지 않게 했습니다.
+  - 예전 managed TOML block의 사용자 top-level 설정은 block 밖으로 보존하며 MCP 부분만 갱신합니다. 공용·Codex·Claude Code hub에 동일한 `provider-connect` 스킬과 절대 실행 경로 계약을 배포했습니다.
+  - release metadata, Python editable package, Codex plugin cache, Claude Code user plugin을 1.4.2로 설치했습니다. 설치된 provider-connect 스킬 세 사본의 SHA-256이 일치하며 MCP stdio는 `agent-hub` 1.4.2와 `agent_hub_*` 도구 37개를 반환합니다.
 - **미완**:
-  - 네 provider의 Agent Hub consent는 사용자의 명시적 동의가 필요한 상태라 꺼져 있습니다.
-  - Claude Code의 `agent-hub`·`memory` MCP는 새 interactive session에서 사용자 승인이 필요합니다.
-  - 실제 GPT generation, provider login/logout, release, deploy는 수행하지 않았습니다.
-- **변경 파일**: `src/openai_codex/`, `src/agent_hub/provider_registry.py`,
-  `src/agent_hub/core/run_lifecycle.py`, `src/agent_hub/core/handoff.py`,
-  `src/claude_codex/auth.py`, `src/grok_codex/auth.py`,
-  `src/google_antigravity_codex/antigravity_api.py`, `src/orchestrate_codex/store.py`,
-  `src/orchestrate_codex/runner.py`, `README.md`, `model-access/`, `hubs/`,
-  `instructions/.ruler/`와 관련 테스트를 갱신했습니다.
+  - provider consent 변경, 실제 로그인/logout, 모델 저장, generation은 계정 상태나 사용량을 바꾸므로 자동 실행하지 않았습니다. 최종 상태에서 Claude·Grok·GPT는 ready이고 Gemini는 consent는 있으나 로그인 재완료가 필요합니다.
+  - Claude Code update 명령은 restart 필요를 명시했고 현재 Codex Desktop process도 설치 전 플러그인을 적재했을 수 있으므로 두 host의 새 process에서 1.4.2를 사용해야 합니다.
+- **변경 파일**: 연결 GUI·서비스는 `src/agent_hub/connect_app.py`, `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/`; 인증·동의·설정은 `src/agent_hub/core/`, `src/agent_hub/provider_settings.py`, `src/{google_antigravity_codex,grok_codex,openai_codex}/`; 실행 주입은 `src/agent_hub/{operations.py,orchestrator.py}`와 `src/orchestrate_codex/`; 설치·플러그인·문서는 `src/agent_hub/local_setup.py`, `pyproject.toml`, `hubs/`, `.claude-plugin/marketplace.json`, `README.md`, `HANDOFF.md`; 회귀 검증은 관련 `tests/`를 갱신했습니다.
 - **검증 실행 결과**:
-  - `PYTHONPATH=src ./.venv/bin/pytest -q` → `492 passed, 2 skipped`
-  - `./.venv/bin/ruff check .`, `git diff --check` → 통과
-  - `./scripts/check-hub-plugins.sh`, `./scripts/check-sync.sh`,
-    `./scripts/test-phase1.sh` → 통과
-  - release version 5개 필드 → 모두 `1.4.0`
-  - README·Hub README의 `agent_hub_verify(user_facing=true)` → 경고 0건
-  - `./.venv/bin/python -m build` → 1.4.0 sdist·wheel 생성 성공
-  - 설치된 MCP `tools/list` → 공개 도구 37개, 모두 `agent_hub_*`, 네 provider enum 확인
-  - 기본 doctor → `8 pass, 0 warn, 0 fail`; live GPT doctor → `9 pass, 0 warn, 0 fail`
-  - Codex·Claude Code plugin list → `agent-hub@agent-hub` 1.4.0 installed, enabled
-- **현재 리스크**: cancel은 늦은 결과 저장을 막지만 이미 시작된 provider 요청이나 사용량을 강제
-  회수하지 않습니다. 기본 compare는 의도적으로 Claude, Grok, Gemini만 사용하고 GPT는
-  `provider="all"`에서 참여합니다. 공식 Codex CLI 계약이 바뀌면 GPT adapter 재검증이 필요합니다.
-  설치 상태와 plugin cache는 Git 바깥의 machine-local 상태이므로 앱 재시작이나 업그레이드 뒤 doctor로
-  다시 확인해야 합니다.
-- **Do-Not-Repeat**: GPT용 별도 공개 MCP·플러그인을 만들지 마세요. Codex token이나 `auth.json`을
-  직접 읽지 말고, 사용자를 대신해 `--i-understand-and-consent`를 선언하거나 승인 없이
-  login/logout·release를 실행하지 마세요.
-- **다음 한 걸음**: `./.venv/bin/openai-codex-consent grant --i-understand-and-consent` 실행에
-  동의하는지 사용자에게 확인하세요.
+  - credential 경로를 임시 디렉터리로 격리한 `./.venv/bin/python -m pytest -q` → `675 passed, 2 skipped`
+  - `./.venv/bin/ruff check .`, `node --check src/agent_hub/connect_ui/app.js`, `git diff --check` → 통과
+  - `./scripts/check-hub-plugins.sh`, `./scripts/check-sync.sh`, `./scripts/test-phase1.sh` → 통과
+  - release version 5개 필드 → 모두 1.4.2; `./.venv/bin/python -m build` → 1.4.2 sdist·wheel 성공
+  - `agent-hub-setup --check --json` → changed 0; `agent-hub-doctor --json` → `8 pass, 0 warn, 0 fail`
+  - Python package, Codex plugin, Claude Code user plugin → 모두 1.4.2 installed/enabled; installed MCP stdio → server 1.4.2, 37개 도구, 모두 `agent_hub_*`
+  - 최종 로컬 브라우저 QA → GPT live source `codex-app-server` 8개와 중복 display 구분, Gemini static fallback의 3.6 Flash 세 tier, 연결 요약 `3 / 4 ready` 확인
+- **현재 리스크**: live catalog는 provider 서비스와 현재 계정 권한에 따라 달라지고 실패하면 local fallback으로 전환됩니다. Gemini의 최종 live catalog는 현재 로그인을 다시 완료하기 전까지 재확인할 수 없습니다. 이 대화의 이미 실행 중인 Codex MCP process는 설치된 1.4.2로 자동 hot reload되지 않습니다.
+- **Do-Not-Repeat**: 연결된 provider의 첫 모델 요청을 정적 catalog 전용으로 되돌리지 마세요. GPT를 `DEFAULT_MODEL` 하나로 제한하거나 Gemini live ID와 tier suffix를 고정 allowlist로 자르지 마세요. cancel event 설정과 token commit guard를 서로 다른 lock 경계로 분리하지 마세요. refresh에서 credential revision 검사를 제거하지 마세요. OAuth 응답 body, token, credential 경로, account email을 오류·UI·이벤트에 넣지 마세요. 사용자를 대신해 consent, login/logout, 모델 저장을 실행하지 마세요. 예전 managed TOML block을 통째로 지워 사용자 설정을 잃지 마세요.
+- **다음 한 걸음**: Codex Desktop을 재시작한 뒤 `http://127.0.0.1:8765/`의 Gemini 카드에서 `로그인`으로 Google PKCE를 완료하고 `최신 모델 목록 새로고침`의 출처가 live인지와 `gemini-3.6-flash-high`, `-medium`, `-low` 세 항목을 확인하세요.
 <!-- agent-hub:handoff:v1:end -->

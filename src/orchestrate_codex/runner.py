@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from agent_hub import capabilities as agent_capabilities
 from agent_hub import provider_registry
 from agent_hub.core import handoff as handoff_state
 
@@ -334,11 +335,39 @@ def _args_for_tool(
     # tool, a carried-over model (e.g. grok-4.5 sent to a Gemini/Claude leaf) 404s — so
     # normalize the model to the SELECTED tool's provider (or drop it for the leaf default).
     if family not in {"compare"}:
-        model = _resolve_model_for_tool(tool, args.get("model"))
+        model = _resolve_model_for_tool(
+            tool,
+            args.get("model"),
+            provider_models=(
+                user_args.get("_provider_models")
+                if family != "image"
+                and isinstance(user_args.get("_provider_models"), dict)
+                else None
+            ),
+        )
         if model:
             args["model"] = model
         else:
             args.pop("model", None)
+        provider = next(
+            (provider_id for prefix, provider_id in _PROVIDER_ID.items() if tool.startswith(prefix)),
+            None,
+        )
+        automatic_effort = (
+            "reasoning_effort" in args
+            and not str(user_args.get("reasoning_effort") or "").strip()
+        )
+        if (
+            automatic_effort
+            and provider
+            and model
+            and not agent_capabilities.supports_reasoning_effort(provider, model)
+        ):
+            args.pop("reasoning_effort", None)
+            warning = f"automatic_reasoning_effort_omitted:{provider}:{model}"
+            warnings = step.setdefault("warnings", [])
+            if warning not in warnings:
+                warnings.append(warning)
     return args
 
 
@@ -349,17 +378,43 @@ _PROVIDER_MODEL_PREFIX = {
     "google_antigravity": "gemini",
     "google_grounded": "gemini",
 }
+_PROVIDER_ID = {
+    "grok_codex": "grok",
+    "claude_codex": "claude",
+    "openai_codex": "gpt",
+    "google_antigravity": "gemini",
+    "google_grounded": "gemini",
+}
 
 
-def _resolve_model_for_tool(tool: str, requested: Optional[str]) -> Optional[str]:
+def _resolve_model_for_tool(
+    tool: str,
+    requested: Optional[str],
+    *,
+    provider_models: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Return a model id valid for `tool`'s provider: keep a compatible request, else the
     provider's latest (catalog), else None so the leaf uses its own default."""
     provider = next((p for p in _PROVIDER_MODEL_PREFIX if str(tool).startswith(p)), None)
     if requested:
         if provider is None:
             return requested  # unknown provider — trust the caller
+        if _PROVIDER_ID.get(provider) == "gemini" and str(requested).lower().startswith(
+            ("gemini", "claude", "gpt-oss")
+        ):
+            # Antigravity intentionally exposes Gemini, Claude, and GPT-family
+            # model ids through one Google provider catalog.
+            return requested
         if str(requested).lower().startswith(_PROVIDER_MODEL_PREFIX[provider]):
             return requested  # already matches this provider
+    provider_id = _PROVIDER_ID.get(provider or "")
+    configured = (
+        str((provider_models or {}).get(provider_id) or "").strip()
+        if provider_id
+        else ""
+    )
+    if configured:
+        return configured
     return catalog.latest_for(tool)
 
 
@@ -389,6 +444,7 @@ def _build_steps(
             "fallback_tools": fallbacks,
             "tool_attempt_index": 0,
             "write_task": stage.get("write_task"),
+            "reasoning_effort": stage.get("reasoning_effort"),
             "instruction": stage.get("instruction"),
             "suggested_arguments": recipes._suggest_args(stage, user_args, pol),
             "status": "pending",
@@ -606,6 +662,8 @@ def _next_action(state: Dict[str, Any]) -> Dict[str, Any]:
                 "arguments": step.get("suggested_arguments") or {},
                 "instruction": step.get("instruction"),
             }
+            if step.get("warnings"):
+                action["warnings"] = list(step["warnings"])
             action["action_id"] = _action_identity(state, action)
             return action
         return {
@@ -1256,6 +1314,7 @@ def prepare_step(
     project_root: str = ".",
     context: Optional[str] = None,
     bindings: Optional[Dict[str, str]] = None,
+    provider_models: Optional[Dict[str, str]] = None,
     extra_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Prepare ONE ready-to-call leaf invocation for a host-planned delegation.
@@ -1278,7 +1337,11 @@ def prepare_step(
     if not tool:
         raise ValueError(f"cannot resolve a leaf for capability={capability!r}")
 
-    resolved_model = model or catalog.latest_for(tool)
+    resolved_model = _resolve_model_for_tool(
+        tool,
+        model,
+        provider_models=provider_models if capability != "image" else None,
+    )
 
     artifacts: Dict[str, Any] = {}
     root = str(project_root or ".")
@@ -1317,6 +1380,7 @@ def prepare_step(
         "fallback_tools": fallbacks,
         "model": args.get("model") or resolved_model,
         "arguments": args,
+        "warnings": list(step.get("warnings") or []),
         "gathered": [
             k for k in ("facts_text", "code_text", "git_text", "findings_text") if k in artifacts
         ],

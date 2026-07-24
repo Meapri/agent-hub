@@ -12,11 +12,12 @@ consent_file_path = _gate.consent_file_path
 user_consent_enabled = _gate.user_consent_enabled
 require_consent = _gate.require_consent
 consent_status = _gate.consent_status
+consent_revision = _gate.consent_revision
 grant_consent = _gate.grant_consent
 revoke_consent = _gate.revoke_consent
 
 __all__ = [
     "CONSENT_FILE_VERSION", "TRUE_VALUES", "env_flag", "consent_file_path",
     "user_consent_enabled", "require_consent", "consent_status",
-    "grant_consent", "revoke_consent",
+    "consent_revision", "grant_consent", "revoke_consent",
 ]

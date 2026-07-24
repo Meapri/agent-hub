@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from io import BytesIO
+import json
+from pathlib import Path
+import stat
+import threading
+import time
+import urllib.error
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +47,42 @@ def test_consent_grant_and_status(monkeypatch, tmp_path):
     assert security.user_consent_enabled() is True
     st = security.consent_status()
     assert st["user_consent"] is True
+
+
+def test_consent_regrant_is_idempotent(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("GROK_CODEX_USER_CONSENT", raising=False)
+    path = security.grant_consent()
+    before = path.read_bytes()
+    revision = security.consent_revision()
+
+    security.grant_consent()
+
+    assert path.read_bytes() == before
+    assert security.consent_revision() == revision
+
+
+@pytest.mark.parametrize("invalid_version", ["oops", "1", True, 1.9])
+def test_consent_invalid_version_is_disabled_and_regrant_repairs(
+    monkeypatch,
+    tmp_path,
+    invalid_version,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("GROK_CODEX_USER_CONSENT", raising=False)
+    path = security.consent_file_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"accepted": True, "version": invalid_version}),
+        encoding="utf-8",
+    )
+
+    assert security.user_consent_enabled() is False
+
+    security.grant_consent()
+
+    assert security.user_consent_enabled() is True
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
 
 
 def test_chat_builds_and_parses(monkeypatch, tmp_path):
@@ -134,28 +178,41 @@ def test_oauth_tools_are_dispatchable(monkeypatch, tmp_path):
     assert status["success"] is False
     assert status["logged_in"] is False
 
-    with patch.object(
-        oauth_login,
-        "start_login",
-        return_value={"success": True, "text": "open browser", "user_code": "TEST"},
-    ):
-        started = dispatch_tool("grok_codex_login_start", {"open_browser": False})
-    assert started["success"] is True
-    assert started["user_code"] == "TEST"
+    with patch.object(oauth_login, "start_login") as start_login:
+        started = dispatch_tool("grok_codex_login_start", {})
+    assert started["success"] is False
+    assert started["error"] == "provider_gui_required"
+    assert Path(started["next_action"]["command"]).is_absolute()
+    assert Path(started["next_action"]["command"]).name == "agent-hub-connect"
+    assert started["next_action"]["args"] == []
+    start_login.assert_not_called()
 
-    with patch.object(
-        oauth_login,
-        "complete_login",
-        return_value={"success": True, "text": "complete", "token_file": "/tmp/token"},
-    ):
+    with patch.object(oauth_login, "complete_login") as complete_login:
         completed = dispatch_tool("grok_codex_login_complete", {})
-    assert completed["success"] is True
+    assert completed["success"] is False
+    assert completed["error"] == "provider_gui_required"
+    complete_login.assert_not_called()
 
     (tmp_path / "cfg").mkdir(parents=True, exist_ok=True)
     oauth_login.token_path().write_text('{"access_token":"test"}', encoding="utf-8")
     logged_out = dispatch_tool("grok_codex_logout", {})
-    assert logged_out["success"] is True
-    assert logged_out["removed"] is True
+    assert logged_out["success"] is False
+    assert logged_out["error"] == "provider_gui_required"
+    assert oauth_login.token_path().is_file()
+
+
+def test_oauth_tool_annotations_match_credential_mutations():
+    tools = {item["name"]: item for item in tool_definitions()}
+
+    assert tools["grok_codex_login_status"]["annotations"]["readOnlyHint"] is True
+    for name in (
+        "grok_codex_login_start",
+        "grok_codex_login_complete",
+        "grok_codex_logout",
+    ):
+        assert tools[name]["annotations"]["readOnlyHint"] is True
+        assert tools[name]["annotations"]["destructiveHint"] is False
+        assert tools[name]["inputSchema"]["properties"] == {}
 
 
 def test_strips_reasoning_effort(monkeypatch, tmp_path):
@@ -181,6 +238,21 @@ def test_oauth_status_empty(monkeypatch, tmp_path):
 
     st = oauth_login.status()
     assert st["logged_in"] is False
+    assert st["token_file_present"] is False
+    assert st["pending_login_present"] is False
+
+
+def test_oauth_status_reports_malformed_local_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    oauth_login.token_path().parent.mkdir(parents=True)
+    oauth_login.token_path().write_text("{broken", encoding="utf-8")
+    oauth_login.pending_path().write_text("{}", encoding="utf-8")
+
+    state = oauth_login.status()
+
+    assert state["logged_in"] is False
+    assert state["token_file_present"] is True
+    assert state["pending_login_present"] is True
 
 
 def test_oauth_status_reports_expiry_without_refresh(monkeypatch, tmp_path):
@@ -199,6 +271,433 @@ def test_oauth_status_reports_expiry_without_refresh(monkeypatch, tmp_path):
     assert state["logged_in"] is True
     assert state["token_valid"] is False
     assert state["refresh_recommended"] is True
+
+
+def test_oauth_poll_rejects_untrusted_token_endpoint():
+    with pytest.raises(RuntimeError, match="refusing non-xAI token_endpoint"):
+        oauth_login.poll_device_token(
+            token_endpoint="https://auth.x.ai.attacker.example/token",
+            device_code="device",
+            expires_in=1,
+            poll_interval=1,
+        )
+
+
+def test_oauth_http_error_does_not_expose_response_body():
+    response_body = BytesIO(
+        b'{"error":"server_error","detail":"sentinel-refresh-token"}'
+    )
+    error = urllib.error.HTTPError(
+        oauth_login.XAI_OAUTH_DEVICE_CODE_URL,
+        400,
+        "Bad Request",
+        {},
+        response_body,
+    )
+
+    with patch.object(
+        oauth_login.urllib.request,
+        "urlopen",
+        side_effect=error,
+    ):
+        with pytest.raises(RuntimeError) as raised:
+            oauth_login._http_json(  # noqa: SLF001
+                "POST",
+                oauth_login.XAI_OAUTH_DEVICE_CODE_URL,
+                form={"client_id": "public-client"},
+            )
+
+    assert "HTTP 400" in str(raised.value)
+    assert "sentinel-refresh-token" not in str(raised.value)
+    assert "server_error" not in str(raised.value)
+
+
+def test_oauth_poll_rechecks_cancellation_after_successful_response():
+    cancel_event = threading.Event()
+
+    def cancelled_response(*_args, **_kwargs):
+        cancel_event.set()
+        return {
+            "access_token": "must-not-be-returned",
+            "refresh_token": "must-not-be-returned",
+        }
+
+    with patch.object(oauth_login, "_http_json", side_effect=cancelled_response):
+        with pytest.raises(RuntimeError, match="cancelled"):
+            oauth_login.poll_device_token(
+                token_endpoint="https://auth.x.ai/oauth/token",
+                device_code="device",
+                expires_in=5,
+                poll_interval=1,
+                cancel_event=cancel_event,
+            )
+
+
+def test_oauth_clear_tokens_also_removes_pending_login(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    oauth_login.token_path().parent.mkdir(parents=True)
+    oauth_login.token_path().write_text('{"access_token":"test"}', encoding="utf-8")
+    oauth_login.pending_path().write_text('{"device_code":"test"}', encoding="utf-8")
+
+    assert oauth_login.clear_tokens() is True
+    assert not oauth_login.token_path().exists()
+    assert not oauth_login.pending_path().exists()
+
+
+def test_oauth_refresh_does_not_recreate_deleted_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login.save_tokens(
+        {
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "expires_in": 3600,
+        }
+    )
+    stored = json.loads(oauth_login.token_path().read_text(encoding="utf-8"))
+    stored["last_refresh"] = "2020-01-01T00:00:00Z"
+    oauth_login._write_private_json(oauth_login.token_path(), stored)
+
+    def refresh_then_delete(*_args, **_kwargs):
+        oauth_login.clear_tokens()
+        return {
+            "access_token": "must-not-be-saved",
+            "refresh_token": "must-not-be-saved",
+            "expires_in": 3600,
+        }
+
+    monkeypatch.setattr(oauth_login, "refresh_tokens", refresh_then_delete)
+
+    assert oauth_login.resolve_access_token() is None
+    assert not oauth_login.token_path().exists()
+
+
+def test_oauth_token_and_pending_files_are_written_private(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login.save_tokens(
+        {
+            "access_token": "test",
+            "refresh_token": "refresh",
+            "expires_in": 3600,
+        }
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "discovery",
+        lambda: {"token_endpoint": "https://auth.x.ai/oauth/token"},
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "request_device_code",
+        lambda: {
+            "device_code": "device",
+            "user_code": "CODE",
+            "verification_uri": "https://accounts.x.ai/device",
+            "expires_in": 900,
+            "interval": 5,
+        },
+    )
+    started = oauth_login.start_login(open_browser=False)
+
+    assert stat.S_IMODE(oauth_login.token_path().stat().st_mode) == 0o600
+    assert stat.S_IMODE(oauth_login.pending_path().stat().st_mode) == 0o600
+    assert list(oauth_login.token_path().parent.glob("*.tmp")) == []
+    pending = json.loads(oauth_login.pending_path().read_text(encoding="utf-8"))
+    assert pending["version"] == oauth_login.PENDING_VERSION
+    assert pending["flow_id"] == started["flow_id"]
+    assert pending["consent_revision"]
+
+
+def test_oauth_start_does_not_overwrite_active_pending_flow(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    monkeypatch.setattr(
+        oauth_login,
+        "discovery",
+        lambda: {"token_endpoint": "https://auth.x.ai/oauth/token"},
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "request_device_code",
+        lambda: {
+            "device_code": "device",
+            "user_code": "CODE",
+            "verification_uri": "https://accounts.x.ai/device",
+            "expires_in": 900,
+            "interval": 5,
+        },
+    )
+    oauth_login.start_login(open_browser=False)
+    before = oauth_login.pending_path().read_text(encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="already in progress"):
+        oauth_login.start_login(open_browser=False)
+
+    assert oauth_login.pending_path().read_text(encoding="utf-8") == before
+
+
+def test_oauth_pending_clear_requires_matching_flow(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    monkeypatch.setattr(
+        oauth_login,
+        "discovery",
+        lambda: {"token_endpoint": "https://auth.x.ai/oauth/token"},
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "request_device_code",
+        lambda: {
+            "device_code": "device",
+            "user_code": "CODE",
+            "verification_uri": "https://accounts.x.ai/device",
+            "expires_in": 900,
+            "interval": 5,
+        },
+    )
+    started = oauth_login.start_login(open_browser=False)
+
+    assert oauth_login.clear_pending_login(expected_flow_id="other-flow") is False
+    assert oauth_login.pending_path().is_file()
+    assert (
+        oauth_login.clear_pending_login(expected_flow_id=started["flow_id"])
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{not-json",
+        json.dumps({"created_at": time.time(), "device_code": "legacy"}),
+    ],
+)
+def test_oauth_clear_unusable_pending_recovers_invalid_or_legacy_state(
+    monkeypatch,
+    tmp_path,
+    payload,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login.pending_path().parent.mkdir(parents=True, exist_ok=True)
+    oauth_login.pending_path().write_text(payload, encoding="utf-8")
+
+    assert oauth_login.clear_unusable_pending_login() is True
+    assert not oauth_login.pending_path().exists()
+
+
+def test_oauth_clear_unusable_pending_preserves_active_owned_flow(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login._write_private_json(
+        oauth_login.pending_path(),
+        {
+            "version": oauth_login.PENDING_VERSION,
+            "flow_id": "owned-flow",
+            "consent_revision": security.consent_revision(),
+            "created_at": time.time(),
+            "expires_in": 900,
+        },
+    )
+
+    assert oauth_login.clear_unusable_pending_login() is False
+    assert oauth_login.pending_path().is_file()
+
+
+def test_oauth_complete_reports_cleanup_warning_after_token_commit(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login._write_private_json(
+        oauth_login.pending_path(),
+        {
+            "version": oauth_login.PENDING_VERSION,
+            "flow_id": "owned-flow",
+            "consent_revision": security.consent_revision(),
+            "created_at": time.time(),
+            "expires_in": 900,
+            "interval": 1,
+            "token_endpoint": "https://auth.x.ai/oauth/token",
+            "device_code": "device",
+        },
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "poll_device_token",
+        lambda **_kwargs: {
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "expires_in": 3600,
+        },
+    )
+    original_unlink = oauth_login.Path.unlink
+
+    def fail_pending_unlink(path, *args, **kwargs):
+        if path == oauth_login.pending_path():
+            raise OSError("busy")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        oauth_login.Path,
+        "unlink",
+        fail_pending_unlink,
+    )
+
+    result = oauth_login.complete_login(expected_flow_id="owned-flow")
+
+    assert result["success"] is True
+    assert result["warnings"] == ["pending_cleanup_failed"]
+    assert oauth_login.token_path().is_file()
+    assert oauth_login.pending_path().is_file()
+
+
+def test_oauth_completion_cancelled_at_commit_guard_does_not_save_tokens(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login._write_private_json(
+        oauth_login.pending_path(),
+        {
+            "version": oauth_login.PENDING_VERSION,
+            "flow_id": "owned-flow",
+            "consent_revision": security.consent_revision(),
+            "created_at": time.time(),
+            "expires_in": 900,
+            "interval": 1,
+            "token_endpoint": "https://auth.x.ai/oauth/token",
+            "device_code": "device",
+        },
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "poll_device_token",
+        lambda **_kwargs: {
+            "access_token": "must-not-be-saved",
+            "refresh_token": "must-not-be-saved",
+            "expires_in": 3600,
+        },
+    )
+    gate = threading.Lock()
+    gate.acquire()
+    reached_guard = threading.Event()
+    cancel_event = threading.Event()
+    errors: list[Exception] = []
+
+    @contextmanager
+    def commit_guard():
+        reached_guard.set()
+        with gate:
+            yield
+
+    def complete() -> None:
+        try:
+            oauth_login.complete_login(
+                cancel_event=cancel_event,
+                expected_flow_id="owned-flow",
+                commit_guard=commit_guard,
+            )
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    worker = threading.Thread(target=complete)
+    worker.start()
+    assert reached_guard.wait(timeout=5)
+    cancel_event.set()
+    gate.release()
+    worker.join(timeout=5)
+
+    assert len(errors) == 1
+    assert "cancelled" in str(errors[0])
+    assert not oauth_login.token_path().exists()
+    assert oauth_login.pending_path().is_file()
+
+
+def test_oauth_completion_does_not_commit_replaced_flow(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    security.grant_consent()
+    monkeypatch.setattr(
+        oauth_login,
+        "discovery",
+        lambda: {"token_endpoint": "https://auth.x.ai/oauth/token"},
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "request_device_code",
+        lambda: {
+            "device_code": "device",
+            "user_code": "CODE",
+            "verification_uri": "https://accounts.x.ai/device",
+            "expires_in": 900,
+            "interval": 5,
+        },
+    )
+    started = oauth_login.start_login(open_browser=False)
+
+    def replace_flow(**_kwargs):
+        pending = json.loads(oauth_login.pending_path().read_text(encoding="utf-8"))
+        pending["flow_id"] = "replacement-flow"
+        oauth_login._write_private_json(oauth_login.pending_path(), pending)
+        return {
+            "access_token": "discard-me",
+            "refresh_token": "discard-refresh",
+            "expires_in": 3600,
+        }
+
+    monkeypatch.setattr(oauth_login, "poll_device_token", replace_flow)
+
+    with pytest.raises(RuntimeError, match="replaced"):
+        oauth_login.complete_login(expected_flow_id=started["flow_id"])
+
+    assert not oauth_login.token_path().exists()
+    pending = json.loads(oauth_login.pending_path().read_text(encoding="utf-8"))
+    assert pending["flow_id"] == "replacement-flow"
+
+
+def test_oauth_completion_rejects_revoke_and_regrant(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    security.grant_consent()
+    monkeypatch.setattr(
+        oauth_login,
+        "discovery",
+        lambda: {"token_endpoint": "https://auth.x.ai/oauth/token"},
+    )
+    monkeypatch.setattr(
+        oauth_login,
+        "request_device_code",
+        lambda: {
+            "device_code": "device",
+            "user_code": "CODE",
+            "verification_uri": "https://accounts.x.ai/device",
+            "expires_in": 900,
+            "interval": 5,
+        },
+    )
+    started = oauth_login.start_login(open_browser=False)
+
+    def change_consent(**_kwargs):
+        security.revoke_consent()
+        security.grant_consent()
+        return {
+            "access_token": "discard-me",
+            "refresh_token": "discard-refresh",
+            "expires_in": 3600,
+        }
+
+    monkeypatch.setattr(oauth_login, "poll_device_token", change_consent)
+
+    with pytest.raises(RuntimeError, match="consent changed"):
+        oauth_login.complete_login(expected_flow_id=started["flow_id"])
+
+    assert not oauth_login.token_path().exists()
+    assert oauth_login.pending_path().is_file()
 
 
 def test_auth_prefers_oauth_token(monkeypatch, tmp_path):

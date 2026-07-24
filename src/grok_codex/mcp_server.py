@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import sys
 from typing import Any, Callable, Dict, List
 
@@ -91,25 +93,54 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "name": "grok_codex_login_status",
             "description": "SuperGrok / xAI OAuth login status (no secrets).",
             "inputSchema": _empty_schema(),
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "grok_codex_login_start",
-            "description": "Start xAI device-code OAuth (SuperGrok / Premium+). Returns verification URL.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"open_browser": {"type": "boolean", "default": True}},
-                "additionalProperties": False,
+            "description": (
+                "Return the Agent Hub connection-manager command. xAI login starts only "
+                "from a visible user action in the local GUI."
+            ),
+            "inputSchema": _empty_schema(),
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
             },
         },
         {
             "name": "grok_codex_login_complete",
-            "description": "Poll until device authorization completes; saves tokens.",
+            "description": (
+                "Return the Agent Hub connection-manager command without completing "
+                "OAuth through MCP."
+            ),
             "inputSchema": _empty_schema(),
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "grok_codex_logout",
-            "description": "Delete local SuperGrok OAuth tokens (does not revoke on xAI).",
+            "description": (
+                "Return the Agent Hub connection-manager command. Local credential "
+                "deletion requires visible confirmation in the GUI."
+            ),
             "inputSchema": _empty_schema(),
+            "annotations": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            },
         },
         {
             "name": "grok_codex_doctor",
@@ -167,45 +198,32 @@ def _login_status(_args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _login_start(args: Dict[str, Any]) -> Dict[str, Any]:
-    security.require_consent()
-    out = oauth_login.start_login(open_browser=bool(args.get("open_browser", True)))
+def _provider_gui_required(_args: Dict[str, Any]) -> Dict[str, Any]:
+    console_script = Path(sys.executable).with_name("agent-hub-connect")
+    if console_script.is_file() and os.access(console_script, os.X_OK):
+        command = str(console_script)
+        command_args: list[str] = []
+    else:
+        command = sys.executable
+        command_args = ["-m", "agent_hub.connect_app"]
     return {
-        **out,
-        **response.standard_fields(
-            success=bool(out.get("success")),
-            provider="xai",
-            backend="subscription-oauth",
+        "success": False,
+        "error": "provider_gui_required",
+        "error_type": "provider_gui_required",
+        "text": (
+            "Open the local Agent Hub connection manager and confirm the account "
+            "action in its browser tab."
         ),
-    }
-
-
-def _login_complete(_args: Dict[str, Any]) -> Dict[str, Any]:
-    security.require_consent()
-    out = oauth_login.complete_login()
-    return {
-        **out,
+        "next_action": {
+            "type": "local_gui",
+            "command": command,
+            "args": command_args,
+            "provider": "grok",
+        },
         **response.standard_fields(
-            success=bool(out.get("success")),
+            success=False,
             provider="xai",
-            backend="subscription-oauth",
-        ),
-    }
-
-
-def _logout(_args: Dict[str, Any]) -> Dict[str, Any]:
-    removed = oauth_login.clear_tokens()
-    out = {
-        "success": True,
-        "removed": removed,
-        "text": "Local SuperGrok OAuth tokens removed." if removed else "No local SuperGrok OAuth tokens found.",
-    }
-    return {
-        **out,
-        **response.standard_fields(
-            success=True,
-            provider="xai",
-            backend="subscription-oauth",
+            backend="local-connection-manager",
         ),
     }
 
@@ -220,9 +238,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         "grok_codex_chat": chat.run_chat,
         "grok_codex_list_models": models.list_models,
         "grok_codex_login_status": _login_status,
-        "grok_codex_login_start": _login_start,
-        "grok_codex_login_complete": _login_complete,
-        "grok_codex_logout": _logout,
+        "grok_codex_login_start": _provider_gui_required,
+        "grok_codex_login_complete": _provider_gui_required,
+        "grok_codex_logout": _provider_gui_required,
         "grok_codex_doctor": _doctor,
     }
     if name not in table:

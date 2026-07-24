@@ -447,18 +447,35 @@ def merge_stream_chunks(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) -> Dict[str, Any]:
+    original_arguments = dict(arguments or {})
+    explicit_model = str(original_arguments.get("model") or "").strip()
+    explicit_task = str(original_arguments.get("task") or "").strip()
+    explicit_thinking = bool(
+        str(original_arguments.get("thinking_level") or "").strip()
+    )
     try:
         from . import profiles
 
-        arguments = profiles.apply_profile_to_chat_args(arguments)
+        arguments = profiles.apply_profile_to_chat_args(original_arguments)
     except Exception:
-        arguments = dict(arguments or {})
-    task_hint = str(arguments.get("task") or "chat").strip() or "chat"
-    model = model_prefs.resolve_model(
-        explicit=str(arguments.get("model") or ""),
-        task=task_hint if task_hint in model_prefs.TASK_KEYS else "chat",
-        fallback=DEFAULT_MODEL,
-    ) or DEFAULT_MODEL
+        arguments = original_arguments
+    profile_model = str(arguments.get("model") or "").strip() if not explicit_model else ""
+    preference_task = explicit_task if explicit_task in model_prefs.TASK_KEYS else "chat"
+    model = (
+        model_prefs.resolve_model(
+            explicit=explicit_model,
+            task=preference_task,
+            fallback=profile_model or DEFAULT_MODEL,
+        )
+        or DEFAULT_MODEL
+    )
+    arguments["model"] = model
+    if (
+        not explicit_thinking
+        and str(arguments.get("thinking_level") or "").strip()
+        and not supports_thinking_level(model)
+    ):
+        arguments.pop("thinking_level", None)
     requested_thinking = str(arguments.get("thinking_level") or "").strip().lower()
     if requested_thinking and requested_thinking not in {"minimal", "low", "medium", "high"}:
         raise ValueError("thinking_level must be minimal, low, medium, or high")

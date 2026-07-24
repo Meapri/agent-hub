@@ -622,6 +622,9 @@ def execute_plan(
                         "text": str(response.get("text") or ""),
                         "attempts": attempts,
                         "data": response.get("data") or response,
+                        "warnings": [
+                            str(item) for item in response.get("warnings") or []
+                        ],
                     }
             except ProviderCallDeadlineExceeded:
                 attempts.append(
@@ -787,6 +790,13 @@ def execute_plan(
             }
 
     final = results[normalized["final_step"]]
+    warnings = list(
+        dict.fromkeys(
+            str(warning)
+            for result in results.values()
+            for warning in result.get("warnings") or []
+        )
+    )
     return {
         "success": bool(final.get("success")),
         "status": "completed" if final.get("success") else "failed",
@@ -796,4 +806,5 @@ def execute_plan(
         "waves": waves,
         "leaf_calls": runtime_budget.used,
         "final_step": normalized["final_step"],
+        "warnings": warnings,
     }

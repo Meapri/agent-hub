@@ -445,6 +445,7 @@ def plan_recipe(
                 "capability": stage.get("capability"),
                 "tool": tool,
                 "instruction": stage.get("instruction"),
+                "reasoning_effort": stage.get("reasoning_effort"),
                 "suggested_arguments": _suggest_args(stage, args, pol),
                 "status": "pending",
             }

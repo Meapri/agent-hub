@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 from pathlib import Path
 from typing import Iterable
+
+from agent_hub.core.auth_state import auth_state_lock as _auth_state_lock
+from agent_hub.core.auth_state import consent_file_revision
+
+from . import paths
 
 SENSITIVE_COMPONENTS = {
     ".aws",
@@ -44,6 +49,16 @@ def env_flag(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in TRUE_VALUES
 
 
+def consent_payload_enabled(data: object) -> bool:
+    if not isinstance(data, dict) or data.get("accepted") is not True:
+        return False
+    stored_version = data.get("version")
+    return (
+        type(stored_version) is int
+        and stored_version == CONSENT_FILE_VERSION
+    )
+
+
 def cli_bridge_enabled() -> bool:
     return user_consent_enabled() or env_flag("GOOGLE_ANTIGRAVITY_ENABLE_CLI_BRIDGE")
 
@@ -65,11 +80,21 @@ def user_consent_enabled() -> bool:
         data = json.loads(consent_file_path().read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return False
-    return bool(
-        isinstance(data, dict)
-        and data.get("accepted") is True
-        and int(data.get("version") or 0) == CONSENT_FILE_VERSION
-    )
+    return consent_payload_enabled(data)
+
+
+def auth_state_lock():
+    return _auth_state_lock(paths.config_dir())
+
+
+def consent_revision() -> str:
+    if env_flag("GOOGLE_ANTIGRAVITY_USER_CONSENT"):
+        return "env:GOOGLE_ANTIGRAVITY_USER_CONSENT"
+    if env_flag("GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION"):
+        return "env:GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION"
+    if not user_consent_enabled():
+        return "none"
+    return f"file:{consent_file_revision(consent_file_path())}"
 
 
 def consent_file_path() -> Path:

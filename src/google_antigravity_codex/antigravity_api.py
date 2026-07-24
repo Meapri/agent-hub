@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +15,7 @@ from . import __version__, agy_auth
 
 ENDPOINT = "https://cloudcode-pa.googleapis.com"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MODEL_ALIAS_CACHE_TTL_SECONDS = 5 * 60.0
 
 # Aliases informed by Meapri/hermes-google-antigravity-plugin Cloud Code PA client.
 MODEL_ALIASES = {
@@ -44,6 +46,11 @@ CAPACITY_FALLBACK_CHAIN: Dict[str, List[str]] = {
     "gemini-3.5-flash-low": ["gemini-3.5-flash-extra-low", "gemini-pro-agent"],
     "gemini-3.5-flash-extra-low": ["gemini-pro-agent"],
 }
+
+_MODEL_ALIAS_CACHE_LOCK = threading.Lock()
+_MODEL_ALIAS_CACHE: Dict[str, str] = {}
+_MODEL_ALIAS_CACHE_EXPIRES_AT = 0.0
+_MODEL_ALIAS_CACHE_PROJECT = ""
 
 
 class AntigravityApiError(RuntimeError):
@@ -131,9 +138,63 @@ def _credentials_and_project(
     return credentials, resolve_project_id(credentials)
 
 
-def _resolve_model(model: str) -> str:
+def _remember_live_model_aliases(
+    models: List[Dict[str, Any]],
+    *,
+    project: str,
+) -> None:
+    aliases: Dict[str, str] = {}
+    for item in models:
+        public_id = str(item.get("id") or "").strip()
+        internal_id = str(item.get("internal_id") or public_id).strip()
+        if public_id and internal_id:
+            aliases[public_id] = internal_id
+    with _MODEL_ALIAS_CACHE_LOCK:
+        global _MODEL_ALIAS_CACHE, _MODEL_ALIAS_CACHE_EXPIRES_AT
+        global _MODEL_ALIAS_CACHE_PROJECT
+        _MODEL_ALIAS_CACHE = aliases
+        _MODEL_ALIAS_CACHE_EXPIRES_AT = (
+            time.monotonic() + MODEL_ALIAS_CACHE_TTL_SECONDS
+        )
+        _MODEL_ALIAS_CACHE_PROJECT = project
+
+
+def _cached_live_model_alias(model: str, *, project: str) -> str | None:
+    with _MODEL_ALIAS_CACHE_LOCK:
+        if (
+            project != _MODEL_ALIAS_CACHE_PROJECT
+            or time.monotonic() >= _MODEL_ALIAS_CACHE_EXPIRES_AT
+        ):
+            return None
+        return _MODEL_ALIAS_CACHE.get(model)
+
+
+def _resolve_model(
+    model: str,
+    *,
+    project: str,
+    refresh_live: bool = False,
+) -> str:
     requested = str(model or "").strip() or "gemini-3.5-flash-high"
-    return MODEL_ALIASES.get(requested, requested)
+    static_alias = MODEL_ALIASES.get(requested)
+    if static_alias:
+        return static_alias
+    if requested.startswith("MODEL_") or requested in MODEL_ALIASES.values():
+        return requested
+    live_alias = _cached_live_model_alias(requested, project=project)
+    if live_alias:
+        return live_alias
+    if refresh_live:
+        list_models(refresh=True)
+        live_alias = _cached_live_model_alias(requested, project=project)
+        if live_alias:
+            return live_alias
+    return requested
+
+
+def _resolved_model_chain(model: str, *, project: str) -> tuple[str, List[str]]:
+    resolved = _resolve_model(model, project=project, refresh_live=True)
+    return resolved, [resolved] + CAPACITY_FALLBACK_CHAIN.get(resolved, [])
 
 
 def _stream_post(
@@ -217,14 +278,15 @@ def generate_content(
     credentials, project = _credentials_and_project()
     if not project:
         raise AntigravityApiError("Could not resolve the Antigravity project id.", code="antigravity_project_missing")
-    resolved = _resolve_model(model)
-    fallback_models = [resolved] + CAPACITY_FALLBACK_CHAIN.get(resolved, [])
+    resolved, fallback_models = _resolved_model_chain(model, project=project)
     attempts = max(0, min(int(max_retries), 5)) + 1
     request_count = 0
     auth_refreshed = False
     last_error: Optional[AntigravityApiError] = None
 
-    for model_index, attempt_model in enumerate(fallback_models):
+    model_index = 0
+    while model_index < len(fallback_models):
+        attempt_model = fallback_models[model_index]
         body = {
             "project": project,
             "model": attempt_model,
@@ -263,7 +325,15 @@ def generate_content(
                             "Could not resolve the Antigravity project id after OAuth refresh.",
                             code="antigravity_project_missing",
                         )
+                    resolved, fallback_models = _resolved_model_chain(
+                        model,
+                        project=project,
+                    )
+                    model_index = 0
+                    attempt_model = fallback_models[model_index]
                     body["project"] = project
+                    body["model"] = attempt_model
+                    body["requestId"] = "agent-" + str(uuid.uuid4())
                     auth_refreshed = True
                     continue
                 # Capacity exhausted: skip retries on the same model and try the next tier.
@@ -273,6 +343,7 @@ def generate_content(
                     raise
                 time.sleep(min(max(0.0, float(retry_sleep_cap_seconds)), 0.5 * (2**attempt)))
                 attempt += 1
+        model_index += 1
     raise last_error or AntigravityApiError("Antigravity request failed.")
 
 
@@ -292,12 +363,13 @@ def generate_content_stream(
     credentials, project = _credentials_and_project()
     if not project:
         raise AntigravityApiError("Could not resolve the Antigravity project id.", code="antigravity_project_missing")
-    resolved = _resolve_model(model)
-    fallback_models = [resolved] + CAPACITY_FALLBACK_CHAIN.get(resolved, [])
+    resolved, fallback_models = _resolved_model_chain(model, project=project)
     last_error: Optional[AntigravityApiError] = None
     auth_refreshed = False
 
-    for model_index, attempt_model in enumerate(fallback_models):
+    model_index = 0
+    while model_index < len(fallback_models):
+        attempt_model = fallback_models[model_index]
         body = {
             "project": project,
             "model": attempt_model,
@@ -306,44 +378,60 @@ def generate_content_stream(
             "userAgent": "antigravity",
             "requestId": "agent-stream-" + str(uuid.uuid4()),
         }
-        try:
-            yielded = 0
-            for chunk in _stream_post(
-                "/v1internal:streamGenerateContent",
-                body,
-                credentials.access_token,
-                timeout=timeout,
-            ):
-                yielded += 1
-                yield chunk
-            if yielded == 0:
-                raise AntigravityApiError(
-                    "Antigravity stream returned no chunks.",
-                    code="antigravity_stream_empty",
-                )
-            yield {
-                "_antigravity_diagnostics": {
-                    "backend": "agy-oauth-code-assist",
-                    "auth_source": "agy-token-export",
-                    "streamed": True,
-                    "requested_model": resolved,
-                    "used_model": attempt_model,
-                    "capacity_fallback": model_index > 0,
-                    "auth_refreshed": auth_refreshed,
-                    "chunk_count": yielded,
+        while True:
+            try:
+                yielded = 0
+                for chunk in _stream_post(
+                    "/v1internal:streamGenerateContent",
+                    body,
+                    credentials.access_token,
+                    timeout=timeout,
+                ):
+                    yielded += 1
+                    yield chunk
+                if yielded == 0:
+                    raise AntigravityApiError(
+                        "Antigravity stream returned no chunks.",
+                        code="antigravity_stream_empty",
+                    )
+                yield {
+                    "_antigravity_diagnostics": {
+                        "backend": "agy-oauth-code-assist",
+                        "auth_source": "agy-token-export",
+                        "streamed": True,
+                        "requested_model": resolved,
+                        "used_model": attempt_model,
+                        "capacity_fallback": model_index > 0,
+                        "auth_refreshed": auth_refreshed,
+                        "chunk_count": yielded,
+                    }
                 }
-            }
-            return
-        except AntigravityApiError as exc:
-            last_error = exc
-            if exc.code == "antigravity_unauthorized" and not auth_refreshed:
-                credentials = agy_auth.force_refresh_credentials()
-                project = resolve_project_id(credentials)
-                auth_refreshed = True
-                continue
-            if exc.status_code == 503 and model_index + 1 < len(fallback_models):
-                continue
-            raise
+                return
+            except AntigravityApiError as exc:
+                last_error = exc
+                if exc.code == "antigravity_unauthorized" and not auth_refreshed:
+                    credentials = agy_auth.force_refresh_credentials()
+                    project = resolve_project_id(credentials)
+                    if not project:
+                        raise AntigravityApiError(
+                            "Could not resolve the Antigravity project id after OAuth refresh.",
+                            code="antigravity_project_missing",
+                        )
+                    resolved, fallback_models = _resolved_model_chain(
+                        model,
+                        project=project,
+                    )
+                    model_index = 0
+                    attempt_model = fallback_models[model_index]
+                    body["project"] = project
+                    body["model"] = attempt_model
+                    body["requestId"] = "agent-stream-" + str(uuid.uuid4())
+                    auth_refreshed = True
+                    continue
+                if exc.status_code == 503 and model_index + 1 < len(fallback_models):
+                    break
+                raise
+        model_index += 1
     raise last_error or AntigravityApiError("Antigravity stream request failed.")
 
 
@@ -361,7 +449,8 @@ def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
         if exc.code != "antigravity_unauthorized" or not refresh:
             raise
         credentials = agy_auth.force_refresh_credentials()
-        body["project"] = resolve_project_id(credentials)
+        project = resolve_project_id(credentials)
+        body["project"] = project
         payload = _post(
             "/v1internal:fetchAvailableModels",
             body,
@@ -416,6 +505,7 @@ def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
                 "methods": ["generateContent", "generateImages"],
             }
         )
+    _remember_live_model_aliases(models, project=project)
     return models
 
 

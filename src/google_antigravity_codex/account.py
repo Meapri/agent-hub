@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Literal
 
 from . import agy_auth, oauth_login, paths, response, security
 
@@ -50,7 +49,6 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     present = token_path.is_file()
     result: Dict[str, Any] = {
         "success": False,
-        "token_file": str(token_path),
         "token_file_present": present,
         "email": None,
         "email_verified": None,
@@ -69,7 +67,7 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
         return result
 
     try:
-        creds = agy_auth.valid_credentials(refresh=True)
+        creds = agy_auth.valid_credentials(refresh=False)
     except Exception as exc:
         result["text"] = f"Token present but not usable ({getattr(exc, 'code', type(exc).__name__)})."
         result["error_type"] = getattr(exc, "code", type(exc).__name__)
@@ -107,17 +105,6 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
         except Exception:
             project_id = ""
 
-    # Persist non-secret email onto token file if missing
-    if email:
-        try:
-            data = json.loads(token_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and not data.get("email"):
-                data["email"] = email
-                token_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-                os.chmod(token_path, 0o600)
-        except Exception:
-            pass
-
     result.update(
         {
             "success": True,
@@ -142,14 +129,14 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return result
 
 
-def _unlink(path: Path) -> bool:
+def _unlink(path: Path) -> Literal["missing", "removed", "failed"]:
     try:
-        if path.is_file():
-            path.unlink()
-            return True
+        path.unlink()
+    except FileNotFoundError:
+        return "missing"
     except OSError:
-        return False
-    return False
+        return "failed"
+    return "removed"
 
 
 def logout(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -171,22 +158,51 @@ def logout(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
             ]
         )
     seen: set[str] = set()
-    unique: List[str] = []
-    for path in candidates:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        if _unlink(path):
-            unique.append(key)
+    removed_count = 0
+    missing_count = 0
+    failed_count = 0
+    with security.auth_state_lock():
+        for path in candidates:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            outcome = _unlink(path)
+            if outcome == "removed":
+                removed_count += 1
+            elif outcome == "missing":
+                missing_count += 1
+            elif outcome == "failed":
+                failed_count += 1
 
-    return {
-        "text": (
-            f"Logged out locally; removed {len(unique)} file(s). "
+    success = failed_count == 0
+    if failed_count:
+        text = "Some local Google login information could not be removed."
+    elif removed_count:
+        text = (
+            f"Logged out locally; removed {removed_count} file(s). "
             "Google-side revoke and agy Keychain were not modified."
-        ),
-        "success": True,
-        "removed": unique,
+        )
+    else:
+        text = "No Agent Hub Google login information was stored locally."
+
+    result = {
+        "text": text,
+        "removed": removed_count > 0,
+        "removed_count": removed_count,
+        "missing_count": missing_count,
+        "failed_count": failed_count,
         "forget_client": forget_client,
-        **response.standard_fields(backend="account"),
+        **response.standard_fields(
+            success=success,
+            backend="account",
+            warnings=(
+                ["credential_removal_incomplete"]
+                if failed_count
+                else []
+            ),
+        ),
     }
+    if failed_count:
+        result["error_type"] = "credential_removal_failed"
+    return result

@@ -15,40 +15,53 @@ from . import security
 
 def grant() -> Path:
     path = security.consent_file_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        path.parent.chmod(0o700)
-    except OSError:
-        pass
-    payload = {
-        "accepted": True,
-        "version": security.CONSENT_FILE_VERSION,
-        "accepted_at": datetime.now(timezone.utc).isoformat(),
-        "scope": "optional-antigravity-integrations",
-    }
-    temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, path)
-    finally:
+    with security.auth_state_lock():
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            temp.unlink()
-        except FileNotFoundError:
+            path.parent.chmod(0o700)
+        except OSError:
             pass
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            current = None
+        if security.consent_payload_enabled(current):
+            return path
+        payload = {
+            "accepted": True,
+            "version": security.CONSENT_FILE_VERSION,
+            "accepted_at": datetime.now(timezone.utc).isoformat(),
+            "grant_id": secrets.token_urlsafe(18),
+            "scope": "optional-antigravity-integrations",
+        }
+        temp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        fd = os.open(
+            temp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+        finally:
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
     return path
 
 
 def revoke() -> Path:
     path = security.consent_file_path()
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
+    with security.auth_state_lock():
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
     return path
 
 

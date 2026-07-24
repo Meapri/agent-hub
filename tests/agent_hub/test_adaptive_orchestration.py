@@ -1416,3 +1416,111 @@ def test_adaptive_compare_maps_models_to_participants(tmp_path, monkeypatch):
 
     assert captured["providers"] == ["claude", "gemini"]
     assert captured["models"] == ["claude-opus-4-8", "gemini-3.1-pro-high"]
+
+
+def test_adaptive_compare_preserves_partial_provider_model_map(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+
+    def fake_compare(arguments):
+        captured.update(arguments)
+        return operations.envelope(
+            "compare_models", {"success": True, "text": "agreed"}, provider="multiple"
+        )
+
+    monkeypatch.setattr(operations, "_compare_models", fake_compare)
+    operations._adaptive_step_call(
+        {
+            "id": "frontier_compare",
+            "capability": "compare",
+            "provider": "multiple",
+            "depends_on": [],
+            "fallback_providers": [],
+            "instruction": "Compare the README findings.",
+            "final": True,
+            "participants": ["claude", "gemini"],
+        },
+        "multiple",
+        {},
+        args={
+            "project_root": root,
+            "models": {"claude": "claude-opus-4-8"},
+        },
+        goal="Compare findings.",
+    )
+
+    assert captured["providers"] == ["claude", "gemini"]
+    assert captured["models"] == ["claude-opus-4-8", ""]
+
+
+def test_adaptive_state_snapshots_all_effective_models(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    monkeypatch.setattr(
+        operations,
+        "_effective_provider_models",
+        lambda: {
+            "claude": "claude-snapshot",
+            "grok": "grok-snapshot",
+            "gemini": "gemini-snapshot",
+            "gpt": "gpt-snapshot",
+        },
+    )
+
+    state = operations._new_adaptive_state(
+        _single_chat_plan(),
+        {
+            "project_root": root,
+            "models": {"claude": "claude-explicit"},
+        },
+        {},
+    )
+
+    assert state["options"]["models"] == {
+        "claude": "claude-explicit",
+        "grok": "grok-snapshot",
+        "gemini": "gemini-snapshot",
+        "gpt": "gpt-snapshot",
+    }
+
+
+def test_adaptive_resume_keeps_persisted_model_snapshot(monkeypatch, tmp_path):
+    root = _policy_root(tmp_path)
+    persisted = {
+        "project_root": root,
+        "models": {
+            "claude": "claude-original",
+            "grok": "grok-original",
+            "gemini": "gemini-original",
+            "gpt": "gpt-original",
+        },
+    }
+    monkeypatch.setattr(
+        operations,
+        "_effective_provider_models",
+        lambda: pytest.fail("complete persisted snapshots must not reread live settings"),
+    )
+
+    options = operations._adaptive_run_options(
+        {"models": {"claude": "claude-override"}},
+        persisted,
+    )
+
+    assert options["models"] == persisted["models"]
+
+
+def test_adaptive_executor_surfaces_successful_step_warnings():
+    result = orchestrator.execute_plan(
+        _single_chat_plan(),
+        invoke=lambda *_args, **_kwargs: {
+            "success": True,
+            "text": "done",
+            "warnings": [
+                "automatic_reasoning_effort_omitted:claude:claude-haiku-test"
+            ],
+        },
+        max_calls=4,
+    )
+
+    assert result["warnings"] == [
+        "automatic_reasoning_effort_omitted:claude:claude-haiku-test"
+    ]

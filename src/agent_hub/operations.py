@@ -6,6 +6,8 @@ from contextlib import nullcontext
 from copy import deepcopy
 import json
 import os
+from pathlib import Path
+import sys
 import time
 from typing import Any, Callable, Dict, Iterable, List
 import uuid
@@ -30,13 +32,11 @@ from grok_codex import auth as grok_auth
 from grok_codex import models as grok_models
 from grok_codex import mcp_server as grok_mcp
 from grok_codex import image as grok_image
-from grok_codex import oauth_login as grok_oauth
 from grok_codex import search as grok_search
 from grok_codex import security as grok_security
-from google_antigravity_codex import account as google_account
-from google_antigravity_codex import agy_auth as google_auth
 from google_antigravity_codex import mcp_server as google_mcp
 from google_antigravity_codex import model_prefs as google_model_prefs
+from google_antigravity_codex import models as google_models
 from google_antigravity_codex import oauth_login as google_oauth
 from google_antigravity_codex import profiles as google_profiles
 from google_antigravity_codex import provider as google_provider
@@ -94,6 +94,7 @@ COMPARE_PARTICIPANT_MAX_CHARS = 4_000
 _PROVIDER_CALL_INTERNAL_KEYS = {
     "_provider_call_budget",
     "_provider_call_reservation",
+    "_reasoning_effort_implicit",
 }
 PROVIDER_ALIASES = dict(provider_registry.ALIASES)
 
@@ -206,14 +207,6 @@ def _selected_providers(value: Any) -> List[str]:
     return list(PROVIDERS) if provider == "all" else [provider]
 
 
-def _require_google_consent() -> None:
-    if not google_security.agy_session_enabled():
-        raise RuntimeError(
-            "Google Antigravity consent is required. Grant consent or set "
-            "GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION=1."
-        )
-
-
 def _error_object(raw: Dict[str, Any]) -> Dict[str, Any] | None:
     value = raw.get("error")
     if not value:
@@ -279,6 +272,111 @@ def _unwrap_mcp_result(result: Dict[str, Any]) -> Dict[str, Any]:
     return raw
 
 
+def _provider_model_state(
+    provider: str,
+    *,
+    fallback: str,
+    environment_name: str | None = None,
+) -> Dict[str, Any]:
+    settings, settings_error = provider_settings.inspect(provider)
+    saved = str(settings.get("model") or "").strip()
+    environment = (
+        str(os.getenv(environment_name, "") or "").strip()
+        if environment_name
+        else ""
+    )
+    return {
+        "default_model": saved or environment or fallback,
+        "base_default_model": fallback,
+        "model_overridden": bool(saved),
+        "model_managed_by_environment": bool(environment and not saved),
+        "model_source": (
+            "saved" if saved else "environment" if environment else "provider_default"
+        ),
+        "settings_error": settings_error,
+        "settings": settings,
+    }
+
+
+def _gemini_model_state() -> Dict[str, Any]:
+    prefs, settings_error = google_model_prefs.inspect_prefs()
+    tasks = prefs.get("task_models") if isinstance(prefs.get("task_models"), dict) else {}
+    task_model = str(tasks.get("chat") or "").strip()
+    saved_default = str(prefs.get("default_model") or "").strip()
+    environment = str(os.getenv("GOOGLE_ANTIGRAVITY_DEFAULT_MODEL", "") or "").strip()
+    profile = google_profiles.active_profile()
+    profile_model = str((profile or {}).get("model") or "").strip()
+    profile_name = str((profile or {}).get("name") or "").strip()
+    selected = (
+        task_model
+        or saved_default
+        or environment
+        or profile_model
+        or "gemini-3.5-flash-high"
+    )
+    return {
+        "default_model": google_model_prefs.normalize_model_id(selected),
+        "base_default_model": "gemini-3.5-flash-high",
+        "model_overridden": bool(task_model or saved_default),
+        "model_managed_by_environment": bool(
+            environment and not task_model and not saved_default
+        ),
+        "model_source": (
+            "saved_chat"
+            if task_model
+            else "saved"
+            if saved_default
+            else "environment"
+            if environment
+            else "profile"
+            if profile_model
+            else "provider_default"
+        ),
+        "model_override_scope": (
+            "task:chat"
+            if task_model
+            else "default"
+            if saved_default
+            else f"profile:{profile_name}"
+            if profile_model and profile_name
+            else None
+        ),
+        "settings_error": settings_error,
+    }
+
+
+def _effective_provider_models() -> Dict[str, str]:
+    return {
+        "claude": _provider_model_state(
+            "claude",
+            fallback=claude_models.DEFAULT_MODEL,
+            environment_name="CLAUDE_CODEX_MODEL",
+        )["default_model"],
+        "grok": _provider_model_state(
+            "grok",
+            fallback=grok_models.DEFAULT_MODEL,
+            environment_name="GROK_CODEX_MODEL",
+        )["default_model"],
+        "gemini": _gemini_model_state()["default_model"],
+        "gpt": _provider_model_state(
+            "gpt",
+            fallback=openai_models.DEFAULT_MODEL,
+        )["default_model"],
+    }
+
+
+def _snapshot_provider_models(explicit: Any = None) -> Dict[str, str]:
+    """Freeze every provider model, overlaying only non-empty explicit choices."""
+
+    snapshot = _effective_provider_models()
+    if isinstance(explicit, dict):
+        for provider in PROVIDERS:
+            selected = str(explicit.get(provider) or "").strip()
+            if selected:
+                snapshot[provider] = selected
+    return snapshot
+
+
 def _status(args: Dict[str, Any]) -> Dict[str, Any]:
     probe = bool(args.get("probe", False))
     states: Dict[str, Any] = {}
@@ -287,58 +385,86 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
             consent = claude_security.consent_status()
             auth = claude_auth.status()
             authenticated = bool(auth.get("ready"))
+            model_state = _provider_model_state(
+                "claude",
+                fallback=claude_models.DEFAULT_MODEL,
+                environment_name="CLAUDE_CODEX_MODEL",
+            )
             states[provider] = {
                 "consent": bool(consent.get("user_consent")),
                 "configured": bool(auth.get("configured")),
                 "authenticated": authenticated,
                 "ready": bool(consent.get("user_consent") and authenticated),
                 "auth_mode": auth.get("active_mode"),
-                "default_model": claude_models.DEFAULT_MODEL,
-                "settings": provider_settings.get("claude"),
+                **model_state,
                 "capabilities": capabilities.provider_capabilities("claude"),
-                "warnings": []
-                if authenticated
-                else [
-                    "auth_refresh_required"
-                    if auth.get("credentials_present")
-                    else "credentials_missing"
-                ],
+                "warnings": (
+                    []
+                    if authenticated
+                    else [
+                        "auth_refresh_required"
+                        if auth.get("credentials_present")
+                        else "credentials_missing"
+                    ]
+                )
+                + ([model_state["settings_error"]] if model_state["settings_error"] else []),
             }
         elif provider == "grok":
             consent = grok_security.consent_status()
             auth = grok_auth.status()
             authenticated = bool(auth.get("ready"))
+            model_state = _provider_model_state(
+                "grok",
+                fallback=grok_models.DEFAULT_MODEL,
+                environment_name="GROK_CODEX_MODEL",
+            )
             states[provider] = {
                 "consent": bool(consent.get("user_consent")),
                 "configured": bool(auth.get("configured")),
                 "authenticated": authenticated,
                 "ready": bool(consent.get("user_consent") and authenticated),
                 "auth_mode": auth.get("active_mode"),
-                "default_model": grok_models.DEFAULT_MODEL,
-                "settings": provider_settings.get("grok"),
+                "local_credentials_present": bool(
+                    (auth.get("subscription") or {}).get("token_file_present")
+                ),
+                "pending_login_present": bool(
+                    (auth.get("subscription") or {}).get("pending_login_present")
+                ),
+                **model_state,
                 "capabilities": capabilities.provider_capabilities("grok"),
-                "warnings": []
-                if authenticated
-                else [
-                    "auth_refresh_required"
-                    if auth.get("credentials_present")
-                    else "credentials_missing"
-                ],
+                "warnings": (
+                    []
+                    if authenticated
+                    else [
+                        "auth_refresh_required"
+                        if auth.get("credentials_present")
+                        else "credentials_missing"
+                    ]
+                )
+                + ([model_state["settings_error"]] if model_state["settings_error"] else []),
             }
         elif provider == "gpt":
             consent = openai_security.consent_status()
             auth = openai_auth.status(refresh=False)
+            model_state = _provider_model_state(
+                "gpt",
+                fallback=openai_models.DEFAULT_MODEL,
+            )
             warnings = [str(auth["warning"])] if auth.get("warning") else []
+            if auth.get("status_warning"):
+                warnings.append(str(auth["status_warning"]))
             if auth.get("error_type"):
                 warnings.append(str(auth["error_type"]))
+            if model_state["settings_error"]:
+                warnings.append(model_state["settings_error"])
             states[provider] = {
                 "consent": bool(consent.get("user_consent")),
-                "authenticated": bool(auth.get("logged_in")),
+                "configured": bool(auth.get("configured")),
+                "authenticated": bool(auth.get("configured")),
                 "ready": bool(consent.get("user_consent") and auth.get("configured")),
                 "auth_mode": auth.get("auth_mode"),
                 "plan_type": auth.get("plan_type"),
-                "default_model": openai_models.DEFAULT_MODEL,
-                "settings": provider_settings.get("gpt"),
+                **model_state,
                 "capabilities": capabilities.provider_capabilities("gpt"),
                 "warnings": warnings,
             }
@@ -357,20 +483,24 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 and configured
                 and healthy is not False
             )
+            model_state = _gemini_model_state()
             states[provider] = {
                 "consent": bool(consent.get("user_consent") or consent.get("agy_session_enabled")),
+                "configured": configured,
                 "authenticated": authenticated,
                 "ready": ready,
                 "auth_mode": provider_state.get("auth_method") or "plugin_oauth_login",
-                "default_model": google_model_prefs.resolve_model(
-                    task="chat", fallback="gemini-3.5-flash-high"
-                ),
-                "identity": {"email": login.get("email")} if login.get("email") else None,
+                "local_credentials_present": bool(login.get("token_file_present")),
+                "pending_login_present": bool(login.get("pending_login")),
+                **model_state,
                 "quota_available": False,
                 "capabilities": capabilities.provider_capabilities("gemini"),
-                "warnings": []
-                if ready
-                else [str(provider_state.get("error_type") or "provider_not_ready")],
+                "warnings": (
+                    []
+                    if ready
+                    else [str(provider_state.get("error_type") or "provider_not_ready")]
+                )
+                + ([model_state["settings_error"]] if model_state["settings_error"] else []),
             }
     ready_count = sum(bool(item.get("ready")) for item in states.values())
     raw = {
@@ -410,109 +540,51 @@ def _list_models(args: Dict[str, Any]) -> Dict[str, Any]:
     return envelope("list_models", raw, success=True)
 
 
-def _auth_start(args: Dict[str, Any]) -> Dict[str, Any]:
+def _auth_gui_action(
+    args: Dict[str, Any],
+    *,
+    operation: str,
+) -> Dict[str, Any]:
     provider = _normalize_provider(args.get("provider"))
-    if provider == "claude":
-        raw = {
-            "success": True,
-            "text": "Run `claude auth login --claudeai`, then mirror Keychain credentials on macOS.",
-            "next_action": {
-                "type": "external_cli",
-                "command": "claude auth login --claudeai",
-            },
-        }
-    elif provider == "grok":
-        grok_security.require_consent()
-        raw = grok_oauth.start_login(open_browser=bool(args.get("open_browser", True)))
-    elif provider == "gpt":
-        openai_security.require_consent()
-        raw = openai_auth.login_action(
-            device=bool(args.get("device") or args.get("login_method") == "device")
-        )
+    console_script = Path(sys.executable).with_name("agent-hub-connect")
+    if console_script.is_file() and os.access(console_script, os.X_OK):
+        command = str(console_script)
+        command_args: list[str] = []
     else:
-        _require_google_consent()
-        raw = google_oauth.start_login(
-            use_local_redirect=bool(args.get("use_local_redirect", True))
-        )
-    return envelope("auth_start", raw, provider=provider)
+        command = sys.executable
+        command_args = ["-m", "agent_hub.connect_app"]
+    raw = {
+        "success": False,
+        "text": (
+            "Open the local Agent Hub connection manager and confirm the account action "
+            "in its browser tab."
+        ),
+        "next_action": {
+            "type": "local_gui",
+            "command": command,
+            "args": command_args,
+            "provider": provider,
+        },
+        "error": "provider_gui_required",
+        "error_type": "provider_gui_required",
+    }
+    return envelope(operation, raw, provider=provider, success=False)
+
+
+def _auth_start(args: Dict[str, Any]) -> Dict[str, Any]:
+    return _auth_gui_action(args, operation="auth_start")
 
 
 def _auth_complete(args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = _normalize_provider(args.get("provider"))
-    if provider == "claude":
-        raise ValueError(
-            "Claude login completes in the external Claude CLI; use agent_hub_status afterward."
-        )
-    if provider == "grok":
-        grok_security.require_consent()
-        raw = grok_oauth.complete_login()
-    elif provider == "gpt":
-        openai_security.require_consent()
-        state = openai_auth.require_subscription()
-        raw = {
-            "success": True,
-            "text": "Official Codex subscription login is ready.",
-            "auth_mode": state.get("auth_mode"),
-            "plan_type": state.get("plan_type"),
-        }
-    else:
-        _require_google_consent()
-        value = str(args.get("code_or_url") or args.get("code") or args.get("url") or "")
-        raw = google_oauth.complete_login(value, probe=bool(args.get("probe", True)))
-    return envelope("auth_complete", raw, provider=provider)
+    return _auth_gui_action(args, operation="auth_complete")
 
 
 def _auth_refresh(args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = _normalize_provider(args.get("provider"))
-    if provider == "claude":
-        raw = claude_mcp.dispatch_tool("claude_codex_login_refresh", {})
-    elif provider == "gemini":
-        raw = google_auth.refresh_tool({})
-    elif provider == "gpt":
-        openai_security.require_consent()
-        state = openai_auth.require_subscription(refresh=True)
-        raw = {
-            "success": True,
-            "text": "Official Codex refreshed and validated the shared ChatGPT login.",
-            "auth_mode": state.get("auth_mode"),
-            "plan_type": state.get("plan_type"),
-        }
-    else:
-        token = grok_oauth.resolve_access_token()
-        raw = {
-            "success": bool(token),
-            "text": "SuperGrok OAuth token is ready."
-            if token
-            else "No refreshable SuperGrok token found.",
-            "error": "token_missing" if not token else None,
-        }
-    return envelope("auth_refresh", raw, provider=provider)
+    return _auth_gui_action(args, operation="auth_refresh")
 
 
 def _auth_logout(args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = _normalize_provider(args.get("provider"))
-    if provider == "claude":
-        raw = {
-            "success": False,
-            "text": "Claude credentials are managed by Claude Code. Use its logout command.",
-            "error": "external_logout_required",
-        }
-    elif provider == "grok":
-        removed = grok_oauth.clear_tokens()
-        raw = {"success": True, "removed": removed, "text": "Local SuperGrok tokens removed."}
-    elif provider == "gpt":
-        raw = {
-            "success": False,
-            "text": (
-                "Agent Hub will not log out the shared Codex account. "
-                "Run `codex logout` explicitly if you intend to sign every Codex client out."
-            ),
-            "error": "shared_codex_logout_refused",
-            "next_action": {"type": "external_cli", "command": "codex logout"},
-        }
-    else:
-        raw = google_account.logout({"forget_client": bool(args.get("forget_client", False))})
-    return envelope("auth_logout", raw, provider=provider)
+    return _auth_gui_action(args, operation="auth_logout")
 
 
 def _auto_chat_provider(args: Dict[str, Any]) -> str:
@@ -599,6 +671,7 @@ def _clamp_provider_timeout(call_args: Dict[str, Any], remaining_seconds: float 
 
 def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
     capabilities.require(provider, "chat")
+    effort_is_implicit = bool(args.get("_reasoning_effort_implicit", False))
     call_args = {
         k: v
         for k, v in args.items()
@@ -608,6 +681,23 @@ def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
         defaults = provider_settings.get(provider)
         for key, value in defaults.items():
             call_args.setdefault(key, value)
+    effective_model = str(call_args.get("model") or "").strip()
+    if not effective_model:
+        if provider == "gemini":
+            effective_model = str(_gemini_model_state()["default_model"])
+        else:
+            effective_model = str(_effective_provider_models().get(provider) or "")
+    omitted_effort_warning = ""
+    if (
+        effort_is_implicit
+        and call_args.get("reasoning_effort") is not None
+        and effective_model
+        and not capabilities.supports_reasoning_effort(provider, effective_model)
+    ):
+        call_args.pop("reasoning_effort", None)
+        omitted_effort_warning = (
+            f"automatic_reasoning_effort_omitted:{provider}:{effective_model}"
+        )
     call_args = _prepare_multimodal(call_args)
     call_args, provenance = consistency_gate.prepare_provider_call(call_args)
     with _provider_dispatch_scope(args) as remaining_seconds:
@@ -632,6 +722,11 @@ def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 call_args["thinking_level"] = call_args.pop("reasoning_effort")
             raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
     result = dict(raw)
+    if omitted_effort_warning:
+        warnings = [str(item) for item in result.get("warnings") or []]
+        if omitted_effort_warning not in warnings:
+            warnings.append(omitted_effort_warning)
+        result["warnings"] = warnings
     existing = result.get("consistency") if isinstance(result.get("consistency"), dict) else {}
     result["consistency"] = {**existing, **provenance}
     return result
@@ -684,6 +779,7 @@ def _write_call(
             "max_policy_chars": args.get("max_policy_chars"),
             "_provider_call_budget": args.get("_provider_call_budget"),
             "_provider_call_reservation": args.get("_provider_call_reservation"),
+            "_reasoning_effort_implicit": args.get("_reasoning_effort_implicit"),
         },
     )
 
@@ -803,7 +899,7 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(raw_models, str):
         models = [item.strip() for item in raw_models.replace(";", ",").split(",") if item.strip()]
     elif isinstance(raw_models, list):
-        models = [str(item).strip() for item in raw_models if str(item).strip()]
+        models = [str(item).strip() if item is not None else "" for item in raw_models]
     else:
         models = []
     raw_providers = args.get("providers")
@@ -817,13 +913,17 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
         providers = [_normalize_provider(requested)]
     if not providers and requested == "all":
         providers = list(PROVIDERS)
-    if not providers and models:
-        providers = [_model_provider(model.split("/", 1)[-1]) for model in models]
+    if not providers and any(models):
+        providers = [
+            _model_provider(model.split("/", 1)[-1])
+            for model in models
+            if model
+        ]
     if not providers:
         providers = list(DEFAULT_COMPARE_PROVIDERS)
     targets: List[tuple[str, str | None]] = []
     for index, provider in enumerate(providers[: len(PROVIDERS)]):
-        model = models[index] if index < len(models) else None
+        model = (models[index] or None) if index < len(models) else None
         if model and "/" in model and model.split("/", 1)[0] in PROVIDERS:
             prefix, model = model.split("/", 1)
             provider = prefix
@@ -881,6 +981,7 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 "max_policy_chars": max_policy_chars,
                 "_provider_call_budget": args.get("_provider_call_budget"),
                 "_provider_call_reservation": active_reservation,
+                "_reasoning_effort_implicit": args.get("_reasoning_effort_implicit"),
             },
         )
 
@@ -964,6 +1065,11 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
     else:
         status = "failed"
         warnings = ["compare_provider_failures", "insufficient_compare_responses"]
+    warnings.extend(
+        str(warning)
+        for item in results
+        for warning in item.get("warnings") or []
+    )
     consistency_report: Dict[str, Any] | None = None
     success = ok >= min_successes
     text = f"Compared {len(results)} provider/model targets ({ok} succeeded)."
@@ -1107,6 +1213,7 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
             "max_policy_chars": args.get("max_policy_chars"),
             "_provider_call_budget": args.get("_provider_call_budget"),
             "_provider_call_reservation": args.get("_provider_call_reservation"),
+            "_reasoning_effort_implicit": args.get("_reasoning_effort_implicit"),
         },
     )
     warnings = list(raw_chat.get("warnings") or [])
@@ -1183,6 +1290,7 @@ def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
             "max_policy_chars": args.get("max_policy_chars"),
             "_provider_call_budget": args.get("_provider_call_budget"),
             "_provider_call_reservation": args.get("_provider_call_reservation"),
+            "_reasoning_effort_implicit": args.get("_reasoning_effort_implicit"),
         },
     )
     return envelope(
@@ -1230,10 +1338,55 @@ def _get_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     return envelope("get_settings", raw, success=True)
 
 
+def _known_text_model_ids(provider: str) -> set[str]:
+    if provider == "claude":
+        items = claude_models.CURATED
+    elif provider == "grok":
+        items = [
+            item
+            for item in grok_models.CURATED
+            if "imagine-image" not in str(item.get("id") or "")
+            and "imagine-video" not in str(item.get("id") or "")
+        ]
+    elif provider == "gpt":
+        items = [{"id": openai_models.DEFAULT_MODEL}]
+    else:
+        items = google_models.static_model_catalog()
+    return {
+        str(item.get("id") or "").strip()
+        for item in items
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+
+
+def _validate_text_model(provider: str, model: Any) -> str:
+    raw = str(model or "").strip()
+    model_id = (
+        google_model_prefs.normalize_model_id(raw)
+        if provider == "gemini"
+        else raw
+    )
+    if not model_id:
+        raise ValueError("model is required")
+    known = _known_text_model_ids(provider)
+    if not known:
+        raise ValueError(
+            f"{provider} text model catalog is unavailable; "
+            "retry or set validate=false explicitly"
+        )
+    if model_id not in known:
+        raise ValueError(
+            f"model '{model_id}' is not in the installed {provider} text model catalog; "
+            "set validate=false only after verifying it with the provider"
+        )
+    return model_id
+
+
 def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = _normalize_provider(args.get("provider") or "gemini", allow_auto=True)
     if provider == "auto":
         provider = "gemini"
+    validate = bool(args.get("validate", True))
     if provider in {"claude", "grok", "gpt"}:
         requested = {
             key: args.get(key)
@@ -1251,6 +1404,8 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
             for key, value in requested.items()
             if key in allowed
         }
+        if "model" in changes and validate:
+            changes["model"] = _validate_text_model(provider, changes["model"])
         if not changes:
             raise ValueError(f"provide a supported {provider} setting to update")
         current = provider_settings.update(provider, changes)
@@ -1265,12 +1420,19 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
         )
     changes: List[Dict[str, Any]] = []
     if args.get("model"):
+        model = (
+            _validate_text_model("gemini", args["model"])
+            if validate
+            else args["model"]
+        )
         changes.append(
             google_model_prefs.set_model_tool(
                 {
-                    "model": args["model"],
+                    "model": model,
                     "task": args.get("task"),
-                    "validate": bool(args.get("validate", True)),
+                    # The canonical Agent Hub layer already enforced exact
+                    # text-catalog membership when validation was requested.
+                    "validate": False,
                     "notes": args.get("notes", ""),
                 }
             )
@@ -1305,26 +1467,62 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = _normalize_provider(args.get("provider") or "gemini", allow_all=True)
+    reset = str(args.get("reset") or "all")
     if provider in {"claude", "grok", "gpt"}:
-        removed = provider_settings.reset(provider)
+        if reset == "model":
+            remaining = provider_settings.remove(provider, {"model"})
+            removed = {
+                "provider": provider,
+                "removed": True,
+                "remaining": remaining,
+            }
+        elif reset == "all":
+            removed = provider_settings.reset(provider)
+        else:
+            raise ValueError(
+                f"reset={reset} is only supported for the gemini provider"
+            )
         return envelope(
             "reset_settings",
-            {"success": True, "text": f"Reset {provider} settings.", **removed},
+            {
+                "success": True,
+                "text": (
+                    f"Reset {provider} model."
+                    if reset == "model"
+                    else f"Reset {provider} settings."
+                ),
+                **removed,
+            },
             provider=provider,
         )
     if provider == "all":
-        removed = [
-            provider_settings.reset(item)
-            for item in ("claude", "grok", "gpt")
-        ]
+        if reset == "model":
+            removed = [
+                {
+                    "provider": item,
+                    "removed": True,
+                    "remaining": provider_settings.remove(item, {"model"}),
+                }
+                for item in ("claude", "grok", "gpt")
+            ]
+        elif reset == "all":
+            removed = [
+                provider_settings.reset(item)
+                for item in ("claude", "grok", "gpt")
+            ]
+        else:
+            removed = []
     else:
         removed = []
-    reset = str(args.get("reset") or "all")
     changes: List[Dict[str, Any]] = []
     if reset in {"all", "model"}:
         changes.append(
             google_model_prefs.clear_prefs_tool(
-                {"task": args.get("task"), "all": reset == "all" or bool(args.get("all"))}
+                {
+                    "task": args.get("task"),
+                    "all": reset == "all" or bool(args.get("all")),
+                    "default_scopes": reset == "model" and not args.get("task"),
+                }
             )
         )
     if reset in {"all", "transport"}:
@@ -1478,13 +1676,27 @@ def _adaptive_run_options(
     args: Dict[str, Any], existing: Dict[str, Any] | None = None
 ) -> Dict[str, Any]:
     options = dict(existing or {})
+    resuming = existing is not None
     options.update(
         {
             key: value
             for key, value in args.items()
-            if key in _ADAPTIVE_RUN_OPTION_KEYS and value is not None
+            if key in _ADAPTIVE_RUN_OPTION_KEYS
+            and value is not None
+            and not (resuming and key == "models")
         }
     )
+    if resuming:
+        persisted_models = options.get("models")
+        complete_snapshot = bool(
+            isinstance(persisted_models, dict)
+            and all(
+                str(persisted_models.get(provider) or "").strip()
+                for provider in PROVIDERS
+            )
+        )
+        if not complete_snapshot:
+            options["models"] = _snapshot_provider_models(persisted_models)
     options["project_root"] = str(gather.validate_project_root(options.get("project_root") or "."))
     options["workflow_timeout"] = _adaptive_workflow_timeout(options.get("workflow_timeout"))
     options["per_call_timeout"] = max(5.0, float(options.get("per_call_timeout") or 180))
@@ -1570,6 +1782,7 @@ def _new_adaptive_state(
         else _load_workflow_handoff(args)
     )
     options = _adaptive_run_options(args)
+    options["models"] = _snapshot_provider_models(options.get("models"))
     created_at = time.time()
     state = {
         "run_id": uuid.uuid4().hex[:12],
@@ -1846,6 +2059,9 @@ def _adaptive_step_call(
         "project_root": root,
         "_provider_call_budget": args.get("_provider_call_budget"),
         "_provider_call_reservation": step.get("_provider_call_reservation"),
+        "_reasoning_effort_implicit": bool(
+            args.get("_reasoning_effort_implicit", False)
+        ),
         **policy_args,
     }
     if capability == "chat":
@@ -1961,7 +2177,7 @@ def _adaptive_step_call(
             {
                 "prompt": context,
                 "providers": participants,
-                "models": participant_models if all(participant_models) else None,
+                "models": participant_models if any(participant_models) else None,
                 "project_root": root,
                 "execution": "parallel",
                 "max_concurrency": args.get("max_concurrency") or 3,
@@ -1972,6 +2188,9 @@ def _adaptive_step_call(
                 "timeout_sec": args.get("per_call_timeout") or 180,
                 "_provider_call_budget": args.get("_provider_call_budget"),
                 "_provider_call_reservation": step.get("_provider_call_reservation"),
+                "_reasoning_effort_implicit": bool(
+                    args.get("_reasoning_effort_implicit", False)
+                ),
                 **policy_args,
             }
         )
@@ -2069,6 +2288,7 @@ def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     plan_args = {
         k: v for k, v in args.items() if k not in {"workflow_id", "recipe_id", "preset", "bindings"}
     }
+    plan_args["_provider_models"] = _effective_provider_models()
     planned = recipes.plan_recipe(resolved["recipe_id"], args=plan_args, bindings=bindings)
     return envelope(
         "plan_workflow",
@@ -2100,6 +2320,7 @@ def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in args.items()
         if k not in {"workflow_id", "recipe_id", "preset", "bindings", "auto_local"}
     }
+    run_args["_provider_models"] = _effective_provider_models()
     state = runner.start_run(
         resolved["recipe_id"],
         args=run_args,
@@ -2228,6 +2449,9 @@ def _continue_adaptive_workflow(
             "per_call_timeout": min(requested_per_call, remaining),
             "_provider_call_budget": provider_budget,
             "_handoff_snapshot": state.get("_handoff_snapshot"),
+            "_reasoning_effort_implicit": (
+                str((plan.get("planner") or {}).get("provider") or "") != "caller"
+            ),
         }
         return _adaptive_step_call(
             dict(step),
@@ -2774,6 +2998,10 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     from agent_hub.core.inprocess import make_resolver
 
     if _is_adaptive(args):
+        execution_args = {
+            **args,
+            "models": _snapshot_provider_models(args.get("models")),
+        }
         workflow_timeout = _adaptive_workflow_timeout(args.get("workflow_timeout"))
         started = time.monotonic()
         requested_per_call = float(args.get("per_call_timeout") or 180)
@@ -2809,10 +3037,13 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
                     "text": "Adaptive workflow exhausted its end-to-end time budget.",
                 }
             step_args = {
-                **args,
+                **execution_args,
                 "per_call_timeout": min(requested_per_call, remaining),
                 "_provider_call_budget": provider_budget,
                 "_handoff_snapshot": handoff_snapshot,
+                "_reasoning_effort_implicit": (
+                    str((plan.get("planner") or {}).get("provider") or "") != "caller"
+                ),
             }
             return _adaptive_step_call(
                 dict(step),
@@ -2835,7 +3066,7 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
         )
         resumable: Dict[str, Any] = {}
         if result.get("status") == "timed_out":
-            state = _new_adaptive_state(plan, args, handoff_snapshot)
+            state = _new_adaptive_state(plan, execution_args, handoff_snapshot)
             persisted = {
                 step_id: item
                 for step_id, item in (result.get("results") or {}).items()
@@ -2891,6 +3122,7 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             "workflow_timeout",
         }
     }
+    run_args["_provider_models"] = _effective_provider_models()
     result = broker.run_auto(
         resolved["recipe_id"],
         args=run_args,
@@ -2917,6 +3149,7 @@ def _delegate(args: Dict[str, Any]) -> Dict[str, Any]:
         gather_kind=args.get("gather") or None,
         project_root=str(args.get("project_root") or "."),
         context=args.get("context") or None,
+        provider_models=_effective_provider_models(),
         extra_args=args.get("extra_args") if isinstance(args.get("extra_args"), dict) else None,
     )
     return envelope("delegate", {"success": True, "text": "Delegated call prepared.", **prepared})
@@ -3256,64 +3489,35 @@ TOOL_SPECS: List[Dict[str, Any]] = [
     ),
     _spec(
         "agent_hub_auth_start",
-        "Start Login",
-        "Start the provider-specific login flow or return the required external action.",
-        _object(
-            {
-                **AUTH_PROVIDER_SCHEMA,
-                "open_browser": {"type": "boolean", "default": True},
-                "use_local_redirect": {"type": "boolean", "default": True},
-                "device": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "For GPT, return the official Codex device-login command.",
-                },
-                "login_method": {
-                    "type": "string",
-                    "enum": ["browser", "device"],
-                    "default": "browser",
-                },
-            },
-            required=("provider",),
-        ),
-        read_only=False,
-        open_world=True,
+        "Open Login Manager",
+        "Return the local GUI command; account and consent changes require direct user action.",
+        _object(AUTH_PROVIDER_SCHEMA, required=("provider",)),
+        read_only=True,
+        idempotent=True,
     ),
     _spec(
         "agent_hub_auth_complete",
-        "Complete Login",
-        "Complete a provider login flow.",
-        _object(
-            {
-                **AUTH_PROVIDER_SCHEMA,
-                "code_or_url": {"type": "string"},
-                "code": {"type": "string"},
-                "url": {"type": "string"},
-                "probe": {"type": "boolean", "default": True},
-            },
-            required=("provider",),
-        ),
-        read_only=False,
-        open_world=True,
+        "Complete Login in GUI",
+        "Return the local GUI command without accepting OAuth codes through MCP.",
+        _object(AUTH_PROVIDER_SCHEMA, required=("provider",)),
+        read_only=True,
+        idempotent=True,
     ),
     _spec(
         "agent_hub_auth_refresh",
-        "Refresh Login",
-        "Refresh or validate a provider OAuth token.",
+        "Refresh Login in GUI",
+        "Return the local GUI command without rotating provider credentials through MCP.",
         _object(AUTH_PROVIDER_SCHEMA, required=("provider",)),
-        read_only=False,
+        read_only=True,
         idempotent=True,
-        open_world=True,
     ),
     _spec(
         "agent_hub_auth_logout",
-        "Log Out",
-        "Delete local OAuth credentials for a provider.",
-        _object(
-            {**AUTH_PROVIDER_SCHEMA, "forget_client": {"type": "boolean", "default": False}},
-            required=("provider",),
-        ),
-        read_only=False,
+        "Disconnect in GUI",
+        "Return the local GUI command; credential deletion requires direct user confirmation.",
+        _object(AUTH_PROVIDER_SCHEMA, required=("provider",)),
+        read_only=True,
+        idempotent=True,
     ),
     _spec(
         "agent_hub_chat",

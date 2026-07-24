@@ -7,10 +7,13 @@ so chat/write/search/image/route tools share one selection without re-passing
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import re
 from pathlib import Path
+import threading
 from typing import Any, Dict, List, Optional
 
 from . import io_util, paths, response
@@ -25,6 +28,7 @@ TASK_KEYS = (
     "release",
     "image",
 )
+_LOCK = threading.RLock()
 
 # Friendly aliases → canonical ids used by this plugin / agy.
 MODEL_ALIASES: Dict[str, str] = {
@@ -71,16 +75,63 @@ def _default_prefs() -> Dict[str, Any]:
     }
 
 
-def load_prefs() -> Dict[str, Any]:
+def _load_prefs(*, strict: bool = False) -> Dict[str, Any]:
     path = prefs_path()
-    if not path.is_file():
-        return _default_prefs()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    except FileNotFoundError:
+        return _default_prefs()
+    except (OSError, ValueError, TypeError) as exc:
+        if strict:
+            raise ModelPrefsError(
+                "Antigravity model preferences are unreadable or invalid.",
+                code="model_prefs_invalid",
+            ) from exc
         return _default_prefs()
     if not isinstance(data, dict):
+        if strict:
+            raise ModelPrefsError(
+                "Antigravity model preferences must contain a JSON object.",
+                code="model_prefs_invalid",
+            )
         return _default_prefs()
+    if strict:
+        version = data.get("version", PREFS_VERSION)
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != PREFS_VERSION
+        ):
+            raise ModelPrefsError(
+                "Antigravity model preferences use an unsupported version.",
+                code="model_prefs_invalid",
+            )
+        if "task_models" in data and not isinstance(data["task_models"], dict):
+            raise ModelPrefsError(
+                "Antigravity task model preferences must contain a JSON object.",
+                code="model_prefs_invalid",
+            )
+        for field in ("default_model", "notes"):
+            if field in data and data[field] is not None and not isinstance(data[field], str):
+                raise ModelPrefsError(
+                    f"Antigravity model preference '{field}' must be text.",
+                    code="model_prefs_invalid",
+                )
+        for key, value in (data.get("task_models") or {}).items():
+            task = (
+                key.strip().lower().replace("_", "-")
+                if isinstance(key, str)
+                else ""
+            )
+            if (
+                task not in TASK_KEYS
+                or not isinstance(value, str)
+                or not value.strip()
+            ):
+                raise ModelPrefsError(
+                    "Antigravity task model preferences contain an invalid task or model.",
+                    code="model_prefs_invalid",
+                )
     out = _default_prefs()
     out["default_model"] = str(data.get("default_model") or "").strip()
     tasks = data.get("task_models") if isinstance(data.get("task_models"), dict) else {}
@@ -95,6 +146,19 @@ def load_prefs() -> Dict[str, Any]:
     return out
 
 
+def load_prefs() -> Dict[str, Any]:
+    with _LOCK:
+        return _load_prefs()
+
+
+def inspect_prefs() -> tuple[Dict[str, Any], str | None]:
+    with _LOCK:
+        try:
+            return _load_prefs(strict=True), None
+        except ModelPrefsError as exc:
+            return _default_prefs(), exc.code
+
+
 def save_prefs(prefs: Dict[str, Any]) -> Path:
     path = prefs_path()
     payload = {
@@ -104,6 +168,23 @@ def save_prefs(prefs: Dict[str, Any]) -> Path:
         "notes": str(prefs.get("notes") or ""),
     }
     return io_util.write_json_secure(path, payload)
+
+
+@contextmanager
+def _process_lock():
+    path = prefs_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(
+        path.parent / ".model-prefs.lock",
+        os.O_CREAT | os.O_RDWR,
+        0o600,
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def normalize_model_id(value: str) -> str:
@@ -165,16 +246,16 @@ def resolve_model(
     return normalize_model_id(fallback) if fallback else ""
 
 
-def _available_model_ids() -> Optional[List[str]]:
+def _available_model_ids(*, image: bool = False) -> Optional[List[str]]:
     try:
         from . import models as models_mod
 
         listed = models_mod.list_models({})
         ids: List[str] = []
-        for key in ("text_models", "image_models"):
-            for item in listed.get(key) or []:
-                if isinstance(item, dict) and item.get("id"):
-                    ids.append(str(item["id"]))
+        key = "image_models" if image else "text_models"
+        for item in listed.get(key) or []:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(str(item["id"]))
         return ids or None
     except Exception:
         return None
@@ -200,31 +281,35 @@ def set_model(
                 code="task_invalid",
             )
 
-    warnings: List[str] = []
     if validate:
-        available = _available_model_ids()
-        if available is not None:
-            normalized_available = {normalize_model_id(i) for i in available}
-            # Also accept if any available id contains / equals the selection.
-            ok = model_id in normalized_available or any(
-                model_id == a or model_id in a or a in model_id for a in normalized_available
+        available = _available_model_ids(image=task_key == "image")
+        if available is None:
+            raise ModelPrefsError(
+                "The model catalog is unavailable; retry or set validate=false explicitly.",
+                code="model_catalog_unavailable",
             )
-            if not ok:
-                warnings.append("model_not_in_live_catalog")
-                # Still allow set — catalogs can lag; warn only.
+        normalized_available = {normalize_model_id(item) for item in available}
+        if model_id not in normalized_available:
+            kind = "image" if task_key == "image" else "text"
+            raise ModelPrefsError(
+                f"Model '{model_id}' is not in the available {kind} model catalog.",
+                code="model_not_available",
+            )
 
-    prefs = load_prefs()
-    if task_key:
-        tasks = dict(prefs.get("task_models") or {})
-        tasks[task_key] = model_id
-        prefs["task_models"] = tasks
-        scope = f"task:{task_key}"
-    else:
-        prefs["default_model"] = model_id
-        scope = "default"
-    if notes:
-        prefs["notes"] = str(notes)
-    path = save_prefs(prefs)
+    with _LOCK:
+        with _process_lock():
+            prefs = _load_prefs(strict=True)
+            if task_key:
+                tasks = dict(prefs.get("task_models") or {})
+                tasks[task_key] = model_id
+                prefs["task_models"] = tasks
+                scope = f"task:{task_key}"
+            else:
+                prefs["default_model"] = model_id
+                scope = "default"
+            if notes:
+                prefs["notes"] = str(notes)
+            path = save_prefs(prefs)
     return {
         "text": f"Saved Antigravity model '{model_id}' as {scope}.",
         "success": True,
@@ -232,49 +317,55 @@ def set_model(
         "scope": scope,
         "task": task_key or None,
         "prefs_file": str(path),
-        "prefs": load_prefs(),
+        "prefs": prefs,
         **response.standard_fields(
             model=model_id,
             backend="local-model-prefs",
-            warnings=warnings,
+            warnings=[],
         ),
     }
 
 
-def clear_prefs(*, task: Optional[str] = None, all_prefs: bool = False) -> Dict[str, Any]:
-    prefs = load_prefs()
-    if all_prefs:
-        path = save_prefs(_default_prefs())
-        return {
-            "text": "Cleared all Antigravity model preferences.",
-            "success": True,
-            "prefs_file": str(path),
-            "prefs": load_prefs(),
-            **response.standard_fields(backend="local-model-prefs"),
-        }
+def clear_prefs(
+    *,
+    task: Optional[str] = None,
+    all_prefs: bool = False,
+    default_scopes: bool = False,
+) -> Dict[str, Any]:
+    task_key = ""
     if task is not None and str(task).strip():
         task_key = str(task).strip().lower().replace("_", "-")
         if task_key not in TASK_KEYS:
             raise ModelPrefsError(f"Unknown task '{task}'.", code="task_invalid")
-        tasks = dict(prefs.get("task_models") or {})
-        tasks.pop(task_key, None)
-        prefs["task_models"] = tasks
-        path = save_prefs(prefs)
-        return {
-            "text": f"Cleared Antigravity model preference for task '{task_key}'.",
-            "success": True,
-            "task": task_key,
-            "prefs_file": str(path),
-            "prefs": load_prefs(),
-            **response.standard_fields(backend="local-model-prefs"),
-        }
-    prefs["default_model"] = ""
-    path = save_prefs(prefs)
+    with _LOCK:
+        with _process_lock():
+            prefs = _load_prefs(strict=True)
+            if all_prefs:
+                prefs = _default_prefs()
+                text = "Cleared all Antigravity model preferences."
+            elif task_key:
+                tasks = dict(prefs.get("task_models") or {})
+                tasks.pop(task_key, None)
+                prefs["task_models"] = tasks
+                text = (
+                    f"Cleared Antigravity model preference for task '{task_key}'."
+                )
+            elif default_scopes:
+                tasks = dict(prefs.get("task_models") or {})
+                tasks.pop("chat", None)
+                prefs["task_models"] = tasks
+                prefs["default_model"] = ""
+                text = "Cleared Antigravity chat and default model preferences."
+            else:
+                prefs["default_model"] = ""
+                text = "Cleared default Antigravity model preference."
+            path = save_prefs(prefs)
     return {
-        "text": "Cleared default Antigravity model preference.",
+        "text": text,
         "success": True,
+        "task": task_key or None,
         "prefs_file": str(path),
-        "prefs": load_prefs(),
+        "prefs": prefs,
         **response.standard_fields(backend="local-model-prefs"),
     }
 
@@ -321,4 +412,5 @@ def clear_prefs_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
     return clear_prefs(
         task=arguments.get("task"),
         all_prefs=bool(arguments.get("all") or arguments.get("all_prefs")),
+        default_scopes=bool(arguments.get("default_scopes")),
     )

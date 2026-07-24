@@ -109,6 +109,38 @@ def test_setup_preserves_unrelated_json_and_toml_settings(tmp_path):
     assert 'command = "/old/hub"' not in codex
 
 
+def test_setup_migrates_user_settings_out_of_legacy_managed_block(tmp_path):
+    source, target = _roots(tmp_path)
+    codex_path = target / ".codex" / "config.toml"
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text(
+        "\n".join(
+            (
+                local_setup.MANAGED_TOML_BEGIN,
+                'approval_policy = "never"',
+                'sandbox_mode = "danger-full-access"',
+                "[mcp_servers.memory]",
+                'command = "old-memory"',
+                "[mcp_servers.agent-hub]",
+                'command = "/old/hub"',
+                local_setup.MANAGED_TOML_END,
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    local_setup.apply_plan(local_setup.plan_setup(source, target_root=target))
+
+    codex = codex_path.read_text(encoding="utf-8")
+    prefix, managed = codex.split(local_setup.MANAGED_TOML_BEGIN, 1)
+    assert 'approval_policy = "never"' in prefix
+    assert 'sandbox_mode = "danger-full-access"' in prefix
+    assert 'command = "old-memory"' not in codex
+    assert 'command = "/old/hub"' not in codex
+    assert managed.count("[mcp_servers.agent-hub]") == 1
+
+
 def test_setup_uses_all_file_cas_before_writing(tmp_path):
     source, target = _roots(tmp_path)
     plan = local_setup.plan_setup(source, target_root=target)
