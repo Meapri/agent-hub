@@ -1500,6 +1500,8 @@ def _new_adaptive_state(
         if isinstance(handoff_snapshot, dict)
         else _load_workflow_handoff(args)
     )
+    options = _adaptive_run_options(args)
+    created_at = time.time()
     state = {
         "run_id": uuid.uuid4().hex[:12],
         "workflow_id": "adaptive",
@@ -1509,10 +1511,12 @@ def _new_adaptive_state(
         "call_accounting_version": ADAPTIVE_CALL_ACCOUNTING_VERSION,
         "call_accounting_unit": "provider_adapter_invocation",
         "store_revision": 0,
-        "created_at": time.time(),
+        "created_at": created_at,
+        "updated_at": created_at,
         "status": "paused",
         "plan": plan,
-        "options": _adaptive_run_options(args),
+        "options": options,
+        "project_root": options["project_root"],
         "_handoff_snapshot": snapshot,
         "results": {},
         "waves": [],
@@ -2393,6 +2397,28 @@ def _get_run(args: Dict[str, Any]) -> Dict[str, Any]:
     return envelope("get_run", {"success": True, "text": "Run loaded.", **state})
 
 
+def _list_runs(args: Dict[str, Any]) -> Dict[str, Any]:
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    listed = store.list_run_summaries(
+        project_root,
+        run_kind=str(args.get("run_kind") or "") or None,
+        status=str(args.get("status") or "") or None,
+        limit=int(args.get("limit") or 50),
+        cursor=str(args.get("cursor") or "") or None,
+    )
+    warnings = ["run_summary_scan_truncated"] if listed.get("truncated") else []
+    return envelope(
+        "list_runs",
+        {
+            "success": True,
+            "text": f"{len(listed['runs'])} run summaries for {project_root}.",
+            **listed,
+            "warnings": warnings,
+        },
+        success=True,
+    )
+
+
 def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     from agent_hub.core.inprocess import make_resolver
 
@@ -3219,6 +3245,40 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         read_only=False,
     ),
     _spec(
+        "agent_hub_list_runs",
+        "List Project Runs",
+        "List bounded, redacted workflow summaries for one canonical project root.",
+        _object(
+            {
+                "project_root": {"type": "string", "default": "."},
+                "run_kind": {
+                    "type": "string",
+                    "enum": ["fixed", "adaptive"],
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "running",
+                        "paused",
+                        "completed",
+                        "failed",
+                        "cancelled",
+                        "archived",
+                    ],
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": store.MAX_SUMMARY_LIMIT,
+                    "default": 50,
+                },
+                "cursor": {"type": "string", "maxLength": 512},
+            }
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    _spec(
         "agent_hub_get_run",
         "Get Run",
         "Load a workflow run from memory or the file-backed store.",
@@ -3338,6 +3398,7 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_plan_workflow": _plan_workflow,
     "agent_hub_start_workflow": _start_workflow,
     "agent_hub_continue_workflow": _continue_workflow,
+    "agent_hub_list_runs": _list_runs,
     "agent_hub_get_run": _get_run,
     "agent_hub_run_workflow": _run_workflow,
     "agent_hub_delegate": _delegate,

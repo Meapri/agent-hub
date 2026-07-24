@@ -376,8 +376,13 @@ def start_run(
     user_args = dict(args or {})
     if project_root:
         user_args.setdefault("project_root", project_root)
+    canonical_root = str(
+        gather.validate_project_root(user_args.get("project_root") or project_root or ".")
+    )
+    user_args["project_root"] = canonical_root
     handoff_snapshot = _load_handoff_snapshot(user_args)
     run_id = uuid.uuid4().hex[:12]
+    created_at = time.time()
     state: Dict[str, Any] = {
         "run_id": run_id,
         "run_kind": "fixed",
@@ -390,10 +395,11 @@ def start_run(
         "state_schema_version": RUN_STATE_SCHEMA_VERSION,
         "store_revision": 0,
         "version": __version__,
-        "created_at": time.time(),
+        "created_at": created_at,
+        "updated_at": created_at,
         "user_args": user_args,
         "_handoff_snapshot": handoff_snapshot,
-        "project_root": str(user_args.get("project_root") or project_root or "."),
+        "project_root": canonical_root,
         "steps": _build_steps(recipe, bind, user_args, pol),
         "artifacts": {},
         "cursor": 0,
@@ -880,6 +886,7 @@ def continue_run(
             error=error,
             auto_local=auto_local,
         )
+        advanced["updated_at"] = time.time()
         committed = store.commit_claim(claim, advanced)
     except Exception:
         try:

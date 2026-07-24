@@ -7,9 +7,12 @@ stdio server is relaunched. Zero dependencies — plain JSON files.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
+from hashlib import sha256
 import json
 import os
 import re
@@ -26,6 +29,10 @@ RUN_ID_PATTERN = r"^[0-9a-f]{12}$"
 _RUN_ID_RE = re.compile(RUN_ID_PATTERN)
 _LOCAL_LOCKS: Dict[str, Lock] = {}
 _LOCAL_LOCKS_GUARD = Lock()
+RUN_SUMMARY_SCHEMA = "run_summary_v1"
+MAX_SUMMARY_SCAN = 2_000
+MAX_SUMMARY_LIMIT = 100
+MAX_SUMMARY_STATE_BYTES = 8 * 1024 * 1024
 
 
 class RunStoreError(RuntimeError):
@@ -673,6 +680,249 @@ def list_run_ids() -> List[str]:
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
+
+
+def _summary_project_root(state: Dict[str, Any]) -> str:
+    raw = state.get("project_root")
+    if not raw and isinstance(state.get("options"), dict):
+        raw = state["options"].get("project_root")
+    value = str(raw or "").strip()
+    if not value or not Path(value).is_absolute():
+        return ""
+    return os.path.realpath(value)
+
+
+def _summary_current_stage(state: Dict[str, Any]) -> str | None:
+    if state.get("run_kind") == "adaptive":
+        plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+        completed = set(
+            (state.get("results") or {}).keys()
+            if isinstance(state.get("results"), dict)
+            else ()
+        )
+        for step in plan.get("steps") or []:
+            if isinstance(step, dict) and str(step.get("id") or "") not in completed:
+                return str(step.get("id") or "") or None
+        return None
+    steps = state.get("steps") if isinstance(state.get("steps"), list) else []
+    try:
+        cursor = int(state.get("cursor") or 0)
+    except (TypeError, ValueError):
+        return None
+    if 0 <= cursor < len(steps) and isinstance(steps[cursor], dict):
+        return str(steps[cursor].get("id") or "") or None
+    return None
+
+
+def _summary_next_action_type(state: Dict[str, Any]) -> str:
+    status = str(state.get("status") or "")
+    if status == "completed":
+        return "done"
+    if status in {"failed", "cancelled", "archived"}:
+        return "failed"
+    if state.get("run_kind") == "adaptive":
+        return "continue"
+    steps = state.get("steps") if isinstance(state.get("steps"), list) else []
+    try:
+        cursor = int(state.get("cursor") or 0)
+    except (TypeError, ValueError):
+        return "continue"
+    if 0 <= cursor < len(steps) and isinstance(steps[cursor], dict):
+        return "call_tool" if steps[cursor].get("tool") else "local"
+    return "continue"
+
+
+def _run_summary(state: Dict[str, Any], *, now: float) -> Dict[str, Any]:
+    lease = state.get("_lease") if isinstance(state.get("_lease"), dict) else {}
+    try:
+        lease_expires_at = float(lease.get("expires_at") or 0.0)
+    except (TypeError, ValueError):
+        lease_expires_at = 0.0
+    snapshot = (
+        state.get("_handoff_snapshot")
+        if isinstance(state.get("_handoff_snapshot"), dict)
+        else {}
+    )
+    run_kind = str(
+        state.get("run_kind") or ("fixed" if state.get("recipe_id") else "")
+    )
+    return {
+        "schema": RUN_SUMMARY_SCHEMA,
+        "run_id": validate_run_id(state.get("run_id")),
+        "run_kind": run_kind,
+        "workflow_id": str(state.get("workflow_id") or state.get("recipe_id") or ""),
+        "project_root": _summary_project_root(state),
+        "status": str(state.get("status") or ""),
+        "store_revision": _current_revision(state),
+        "created_at": float(state.get("created_at") or 0.0),
+        "updated_at": float(
+            state.get("updated_at") or state.get("created_at") or 0.0
+        ),
+        "current_stage": _summary_current_stage(state),
+        "next_action_type": _summary_next_action_type(state),
+        "lease_active": lease_expires_at > now,
+        "handoff_sha256": snapshot.get("file_sha256"),
+    }
+
+
+def _project_cursor_digest(project_root: str) -> str:
+    return sha256(project_root.encode("utf-8")).hexdigest()
+
+
+def _encode_summary_cursor(project_root: str, summary: Dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "v": 1,
+            "project": _project_cursor_digest(project_root),
+            "updated_at": summary["updated_at"],
+            "run_id": summary["run_id"],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_summary_cursor(
+    cursor: str | None,
+    *,
+    project_root: str,
+) -> tuple[float, str] | None:
+    if not cursor:
+        return None
+    value = str(cursor)
+    if len(value) > 512:
+        raise ValueError("cursor is invalid")
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        parsed = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        updated_at = float(parsed["updated_at"])
+        run_id = validate_run_id(parsed["run_id"])
+    except (binascii.Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("cursor is invalid") from exc
+    if (
+        not isinstance(parsed, dict)
+        or parsed.get("v") != 1
+        or parsed.get("project") != _project_cursor_digest(project_root)
+    ):
+        raise ValueError("cursor does not belong to this project")
+    return updated_at, run_id
+
+
+def list_run_summaries(
+    project_root: str,
+    *,
+    run_kind: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+    max_scan: int = MAX_SUMMARY_SCAN,
+) -> Dict[str, Any]:
+    """Return a bounded, exact-project projection without prompts or result bodies."""
+
+    requested_root = Path(str(project_root)).expanduser()
+    if not requested_root.is_absolute():
+        raise ValueError("project_root must be an absolute canonical path")
+    root = str(requested_root.resolve())
+    if str(requested_root) != root:
+        raise ValueError("project_root must be an absolute canonical path")
+    page_limit = int(limit)
+    scan_limit = int(max_scan)
+    if not 1 <= page_limit <= MAX_SUMMARY_LIMIT:
+        raise ValueError(f"limit must be between 1 and {MAX_SUMMARY_LIMIT}")
+    if not 1 <= scan_limit <= 10_000:
+        raise ValueError("max_scan must be between 1 and 10000")
+    kind_filter = str(run_kind or "").strip().lower()
+    if kind_filter and kind_filter not in {"fixed", "adaptive"}:
+        raise ValueError("run_kind must be fixed or adaptive")
+    status_filter = str(status or "").strip().lower()
+    after = _decode_summary_cursor(cursor, project_root=root)
+
+    directory_fd: Optional[int] = None
+    names: List[str] = []
+    truncated = False
+    skipped = {"corrupt": 0, "oversize": 0, "unscoped": 0}
+    try:
+        _root, directory_fd = _open_state_dir()
+        with os.scandir(directory_fd) as entries:
+            for entry in entries:
+                name = entry.name
+                if not name.endswith(".json"):
+                    continue
+                if len(names) >= scan_limit:
+                    truncated = True
+                    break
+                try:
+                    validate_run_id(name.removesuffix(".json"))
+                    file_stat = entry.stat(follow_symlinks=False)
+                except (OSError, ValueError):
+                    skipped["corrupt"] += 1
+                    continue
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or file_stat.st_nlink != 1
+                ):
+                    skipped["corrupt"] += 1
+                    continue
+                if file_stat.st_size > MAX_SUMMARY_STATE_BYTES:
+                    skipped["oversize"] += 1
+                    continue
+                names.append(name)
+
+        summaries: List[Dict[str, Any]] = []
+        now = time.time()
+        for name in sorted(names):
+            run_id = name.removesuffix(".json")
+            try:
+                state = _read_state_from_dir(
+                    directory_fd,
+                    run_id,
+                    strict_owner=True,
+                )
+                summary = _run_summary(state, now=now)
+            except (RunStoreError, TypeError, ValueError):
+                skipped["corrupt"] += 1
+                continue
+            if not summary["project_root"]:
+                skipped["unscoped"] += 1
+                continue
+            if summary["project_root"] != root:
+                continue
+            if kind_filter and summary["run_kind"] != kind_filter:
+                continue
+            if status_filter and summary["status"] != status_filter:
+                continue
+            summaries.append(summary)
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+    summaries.sort(
+        key=lambda item: (float(item["updated_at"]), str(item["run_id"])),
+        reverse=True,
+    )
+    if after is not None:
+        summaries = [
+            item
+            for item in summaries
+            if (float(item["updated_at"]), str(item["run_id"])) < after
+        ]
+    has_more = len(summaries) > page_limit
+    page = summaries[:page_limit]
+    next_cursor = (
+        _encode_summary_cursor(root, page[-1])
+        if page and has_more
+        else None
+    )
+    return {
+        "schema": "run_summary_list_v1",
+        "project_root": root,
+        "runs": page,
+        "next_cursor": next_cursor,
+        "truncated": truncated,
+        "scanned": len(names),
+        "skipped": skipped,
+    }
 
 
 def delete(run_id: str) -> None:

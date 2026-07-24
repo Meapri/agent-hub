@@ -278,7 +278,7 @@ def test_public_schema_exposes_parallel_and_gate_controls():
     )
     props = spec["inputSchema"]["properties"]
     assert props["execution"]["default"] == "parallel"
-    assert props["max_concurrency"]["maximum"] == 3
+    assert props["max_concurrency"]["maximum"] == 4
     assert props["min_successes"]["default"] == 2
     assert props["consistency"]["required"] == ["decision_labels"]
-    assert len(operations.tool_definitions()) == 29
+    assert len(operations.tool_definitions()) == 30
