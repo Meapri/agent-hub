@@ -207,6 +207,32 @@ def test_fixed_run_continue_uses_revision_cas(tmp_path):
     assert runner.get_run(run_id)["artifacts"]["draft"] == "first"
 
 
+def test_fixed_next_action_id_is_stable_and_revision_bound(tmp_path):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    action = state["next_action"]
+
+    assert action["schema"] == runner.FIXED_ACTION_SCHEMA
+    assert len(action["action_id"]) == 64
+    assert runner.get_run(state["run_id"])["next_action"]["action_id"] == action["action_id"]
+    runner._RUNS.clear()
+    assert runner.get_run(state["run_id"])["next_action"]["action_id"] == action["action_id"]
+
+    rotated = runner.continue_run(
+        run_id=state["run_id"],
+        stage_id="chat",
+        success=False,
+        error="HTTP 429 rate limit",
+        expected_revision=0,
+    )
+    assert rotated["next_action"]["tool"] != action["tool"]
+    assert rotated["next_action"]["action_id"] != action["action_id"]
+    assert rotated["next_action"]["expected_revision"] == 1
+
+
 def test_fixed_terminal_runs_are_immutable(tmp_path):
     completed = runner.start_run(
         "direct_chat",

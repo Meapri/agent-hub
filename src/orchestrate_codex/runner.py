@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+from hashlib import sha256
+import json
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -30,6 +32,7 @@ FALLBACK_CHAINS: Dict[str, List[str]] = {
 MAX_RUNS = 200
 RUN_STATE_SCHEMA_VERSION = 2
 RUN_LEASE_SECONDS = 60.0
+FIXED_ACTION_SCHEMA = "fixed_action_v1"
 
 # Default output budget for a structured write (README/PR/etc.); leaf defaults truncate.
 DEFAULT_WRITE_MAX_TOKENS = 65536
@@ -486,6 +489,30 @@ def _current_step(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return steps[cursor]
 
 
+def _action_identity(state: Dict[str, Any], action: Dict[str, Any]) -> str:
+    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    arguments_json = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    material = json.dumps(
+        {
+            "schema": FIXED_ACTION_SCHEMA,
+            "run_id": str(state.get("run_id") or ""),
+            "store_revision": int(state.get("store_revision") or 0),
+            "stage_id": str(action.get("stage_id") or ""),
+            "tool": str(action.get("tool") or ""),
+            "arguments_sha256": sha256(arguments_json.encode("utf-8")).hexdigest(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(material.encode("utf-8")).hexdigest()
+
+
 def _next_action(state: Dict[str, Any]) -> Dict[str, Any]:
     if state.get("status") == "completed":
         return {"type": "done", "message": "Recipe completed"}
@@ -511,14 +538,17 @@ def _next_action(state: Dict[str, Any]) -> Dict[str, Any]:
                 pol=pol,
                 artifacts=state.get("artifacts") or {},
             )
-            return {
+            action = {
                 "type": "call_tool",
+                "schema": FIXED_ACTION_SCHEMA,
                 "stage_id": step["id"],
                 "tool": tool,
                 "fallback_tools": tools,
                 "arguments": step.get("suggested_arguments") or {},
                 "instruction": step.get("instruction"),
             }
+            action["action_id"] = _action_identity(state, action)
+            return action
         return {
             "type": "local",
             "stage_id": step["id"],
