@@ -1,10 +1,9 @@
 # Verified against @intellectronica/ruler 0.3.44 on 2026-07-15.
-default_agents = ["claude", "codex", "gemini-cli", "cursor"]
+default_agents = ["claude", "codex"]
 nested = false
 
 [mcp]
-enabled = true
-merge_strategy = "merge"
+enabled = false
 
 # Generated guidance is intentionally committed so fresh clones and worktrees
 # receive instructions before Ruler is installed.
@@ -29,30 +28,15 @@ output_path = "AGENTS.md"
 output_path_config = ".codex/config.toml"
 
 [agents.gemini-cli]
-enabled = true
+enabled = false
 output_path = "AGENTS.md"
 
 [agents.cursor]
-enabled = true
+enabled = false
 output_path = "AGENTS.md"
 
-# Phase 3 (EXECUTION-PLAN R4): shared local-memory server, wired into every agent.
-# Notes live in the git-tracked repo dir; a dedicated CONFIG_DIR isolates state from
-# any global ~/.basic-memory. Semantic search is disabled (FTS-only) so note content
-# never leaves the machine (BUILD-SPEC Do-Not-Repeat #7). Paths are machine-specific —
-# see memory/README.md for portability.
-[mcp_servers.memory]
-command = "uvx"
-args = ["basic-memory", "mcp"]
-
-[mcp_servers.memory.env]
-BASIC_MEMORY_CONFIG_DIR = "/Users/naen/Git/agent-hub/memory/.basic-memory"
-BASIC_MEMORY_HOME = "/Users/naen/Git/agent-hub/memory/data"
-BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED = "false"
-
-# Unified model-access + orchestration: ONE server (agent_hub.server) exposes
-# every tool (orchestrate conductor + claude/grok/antigravity leaves) with
-# shared core protocol (streaming, modern, discover). Tool names are unchanged.
-# Machine-specific venv path (see README).
-[mcp_servers.agent-hub]
-command = "/Users/naen/Git/agent-hub/.venv/bin/agent-hub-mcp"
+# Machine-local MCP paths are rendered separately by
+# `python -m agent_hub.local_setup --apply`. Keeping them out of this tracked
+# Ruler source prevents one developer's checkout path from becoming policy.
+# Gemini and Cursor still read the shared AGENTS.md; local_setup owns their
+# runtime config and Gemini's contextFileName.

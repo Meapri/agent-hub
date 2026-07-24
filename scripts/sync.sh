@@ -12,6 +12,8 @@ readonly RULER_VERSION="0.3.44"
 readonly RULER_PACKAGE="@intellectronica/ruler@${RULER_VERSION}"
 
 created_bridge=0
+local_setup_mode="apply"
+skip_local_setup=0
 
 cleanup() {
   if [[ "${created_bridge}" -eq 1 && -L "${BRIDGE_PATH}" ]]; then
@@ -26,7 +28,13 @@ trap 'exit 143' TERM
 
 for arg in "$@"; do
   case "${arg}" in
-    --dry-run|--verbose|-v|--help|--version)
+    --dry-run)
+      local_setup_mode="dry-run"
+      ;;
+    --help|--version)
+      skip_local_setup=1
+      ;;
+    --verbose|-v)
       ;;
     *)
       echo "error: unsupported sync option: ${arg}" >&2
@@ -75,5 +83,29 @@ npx --yes "${RULER_PACKAGE}" apply \
   --no-nested \
   --no-gitignore \
   --no-backup \
+  --no-mcp \
   --no-skills \
   --no-subagents
+
+if [[ "${skip_local_setup}" -eq 0 ]]; then
+  if [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+    python_command="${REPO_ROOT}/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    python_command="$(command -v python3)"
+  else
+    echo "error: Python 3 is required to render local MCP config" >&2
+    exit 1
+  fi
+  local_setup_args=(
+    -m
+    agent_hub.local_setup
+    --repo-root
+    "${REPO_ROOT}"
+    --quiet
+  )
+  if [[ "${local_setup_mode}" == "apply" ]]; then
+    local_setup_args+=(--apply)
+  fi
+  PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${python_command}" "${local_setup_args[@]}"
+fi

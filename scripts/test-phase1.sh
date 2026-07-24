@@ -19,9 +19,16 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-mkdir -p -- "${fixture_root}/instructions" "${fixture_root}/scripts"
+mkdir -p -- \
+  "${fixture_root}/instructions" \
+  "${fixture_root}/scripts" \
+  "${fixture_root}/src/agent_hub"
 cp -R -- "${SOURCE_DIR}" "${fixture_root}/instructions/.ruler"
 cp -- "${SCRIPT_DIR}/sync.sh" "${fixture_root}/scripts/sync.sh"
+cp -- "${REPO_ROOT}/src/agent_hub/__init__.py" \
+  "${fixture_root}/src/agent_hub/__init__.py"
+cp -- "${REPO_ROOT}/src/agent_hub/local_setup.py" \
+  "${fixture_root}/src/agent_hub/local_setup.py"
 chmod +x "${fixture_root}/scripts/sync.sh"
 
 apply_fixture() {
@@ -48,7 +55,12 @@ generated_hashes() {
   shasum -a 256 \
     "${fixture_root}/CLAUDE.md" \
     "${fixture_root}/AGENTS.md" \
-    "${fixture_root}/.gemini/settings.json"
+    "${fixture_root}/.codex/config.toml" \
+    "${fixture_root}/.cursor/mcp.json" \
+    "${fixture_root}/.gemini/settings.json" \
+    "${fixture_root}/.mcp.json" \
+    "${fixture_root}/hubs/codex/.mcp.json" \
+    "${fixture_root}/hubs/claude-code/.mcp.json"
 }
 
 # A Ruler parse failure after bridge creation must still clean the bridge.
@@ -172,10 +184,23 @@ if ! node -e '
   const fs = require("fs");
   const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   if (config.contextFileName !== "AGENTS.md") process.exit(1);
+  if (!config.mcpServers?.["agent-hub"]?.command) process.exit(1);
 ' "${fixture_root}/.gemini/settings.json"; then
   echo "error: Gemini CLI context configuration is invalid" >&2
   exit 1
 fi
+
+for config in \
+  ".codex/config.toml" \
+  ".cursor/mcp.json" \
+  ".mcp.json" \
+  "hubs/codex/.mcp.json" \
+  "hubs/claude-code/.mcp.json"; do
+  if [[ ! -f "${fixture_root}/${config}" ]]; then
+    echo "error: local MCP config was not generated: ${config}" >&2
+    exit 1
+  fi
+done
 
 for source_path in "${SOURCE_DIR}"/*.md; do
   source="$(basename -- "${source_path}")"

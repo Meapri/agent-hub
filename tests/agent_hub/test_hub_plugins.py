@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import runpy
 
+from agent_hub import local_setup
+
 
 ROOT = Path(__file__).resolve().parents[2]
 HUBS = ROOT / "hubs"
@@ -48,9 +50,10 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
     assert "handoff_drift" in takeover
 
 
-def test_hub_plugins_register_only_unified_agent_hub_and_memory():
-    codex_mcp = _json(HUBS / "codex/.mcp.json")
-    claude_mcp = _json(HUBS / "claude-code/.mcp.json")["mcpServers"]
+def test_hub_plugins_register_only_unified_agent_hub_and_memory(tmp_path):
+    local_setup.apply_plan(local_setup.plan_setup(ROOT, target_root=tmp_path))
+    codex_mcp = _json(tmp_path / "hubs/codex/.mcp.json")
+    claude_mcp = _json(tmp_path / "hubs/claude-code/.mcp.json")["mcpServers"]
     assert set(codex_mcp) == {"agent-hub", "memory"}
     assert set(claude_mcp) == {"agent-hub", "memory"}
     assert codex_mcp["agent-hub"]["command"].endswith("/.venv/bin/agent-hub-mcp")

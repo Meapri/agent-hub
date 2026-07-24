@@ -13,6 +13,15 @@ htmlcov/
 # Ruler run-time bridge (created only for the lifetime of a sync)
 /.ruler
 
+# Machine-local MCP runtime config. Render with `agent-hub-setup --apply`.
+/.codex/config.toml
+/.cursor/mcp.json
+/.gemini/settings.json
+/.mcp.json
+/hubs/codex/.mcp.json
+/hubs/claude-code/.mcp.json
+/.agent-hub/
+
 # basic-memory runtime state (config.json, memory.db, fastembed cache).
 # The human-readable notes in memory/data/ ARE tracked; this local state is not.
 /memory/.basic-memory/
