@@ -7,13 +7,14 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
+from agent_hub import provider_registry
 from agent_hub.core import handoff as handoff_state
 
 from . import __version__, catalog, errors, gather, policy, recipes, store, verify
 
 # capability → ordered fallback tools (first is primary unless bindings override)
 FALLBACK_CHAINS: Dict[str, List[str]] = {
-    "chat": ["claude_codex_chat", "grok_codex_chat", "google_antigravity_chat"],
+    "chat": list(provider_registry.chat_tools(planner_only=True)),
     "grounded_search": ["google_grounded_search"],
     "image": ["google_antigravity_generate_image"],
     # A structured writing stage prefers Antigravity's `write` leaf (which self-grounds

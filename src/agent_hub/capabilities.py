@@ -10,51 +10,17 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict
 
+from agent_hub import provider_registry
 
 CAPABILITIES: Dict[str, Dict[str, Dict[str, Any]]] = {
-    "claude": {
-        "chat": {"supported": True, "reasoning_effort": ["low", "medium", "high"]},
-        "vision": {"supported": True},
-        "search": {"supported": True, "native": True, "auth_note": "API entitlement required"},
-        "write": {"supported": True},
-        "image_generation": {"supported": False, "reason": "Claude models return text"},
-        "compare": {"supported": True},
-        "review_diff": {"supported": True},
-        "release_draft": {"supported": True},
-        "settings": {"supported": True, "scope": ["model", "temperature", "max_tokens"]},
-    },
-    "grok": {
-        "chat": {"supported": True, "reasoning_effort": ["low", "medium", "high"]},
-        "vision": {"supported": True},
-        "search": {"supported": True, "native": True, "auth_note": "API entitlement required"},
-        "write": {"supported": True},
-        "image_generation": {"supported": True, "native": True, "auth_note": "API entitlement required"},
-        "compare": {"supported": True},
-        "review_diff": {"supported": True},
-        "release_draft": {"supported": True},
-        "settings": {
-            "supported": True,
-            "scope": ["model", "temperature", "max_tokens", "api_mode"],
-        },
-    },
-    "gemini": {
-        "chat": {"supported": True, "reasoning_effort": ["low", "medium", "high"]},
-        "vision": {"supported": True},
-        "search": {"supported": True, "native": True},
-        "write": {"supported": True},
-        "image_generation": {"supported": True, "native": True},
-        "compare": {"supported": True},
-        "review_diff": {"supported": True},
-        "release_draft": {"supported": True},
-        "settings": {
-            "supported": True,
-            "scope": ["model", "transport", "profile", "temperature", "max_tokens"],
-        },
-    },
+    provider: deepcopy(dict(item.capabilities))
+    for provider, item in provider_registry.MANIFESTS.items()
+}
+CAPABILITIES.update({
     "local": {
         "release_snapshot": {"supported": True, "native": True},
     },
-}
+})
 
 
 def provider_capabilities(provider: str) -> Dict[str, Dict[str, Any]]:

@@ -14,6 +14,7 @@ from agent_hub import (
     capabilities,
     consistency as consistency_gate,
     orchestrator,
+    provider_registry,
     provider_settings,
 )
 from agent_hub.core import handoff as handoff_state
@@ -56,7 +57,8 @@ def _positive_float_env(name: str, default: float) -> float:
         return default
 
 
-PROVIDERS = ("claude", "grok", "gemini")
+PROVIDERS = provider_registry.AVAILABLE_PROVIDERS
+DEFAULT_COMPARE_PROVIDERS = provider_registry.DEFAULT_COMPARE_PROVIDERS
 ADAPTIVE_WORKFLOW_TIMEOUT_MIN = 30.0
 ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env("AGENT_HUB_MCP_CALL_TIMEOUT", 300.0)
 ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env("AGENT_HUB_TIMEOUT_RETURN_MARGIN", 10.0)
@@ -79,13 +81,7 @@ _PROVIDER_CALL_INTERNAL_KEYS = {
     "_provider_call_budget",
     "_provider_call_reservation",
 }
-PROVIDER_ALIASES = {
-    "anthropic": "claude",
-    "xai": "grok",
-    "google": "gemini",
-    "antigravity": "gemini",
-    "google-antigravity": "gemini",
-}
+PROVIDER_ALIASES = dict(provider_registry.ALIASES)
 
 COMMON_OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -183,16 +179,12 @@ def _with_supported_provider(
 
 
 def _normalize_provider(value: Any, *, allow_all: bool = False, allow_auto: bool = False) -> str:
-    provider = str(value or ("all" if allow_all else "auto" if allow_auto else "")).strip().lower()
-    provider = PROVIDER_ALIASES.get(provider, provider)
-    allowed = set(PROVIDERS)
-    if allow_all:
-        allowed.add("all")
-    if allow_auto:
-        allowed.add("auto")
-    if provider not in allowed:
-        raise ValueError(f"provider must be one of: {', '.join(sorted(allowed))}")
-    return provider
+    return provider_registry.normalize(
+        value,
+        allow_all=allow_all,
+        allow_auto=allow_auto,
+        default="all" if allow_all else "auto" if allow_auto else "",
+    )
 
 
 def _selected_providers(value: Any) -> List[str]:
@@ -721,12 +713,7 @@ def _generate_image(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _model_provider(model: str) -> str:
-    lowered = model.lower()
-    if lowered.startswith("claude"):
-        return "claude"
-    if lowered.startswith("grok"):
-        return "grok"
-    return "gemini"
+    return provider_registry.provider_for_model(model)
 
 
 def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -752,7 +739,7 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
     if not providers and models:
         providers = [_model_provider(model.split("/", 1)[-1]) for model in models]
     if not providers:
-        providers = list(PROVIDERS)
+        providers = list(DEFAULT_COMPARE_PROVIDERS)
     targets: List[tuple[str, str | None]] = []
     for index, provider in enumerate(providers[:3]):
         model = models[index] if index < len(models) else None

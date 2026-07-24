@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_hub import capabilities, operations, provider_settings
+from agent_hub import capabilities, operations, provider_registry, provider_settings
 from agent_hub.core import media
 from claude_codex import chat as claude_chat
 from claude_codex import search as claude_search
@@ -16,6 +16,18 @@ from grok_codex import search as grok_search
 
 def _spec(name: str):
     return next(item for item in operations.tool_definitions() if item["name"] == name)
+
+
+def test_provider_registry_is_the_ordered_metadata_source():
+    assert provider_registry.AVAILABLE_PROVIDERS == ("claude", "grok", "gemini")
+    assert provider_registry.DEFAULT_COMPARE_PROVIDERS == ("claude", "grok", "gemini")
+    assert provider_registry.normalize("anthropic") == "claude"
+    assert provider_registry.normalize("google-antigravity") == "gemini"
+    assert provider_registry.chat_tools(planner_only=True) == (
+        "claude_codex_chat",
+        "grok_codex_chat",
+        "google_antigravity_chat",
+    )
 
 
 def test_public_schemas_expose_real_provider_capabilities():

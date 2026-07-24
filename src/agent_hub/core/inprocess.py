@@ -9,8 +9,10 @@ bypass — a revoked-consent leaf tool still fails.
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from agent_hub import provider_registry
 from orchestrate_codex.leaf_client import _interpret_result
 
 class InProcessLeafClient:
@@ -35,12 +37,12 @@ def make_resolver() -> Callable[[str], Optional[InProcessLeafClient]]:
     Leaf names are intentionally kept in a private registry. They are execution
     details for workflows and are not exposed by the public Agent Hub MCP server.
     """
-    from agent_hub.providers.antigravity import antigravity_provider
-    from agent_hub.providers.claude import claude_provider
-    from agent_hub.providers.grok import grok_provider
-
     registry: Dict[str, Any] = {}
-    for owner in (claude_provider, grok_provider, antigravity_provider):
+    for item in provider_registry.MANIFESTS.values():
+        module_name, separator, attribute = item.adapter.partition(":")
+        if not separator:
+            raise RuntimeError(f"invalid provider adapter reference: {item.adapter}")
+        owner = getattr(import_module(module_name), attribute)
         for spec in owner.tool_specs():
             name = str(spec["name"])
             if name in registry:

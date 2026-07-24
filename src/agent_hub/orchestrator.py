@@ -11,7 +11,7 @@ from threading import BoundedSemaphore, Lock
 import time
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Sequence
 
-from agent_hub import capabilities, consistency
+from agent_hub import capabilities, consistency, provider_registry
 from agent_hub.core import parallel
 
 
@@ -22,15 +22,17 @@ _STEP_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _FENCED_JSON_RE = re.compile(r"\A```(?:json)?\s*\n?(.*?)\n?```\s*\Z", re.I | re.S)
 
 CAPABILITY_PROVIDERS: Dict[str, Sequence[str]] = {
-    "chat": ("claude", "grok", "gemini"),
-    "inspect_codebase": ("claude", "grok", "gemini"),
-    "search": ("claude", "grok", "gemini"),
-    "write": ("claude", "grok", "gemini"),
-    "review_diff": ("claude", "grok", "gemini"),
+    "chat": provider_registry.providers_supporting("chat", planner_only=True),
+    "inspect_codebase": provider_registry.providers_supporting("chat", planner_only=True),
+    "search": provider_registry.providers_supporting("search", planner_only=True),
+    "write": provider_registry.providers_supporting("write", planner_only=True),
+    "review_diff": provider_registry.providers_supporting("review_diff", planner_only=True),
     "compare": ("multiple",),
     "verify": ("local",),
     "release_snapshot": ("local",),
-    "release_draft": ("claude", "grok", "gemini"),
+    "release_draft": provider_registry.providers_supporting(
+        "release_draft", planner_only=True
+    ),
 }
 _PROVIDER_CAPABILITY = {
     "chat": "chat",
