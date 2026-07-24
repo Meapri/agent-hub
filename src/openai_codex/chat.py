@@ -135,7 +135,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "text": result["text"],
         "finish_reason": "stop",
         **response.standard_fields(
-            provider="openai",
+            provider="gpt",
             backend="codex-exec-subscription",
             model=model,
             usage=result.get("usage") or {},

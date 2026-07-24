@@ -33,7 +33,10 @@ FALLBACK_CHAINS: Dict[str, List[str]] = {
     "image": ["google_antigravity_generate_image"],
     # A structured writing stage prefers Antigravity's `write` leaf (which self-grounds
     # a durable fact pack for readme/technical-doc), then degrades to a generic chat leaf.
-    "write": ["google_antigravity_write", "claude_codex_chat", "grok_codex_chat"],
+    "write": [
+        "google_antigravity_write",
+        *provider_registry.chat_tools(planner_only=True),
+    ],
     # Antigravity-specific structured tools — no cross-provider fallback.
     "review_diff": ["google_antigravity_review_diff"],
     "release": ["google_antigravity_release_draft"],

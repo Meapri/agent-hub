@@ -1223,15 +1223,21 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     if provider == "auto":
         provider = "gemini"
     if provider in {"claude", "grok", "gpt"}:
-        changes = {
+        requested = {
             key: args.get(key)
             for key in ("model", "temperature", "max_tokens", "api_mode")
             if args.get(key) is not None
-            and (
-                provider == "grok"
-                or (provider == "claude" and key != "api_mode")
-                or (provider == "gpt" and key == "model")
+        }
+        allowed = set(provider_registry.manifest(provider).settings_fields)
+        unsupported = sorted(set(requested) - allowed)
+        if unsupported:
+            raise ValueError(
+                f"unsupported {provider} settings: {', '.join(unsupported)}"
             )
+        changes = {
+            key: value
+            for key, value in requested.items()
+            if key in allowed
         }
         if not changes:
             raise ValueError(f"provide a supported {provider} setting to update")
@@ -1286,7 +1292,7 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = str(args.get("provider") or "gemini").lower()
+    provider = _normalize_provider(args.get("provider") or "gemini", allow_all=True)
     if provider in {"claude", "grok", "gpt"}:
         removed = provider_settings.reset(provider)
         return envelope(
@@ -1392,6 +1398,36 @@ def _is_adaptive(args: Dict[str, Any]) -> bool:
         "adaptive",
         "auto",
     }
+
+
+def _fixed_bindings(args: Dict[str, Any]) -> Dict[str, str] | None:
+    explicit = (
+        {str(key): str(value) for key, value in args["bindings"].items()}
+        if isinstance(args.get("bindings"), dict)
+        else {}
+    )
+    provider = _normalize_provider(args.get("provider") or "auto", allow_auto=True)
+    if provider == "auto":
+        return explicit or None
+
+    chat_tool = provider_registry.manifest(provider).chat_tool
+    generated = {
+        "chat": chat_tool,
+        "write_ag": (
+            "google_antigravity_write" if provider == "gemini" else chat_tool
+        ),
+    }
+    conflicts = sorted(
+        key
+        for key, value in explicit.items()
+        if key in generated and value != generated[key]
+    )
+    if conflicts:
+        raise ValueError(
+            "provider conflicts with explicit fixed bindings: "
+            + ", ".join(conflicts)
+        )
+    return {**generated, **explicit}
 
 
 _ADAPTIVE_RUN_OPTION_KEYS = {
@@ -2010,7 +2046,7 @@ def _plan_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             },
         )
     resolved = _workflow_resolution(args)
-    bindings = args.get("bindings") if isinstance(args.get("bindings"), dict) else None
+    bindings = _fixed_bindings(args)
     plan_args = {
         k: v for k, v in args.items() if k not in {"workflow_id", "recipe_id", "preset", "bindings"}
     }
@@ -2039,7 +2075,7 @@ def _start_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             },
         )
     resolved = _workflow_resolution(args)
-    bindings = args.get("bindings") if isinstance(args.get("bindings"), dict) else None
+    bindings = _fixed_bindings(args)
     run_args = {
         k: v
         for k, v in args.items()
@@ -2713,7 +2749,7 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             },
         )
     resolved = _workflow_resolution(args)
-    bindings = args.get("bindings") if isinstance(args.get("bindings"), dict) else None
+    bindings = _fixed_bindings(args)
     run_args = {
         k: v
         for k, v in args.items()
@@ -2812,7 +2848,15 @@ POLICY_CONTROL_SCHEMA = {
 REASONING_EFFORT_SCHEMA = {
     "reasoning_effort": {
         "type": "string",
-        "enum": list(orchestrator.REASONING_EFFORTS),
+        "enum": list(
+            dict.fromkeys(
+                effort
+                for manifest in provider_registry.MANIFESTS.values()
+                for effort in manifest.capabilities.get("chat", {}).get(
+                    "reasoning_effort", []
+                )
+            )
+        ),
         "description": (
             "Provider-neutral reasoning depth. Unsupported provider/model combinations fail closed."
         ),
@@ -2961,6 +3005,13 @@ WORKFLOW_BASE = {
     "prompt": {"type": "string"},
     "instruction": {"type": "string"},
     "project_root": {"type": "string", "default": "."},
+    "provider": {
+        **_provider_property(auto=True),
+        "description": (
+            "Primary chat/write provider for fixed workflows. Adaptive workflows choose "
+            "step providers in the reviewed plan."
+        ),
+    },
     "models": {
         "type": "object",
         "properties": {
@@ -3149,7 +3200,10 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "agent_hub_search",
         "Grounded Search",
         "Run a source-backed search operation.",
-        _with_supported_provider(SEARCH_SCHEMA, PROVIDERS),
+        _with_supported_provider(
+            SEARCH_SCHEMA,
+            provider_registry.providers_supporting("search"),
+        ),
         read_only=False,
         open_world=True,
     ),

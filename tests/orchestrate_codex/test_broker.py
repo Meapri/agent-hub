@@ -64,6 +64,27 @@ def test_broker_runs_direct_chat_end_to_end(tmp_path):
     assert restored["steps"][0]["result"]["usage"]["completion_tokens"] == 2
 
 
+def test_broker_runs_gpt_as_a_fixed_primary_binding(tmp_path):
+    reg = {
+        "openai_codex_chat": {
+            "command": sys.executable,
+            "args": [_MOCK],
+            "env": {"MOCK_LEAF_TOOL": "openai_codex_chat"},
+        }
+    }
+    out = broker.run_auto(
+        "direct_chat",
+        args={"prompt": "hello"},
+        bindings={"chat": "openai_codex_chat"},
+        project_root=str(tmp_path),
+        leaves=reg,
+    )
+    assert out["ok"] is True
+    assert out["trace"][0]["tool"] == "openai_codex_chat"
+    assert "MOCK[openai_codex_chat]" in out["artifact"]
+    assert "openai_codex_chat" in runner.FALLBACK_CHAINS["write"]
+
+
 def test_broker_rotates_on_leaf_failure(tmp_path):
     # Primary write leaf fails; fallback chat leaf succeeds -> run still completes.
     reg = {

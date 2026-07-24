@@ -128,7 +128,7 @@ def _provider_status(_args: Dict[str, Any]) -> Dict[str, Any]:
         "plan_type": state.get("plan_type"),
         **response.standard_fields(
             success=ready,
-            provider="openai",
+            provider="gpt",
             backend="codex-app-server",
             warnings=warnings,
         ),
@@ -144,7 +144,7 @@ def _login_status(_args: Dict[str, Any]) -> Dict[str, Any]:
         **state,
         **response.standard_fields(
             success=bool(state.get("configured")),
-            provider="openai",
+            provider="gpt",
             backend="codex-app-server",
         ),
     }
@@ -156,7 +156,7 @@ def _login_start(args: Dict[str, Any]) -> Dict[str, Any]:
         **auth.login_action(device=bool(args.get("device"))),
         **response.standard_fields(
             success=True,
-            provider="openai",
+            provider="gpt",
             backend="official-codex-login",
         ),
     }
@@ -176,7 +176,7 @@ def _login_refresh(_args: Dict[str, Any]) -> Dict[str, Any]:
         "plan_type": state.get("plan_type"),
         **response.standard_fields(
             success=True,
-            provider="openai",
+            provider="gpt",
             backend="codex-app-server",
         ),
     }
@@ -192,7 +192,7 @@ def _logout(_args: Dict[str, Any]) -> Dict[str, Any]:
         "next_action": {"type": "external_cli", "command": "codex logout"},
         **response.standard_fields(
             success=False,
-            provider="openai",
+            provider="gpt",
             backend="official-codex-login",
         ),
     }
@@ -228,7 +228,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             "success": False,
             "error": str(exc),
             "error_type": getattr(exc, "code", type(exc).__name__),
-            "provider": "openai",
+            "provider": "gpt",
             "backend": "official-codex",
             "warnings": [],
         }

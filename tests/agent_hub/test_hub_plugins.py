@@ -20,6 +20,7 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
     assert {path.parent.name for path in shared} == {
         "adaptive-orchestrate",
         "document-write",
+        "gpt-provider",
         "handoff",
         "takeover",
     }
@@ -44,10 +45,14 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
 
     handoff = (HUBS / "shared/skills/handoff/SKILL.md").read_text(encoding="utf-8")
     takeover = (HUBS / "shared/skills/takeover/SKILL.md").read_text(encoding="utf-8")
+    gpt = (HUBS / "shared/skills/gpt-provider/SKILL.md").read_text(encoding="utf-8")
     assert "agent_hub_prepare_handoff_update" in handoff
     assert "expected_sha256" in handoff
     assert "git add -A" not in handoff
     assert "handoff_drift" in takeover
+    assert 'provider="gpt"' in gpt
+    assert "`openai_codex_*`" in gpt
+    assert "별도 MCP로 등록" in gpt
 
 
 def test_hub_plugins_register_only_unified_agent_hub_and_memory(tmp_path):
@@ -58,6 +63,22 @@ def test_hub_plugins_register_only_unified_agent_hub_and_memory(tmp_path):
     assert set(claude_mcp) == {"agent-hub", "memory"}
     assert codex_mcp["agent-hub"]["command"].endswith("/.venv/bin/agent-hub-mcp")
     assert claude_mcp["agent-hub"]["command"].endswith("/.venv/bin/agent-hub-mcp")
+
+
+def test_public_hub_tools_do_not_expose_private_provider_leaf_names():
+    from agent_hub import operations
+
+    names = {item["name"] for item in operations.tool_definitions()}
+    assert "agent_hub_chat" in names
+    assert not any(name.startswith("openai_codex_") for name in names)
+
+    tracked_configs = [
+        ROOT / "hubs/codex/.codex-plugin/plugin.json",
+        ROOT / "hubs/claude-code/.claude-plugin/plugin.json",
+        ROOT / ".agents/plugins/marketplace.json",
+        ROOT / ".claude-plugin/marketplace.json",
+    ]
+    assert all("openai_codex.mcp_server" not in path.read_text() for path in tracked_configs)
 
 
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():

@@ -51,7 +51,7 @@ The GPT provider is informed by two upstream projects:
 
 No Codex access token, refresh token, Keychain entry, or `auth.json` payload is
 read, copied, returned, or persisted by Agent Hub. See
-`plugins/openai-codex/docs/SOURCE_MAP.md` for the file-level source boundary.
+`model-access/gpt-provider.source-map.md` for the file-level source boundary.
 
 ## google-antigravity-codex (`src/google_antigravity_codex`)
 

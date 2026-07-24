@@ -55,7 +55,7 @@ def list_models(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
         "text_models": models,
         "image_models": [],
         **response.standard_fields(
-            provider="openai",
+            provider="gpt",
             backend="codex-app-server",
             warnings=warnings,
         ),

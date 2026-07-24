@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_hub import capabilities, operations, provider_registry, provider_settings
+from agent_hub import (
+    capabilities,
+    operations,
+    orchestrator,
+    provider_registry,
+    provider_settings,
+)
+from agent_hub.core.inprocess import make_resolver
 from agent_hub.core import media
 from claude_codex import chat as claude_chat
 from claude_codex import search as claude_search
@@ -29,6 +36,9 @@ def test_provider_registry_is_the_ordered_metadata_source():
         "google_antigravity_chat",
         "openai_codex_chat",
     )
+    manifest = orchestrator.capability_manifest()
+    assert manifest["chat"]["providers"] == ["claude", "grok", "gemini", "gpt"]
+    assert manifest["search"]["providers"] == ["claude", "grok", "gemini"]
 
 
 def test_public_schemas_expose_real_provider_capabilities():
@@ -37,7 +47,6 @@ def test_public_schemas_expose_real_provider_capabilities():
         "claude",
         "grok",
         "gemini",
-        "gpt",
     ]
     assert _spec("agent_hub_generate_image")["inputSchema"]["properties"]["provider"][
         "enum"
@@ -45,6 +54,9 @@ def test_public_schemas_expose_real_provider_capabilities():
     assert "provider" not in _spec("agent_hub_release_snapshot")["inputSchema"]["properties"]
     assert capabilities.supports("claude", "vision")
     assert not capabilities.supports("claude", "image_generation")
+    assert _spec("agent_hub_chat")["inputSchema"]["properties"]["reasoning_effort"][
+        "enum"
+    ] == ["low", "medium", "high", "xhigh", "max", "ultra"]
     assert _spec("agent_hub_write")["inputSchema"]["properties"][
         "quality_rewrite_attempts"
     ]["default"] == 1
@@ -291,7 +303,7 @@ def test_gpt_chat_uses_canonical_agent_hub_envelope(monkeypatch):
         captured.update({"name": name, "arguments": arguments})
         return {
             "success": True,
-            "provider": "openai",
+            "provider": "gpt",
             "model": "gpt-test",
             "text": "answer",
             "warnings": [],
@@ -306,7 +318,139 @@ def test_gpt_chat_uses_canonical_agent_hub_envelope(monkeypatch):
     assert captured["arguments"]["prompt"] == "question"
     assert result["success"] is True
     assert result["provider"] == "gpt"
-    assert result["data"]["provider"] == "openai"
+    assert result["data"]["provider"] == "gpt"
+
+
+def test_gpt_status_models_and_auth_use_canonical_hub_envelopes(monkeypatch):
+    monkeypatch.setattr(
+        operations.openai_security,
+        "consent_status",
+        lambda: {"user_consent": True},
+    )
+    monkeypatch.setattr(
+        operations.openai_security,
+        "require_consent",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        operations.openai_auth,
+        "status",
+        lambda: {
+            "logged_in": True,
+            "configured": True,
+            "auth_mode": "chatgpt",
+            "plan_type": "pro",
+            "email": "must-not-leak@example.test",
+        },
+    )
+    status = operations.dispatch_tool("agent_hub_status", {"provider": "gpt"})
+    assert status["success"] is True
+    assert list(status["data"]["providers"]) == ["gpt"]
+    assert status["data"]["providers"]["gpt"]["ready"] is True
+    assert "must-not-leak" not in str(status)
+
+    monkeypatch.setattr(
+        operations.openai_models,
+        "list_models",
+        lambda _args: {
+            "success": True,
+            "provider": "gpt",
+            "models": [{"id": "gpt-test"}],
+        },
+    )
+    models = operations.dispatch_tool(
+        "agent_hub_list_models",
+        {"provider": "gpt"},
+    )
+    assert models["data"]["models"]["gpt"]["provider"] == "gpt"
+
+    monkeypatch.setattr(
+        operations.openai_auth,
+        "login_action",
+        lambda *, device=False: {
+            "success": True,
+            "text": "Run official Codex login.",
+            "next_action": {
+                "type": "external_cli",
+                "command": "codex login --device-auth" if device else "codex login",
+            },
+        },
+    )
+    auth = operations.dispatch_tool(
+        "agent_hub_auth_start",
+        {"provider": "gpt", "device": True},
+    )
+    assert auth["provider"] == "gpt"
+    assert auth["data"]["next_action"]["command"] == "codex login --device-auth"
+
+    logout = operations.dispatch_tool(
+        "agent_hub_auth_logout",
+        {"provider": "gpt"},
+    )
+    assert logout["success"] is False
+    assert logout["provider"] == "gpt"
+    assert logout["data"]["error"] == "shared_codex_logout_refused"
+
+
+def test_private_gpt_leaf_is_inprocess_only_not_a_public_hub_tool():
+    assert make_resolver()("openai_codex_chat") is not None
+    with pytest.raises(ValueError, match="unknown canonical tool"):
+        operations.dispatch_tool("openai_codex_chat", {"prompt": "question"})
+
+
+def test_fixed_workflow_provider_maps_to_private_gpt_binding(tmp_path, monkeypatch):
+    planned = operations.dispatch_tool(
+        "agent_hub_plan_workflow",
+        {
+            "workflow_id": "repo_document",
+            "preset": "proposal",
+            "provider": "gpt",
+            "prompt": "question",
+            "project_root": str(tmp_path),
+        },
+    )
+    assert planned["success"] is True
+    draft = next(
+        step for step in planned["data"]["plan"]["steps"] if step["id"] == "draft"
+    )
+    assert draft["tool"] == "openai_codex_chat"
+
+    captured = {}
+
+    def fake_run_auto(recipe_id, **kwargs):
+        captured.update({"recipe_id": recipe_id, **kwargs})
+        return {"ok": True, "status": "completed", "artifact": "answer"}
+
+    monkeypatch.setattr(operations.broker, "run_auto", fake_run_auto)
+    result = operations.dispatch_tool(
+        "agent_hub_run_workflow",
+        {
+            "workflow_id": "repo_document",
+            "preset": "proposal",
+            "provider": "gpt",
+            "prompt": "question",
+            "project_root": str(tmp_path),
+        },
+    )
+    assert result["success"] is True
+    assert captured["bindings"]["chat"] == "openai_codex_chat"
+    assert captured["bindings"]["write_ag"] == "openai_codex_chat"
+
+
+def test_fixed_provider_rejects_a_conflicting_private_binding(tmp_path):
+    result = operations.dispatch_tool(
+        "agent_hub_plan_workflow",
+        {
+            "workflow_id": "repo_document",
+            "preset": "proposal",
+            "provider": "gpt",
+            "bindings": {"write_ag": "claude_codex_chat"},
+            "prompt": "question",
+            "project_root": str(tmp_path),
+        },
+    )
+    assert result["success"] is False
+    assert "provider conflicts with explicit fixed bindings: write_ag" in result["text"]
 
 
 def test_provider_settings_are_persistent_and_scoped(tmp_path, monkeypatch):
@@ -324,6 +468,31 @@ def test_provider_settings_are_persistent_and_scoped(tmp_path, monkeypatch):
     assert loaded["data"]["providers"]["grok"]["overrides"]["api_mode"] == "responses"
     operations.dispatch_tool("agent_hub_reset_settings", {"provider": "grok"})
     assert provider_settings.get("grok") == {}
+
+
+def test_gpt_settings_aliases_use_the_canonical_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path))
+    updated = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"provider": "chatgpt", "model": "gpt-test"},
+    )
+    assert updated["provider"] == "gpt"
+    assert provider_settings.get("gpt") == {"model": "gpt-test"}
+
+    refused = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"provider": "gpt", "model": "gpt-test", "temperature": 0.2},
+    )
+    assert refused["success"] is False
+    assert refused["text"] == "unsupported gpt settings: temperature"
+    assert provider_settings.get("gpt") == {"model": "gpt-test"}
+
+    reset = operations.dispatch_tool(
+        "agent_hub_reset_settings",
+        {"provider": "openai-codex"},
+    )
+    assert reset["provider"] == "gpt"
+    assert provider_settings.get("gpt") == {}
 
 
 def test_local_image_normalization_is_bounded_by_workspace(tmp_path):

@@ -37,6 +37,25 @@
       "vendored_commit": "4355b37fb2f8c3135dbae8237d51407271b5eb0b",
       "version": "0.9.8",
       "auth": "oauth-pkce"
+    },
+    {
+      "name": "openai-codex",
+      "src": "src/openai_codex",
+      "role": "internal adapter (OpenAI GPT through official Codex)",
+      "upstream_sources": [
+        {
+          "url": "https://github.com/NousResearch/hermes-agent",
+          "commit": "74a56b76b08bccc4b4a85076af15e2c176ab5542",
+          "license": "MIT"
+        },
+        {
+          "url": "https://github.com/openai/codex",
+          "commit": "94ebae725e5e8f22b5d86773d9223047f57b6118",
+          "license": "Apache-2.0"
+        }
+      ],
+      "version": "0.1.0",
+      "auth": "official Codex-owned ChatGPT subscription login"
     }
   ]
 }

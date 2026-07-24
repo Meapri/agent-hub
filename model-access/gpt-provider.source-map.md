@@ -1,8 +1,10 @@
-# OpenAI Codex provider source map
+# GPT provider source map
 
-This file records the upstream material consulted for Agent Hub's GPT provider
-and the boundary between adapted protocol ideas and code written in this
-repository.
+This file records the upstream material consulted for Agent Hub's internal GPT
+provider adapter and the boundary between adapted protocol ideas and code
+written in this repository. It does not describe a separately installable
+provider: the public surface is the unified `agent_hub_*` API with provider
+ID `gpt`.
 
 ## Pinned upstream revisions
 
