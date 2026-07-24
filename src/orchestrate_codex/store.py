@@ -22,19 +22,27 @@ import tempfile
 from threading import Lock
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 _ENV_DIR = "ORCHESTRATE_CODEX_STATE_DIR"
 RUN_ID_PATTERN = r"^[0-9a-f]{12}$"
 _RUN_ID_RE = re.compile(RUN_ID_PATTERN)
 CLAIM_TOKEN_PATTERN = r"^[0-9a-f]{32}$"
 _CLAIM_TOKEN_RE = re.compile(CLAIM_TOKEN_PATTERN)
+STATE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+_STATE_SHA256_RE = re.compile(STATE_SHA256_PATTERN)
 _LOCAL_LOCKS: Dict[str, Lock] = {}
 _LOCAL_LOCKS_GUARD = Lock()
 RUN_SUMMARY_SCHEMA = "run_summary_v1"
 MAX_SUMMARY_SCAN = 2_000
 MAX_SUMMARY_LIMIT = 100
 MAX_SUMMARY_STATE_BYTES = 8 * 1024 * 1024
+ACTIVE_RUN_STATUSES = frozenset({"running", "paused"})
+TERMINAL_RUN_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "archived"}
+)
+ARCHIVABLE_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+KNOWN_RUN_STATUSES = ACTIVE_RUN_STATUSES | TERMINAL_RUN_STATUSES
 
 
 class RunStoreError(RuntimeError):
@@ -64,6 +72,10 @@ class RunLeaseActive(RunStoreError):
 
 
 class RunLeaseLost(RunStoreError):
+    pass
+
+
+class RunStateDigestConflict(RunStoreError):
     pass
 
 
@@ -244,12 +256,34 @@ def _current_revision(state: Dict[str, Any]) -> int:
     return raw
 
 
-def _read_state_from_dir(
+def validate_run_status(state: Dict[str, Any]) -> str:
+    status = str(state.get("status") or "")
+    if status not in KNOWN_RUN_STATUSES:
+        raise RunPersistenceError(f"unsupported persisted run status: {status or 'missing'}")
+    return status
+
+
+def strict_state_project_root(state: Dict[str, Any]) -> str:
+    raw = state.get("project_root")
+    if not raw and isinstance(state.get("options"), dict):
+        raw = state["options"].get("project_root")
+    requested = Path(str(raw or "")).expanduser()
+    if not requested.is_absolute():
+        raise RunPersistenceError(
+            "persisted run does not have a canonical project_root"
+        )
+    canonical = str(requested.resolve())
+    if str(requested) != canonical:
+        raise RunPersistenceError("persisted run project_root is not canonical")
+    return canonical
+
+
+def _read_state_with_identity_from_dir(
     directory_fd: int,
     run_id: str,
     *,
     strict_owner: bool,
-) -> Dict[str, Any]:
+) -> tuple[Dict[str, Any], os.stat_result]:
     filename = _filename(run_id)
     file_fd: Optional[int] = None
     try:
@@ -285,7 +319,21 @@ def _read_state_from_dir(
             os.close(file_fd)
     if not isinstance(parsed, dict) or parsed.get("run_id") != run_id:
         raise RunPersistenceError(f"run state identity mismatch: {run_id}")
-    return parsed
+    return parsed, file_stat
+
+
+def _read_state_from_dir(
+    directory_fd: int,
+    run_id: str,
+    *,
+    strict_owner: bool,
+) -> Dict[str, Any]:
+    state, _identity = _read_state_with_identity_from_dir(
+        directory_fd,
+        run_id,
+        strict_owner=strict_owner,
+    )
+    return state
 
 
 def _write_state_to_dir(
@@ -523,6 +571,53 @@ def commit_claim(claim: RunClaim, state: Dict[str, Any]) -> Dict[str, Any]:
         committed.pop("_lease", None)
         committed["store_revision"] = revision + 1
         return _write_state_to_dir(directory_fd, committed)
+
+
+def commit_lifecycle_transition(
+    run_id: str,
+    *,
+    expected_revision: int,
+    mutate: Callable[[Dict[str, Any], int], Dict[str, Any] | None],
+    invalidate_active_lease: bool = False,
+) -> tuple[Dict[str, Any], bool]:
+    """Commit a lifecycle transition while optionally fencing an active call."""
+
+    validated = validate_run_id(run_id)
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+    ):
+        raise ValueError("expected_revision must be a non-negative integer")
+    with _locked_state_dir(validated) as directory_fd:
+        current = _read_state_from_dir(
+            directory_fd,
+            validated,
+            strict_owner=True,
+        )
+        revision = _current_revision(current)
+        if revision != expected_revision:
+            raise RunRevisionConflict(expected=expected_revision, current=revision)
+        active = current.get("_lease")
+        if isinstance(active, dict) and not invalidate_active_lease:
+            try:
+                expires_at = float(active.get("expires_at"))
+            except (TypeError, ValueError) as exc:
+                raise RunPersistenceError("run lease expiry is invalid") from exc
+            if expires_at > time.time():
+                raise RunLeaseActive(
+                    current_revision=revision,
+                    retry_after_seconds=expires_at - time.time(),
+                )
+        proposed = mutate(dict(current), revision)
+        if proposed is None:
+            return current, False
+        if proposed.get("run_id") != validated:
+            raise RunPersistenceError("lifecycle transition changed run_id")
+        committed = dict(proposed)
+        committed.pop("_lease", None)
+        committed["store_revision"] = revision + 1
+        return _write_state_to_dir(directory_fd, committed), True
 
 
 def resume_claim(
@@ -766,7 +861,7 @@ def _summary_next_action_type(state: Dict[str, Any]) -> str:
     status = str(state.get("status") or "")
     if status == "completed":
         return "done"
-    if status in {"failed", "cancelled", "archived"}:
+    if status in TERMINAL_RUN_STATUSES - {"completed"}:
         return "failed"
     if state.get("run_kind") == "adaptive":
         return "continue"
@@ -781,6 +876,7 @@ def _summary_next_action_type(state: Dict[str, Any]) -> str:
 
 
 def _run_summary(state: Dict[str, Any], *, now: float) -> Dict[str, Any]:
+    validate_run_status(state)
     lease = state.get("_lease") if isinstance(state.get("_lease"), dict) else {}
     try:
         lease_expires_at = float(lease.get("expires_at") or 0.0)
@@ -970,6 +1066,101 @@ def list_run_summaries(
         "truncated": truncated,
         "scanned": len(names),
         "skipped": skipped,
+    }
+
+
+def state_sha256(state: Dict[str, Any]) -> str:
+    """Hash the complete authoritative JSON state for a destructive-action fence."""
+
+    try:
+        encoded = json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise RunPersistenceError("run state is not canonical JSON") from exc
+    return sha256(encoded).hexdigest()
+
+
+def delete_archived_strict(
+    run_id: str,
+    *,
+    project_root: str,
+    expected_revision: int,
+    expected_state_sha256: str,
+) -> Dict[str, Any]:
+    """Delete one archived run under a project/revision/content fence."""
+
+    validated = validate_run_id(run_id)
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+    ):
+        raise ValueError("expected_revision must be a non-negative integer")
+    digest = str(expected_state_sha256 or "")
+    if _STATE_SHA256_RE.fullmatch(digest) is None:
+        raise ValueError("expected_state_sha256 must be 64 lowercase hexadecimal characters")
+    requested_root = Path(str(project_root)).expanduser()
+    if not requested_root.is_absolute():
+        raise ValueError("project_root must be an absolute canonical path")
+    canonical_root = str(requested_root.resolve())
+    if str(requested_root) != canonical_root:
+        raise ValueError("project_root must be an absolute canonical path")
+
+    filename = _filename(validated)
+    with _locked_state_dir(validated) as directory_fd:
+        state, read_stat = _read_state_with_identity_from_dir(
+            directory_fd,
+            validated,
+            strict_owner=True,
+        )
+        revision = _current_revision(state)
+        if revision != expected_revision:
+            raise RunRevisionConflict(expected=expected_revision, current=revision)
+        if strict_state_project_root(state) != canonical_root:
+            raise ValueError("run belongs to a different project")
+        if str(state.get("status") or "") != "archived":
+            raise ValueError("only archived runs can be garbage-collected")
+        if isinstance(state.get("_lease"), dict):
+            raise RunPersistenceError("archived run unexpectedly retains a lease")
+        actual_digest = state_sha256(state)
+        if actual_digest != digest:
+            raise RunStateDigestConflict("run state digest changed")
+
+        try:
+            target_stat = os.stat(
+                filename,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as exc:
+            raise RunNotFound(f"run state not found: {validated}") from exc
+        current_uid = getattr(os, "getuid", lambda: target_stat.st_uid)()
+        if (
+            not stat.S_ISREG(target_stat.st_mode)
+            or target_stat.st_uid != current_uid
+            or target_stat.st_nlink != 1
+            or target_stat.st_dev != read_stat.st_dev
+            or target_stat.st_ino != read_stat.st_ino
+        ):
+            raise RunPersistenceError(
+                f"run state identity changed before deletion: {validated}"
+            )
+        try:
+            os.unlink(filename, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise RunPersistenceError(f"could not delete run state: {validated}") from exc
+
+    return {
+        "run_id": validated,
+        "project_root": canonical_root,
+        "store_revision": revision,
+        "state_sha256": actual_digest,
     }
 
 

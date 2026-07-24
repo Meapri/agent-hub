@@ -28,6 +28,8 @@ _STRING_FIELDS = {
     "model",
     "error_type",
     "pause_reason",
+    "previous_status",
+    "reason_code",
 }
 _BOOL_FIELDS = {"success", "retryable"}
 _INTEGER_FIELDS = {

@@ -490,6 +490,12 @@ def _prune_runs() -> None:
         _RUNS.pop(str(stale.get("run_id") or ""), None)
 
 
+def forget_run(run_id: str) -> None:
+    """Drop one process-local cache entry after a lifecycle state change or GC."""
+
+    _RUNS.pop(store.validate_run_id(run_id), None)
+
+
 def load_state(state_or_id: Any) -> Dict[str, Any]:
     if isinstance(state_or_id, str) and state_or_id:
         run_id = store.validate_run_id(state_or_id)
@@ -526,7 +532,7 @@ def _public_state(state: Dict[str, Any]) -> Dict[str, Any]:
         and out["next_action"].get("type") not in {"done", "failed"}
     ):
         out["next_action"]["expected_revision"] = out["store_revision"]
-    out["done"] = out.get("status") in {"completed", "failed"}
+    out["done"] = out.get("status") in store.TERMINAL_RUN_STATUSES
     return out
 
 
@@ -565,8 +571,12 @@ def _action_identity(state: Dict[str, Any], action: Dict[str, Any]) -> str:
 def _next_action(state: Dict[str, Any]) -> Dict[str, Any]:
     if state.get("status") == "completed":
         return {"type": "done", "message": "Recipe completed"}
-    if state.get("status") == "failed":
-        return {"type": "failed", "message": state.get("error") or "failed"}
+    if state.get("status") in store.TERMINAL_RUN_STATUSES - {"completed"}:
+        status = str(state.get("status") or "failed")
+        return {
+            "type": "failed",
+            "message": state.get("error") or f"Recipe is {status}",
+        }
     step = _current_step(state)
     if not step:
         return {"type": "done", "message": "No more steps"}
@@ -866,6 +876,7 @@ def _validate_fixed_run_state(state: Dict[str, Any]) -> None:
         or not isinstance(state.get("steps"), list)
     ):
         raise ValueError("persisted run is not a fixed recipe run")
+    store.validate_run_status(state)
 
 
 def _handoff_policy(state: Dict[str, Any], override: str | None) -> str:
@@ -921,7 +932,7 @@ def claim_next_action(
     )
     try:
         _validate_fixed_run_state(claim.state)
-        if claim.state.get("status") in {"completed", "failed", "cancelled", "archived"}:
+        if claim.state.get("status") in store.TERMINAL_RUN_STATUSES:
             raise ValueError("terminal run has no claimable action")
         drift_policy = _handoff_policy(claim.state, handoff_drift_policy)
         _apply_handoff_drift_policy(
@@ -1184,7 +1195,7 @@ def continue_run(
     )
     try:
         _validate_fixed_run_state(claim.state)
-        if claim.state.get("status") in {"completed", "failed"}:
+        if claim.state.get("status") in store.TERMINAL_RUN_STATUSES:
             released = store.abort_claim(claim)
             _RUNS[persistent_run_id] = released
             return _public_state(released)

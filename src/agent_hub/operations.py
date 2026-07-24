@@ -19,6 +19,7 @@ from agent_hub import (
 )
 from agent_hub.core import handoff as handoff_state
 from agent_hub.core import media, parallel
+from agent_hub.core import run_lifecycle
 from agent_hub.core import takeover as takeover_state
 from claude_codex import auth as claude_auth
 from claude_codex import models as claude_models
@@ -1498,6 +1499,7 @@ def _load_workflow_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
     out = deepcopy(state)
+    store.validate_run_status(out)
     lease = out.pop("_lease", None)
     out["event_journal"] = run_events.event_summary(out)
     out.pop("events", None)
@@ -1518,11 +1520,12 @@ def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
         for step in plan.get("steps") or []
         if str(step.get("id")) not in completed
     ]
-    out["done"] = out.get("status") in {"completed", "failed"}
+    out["done"] = out.get("status") in run_lifecycle.TERMINAL_STATUSES
     if out["done"]:
         out["next_action"] = {
             "type": "done" if out.get("status") == "completed" else "failed",
-            "message": out.get("error") or "Adaptive workflow finished.",
+            "message": out.get("error")
+            or f"Adaptive workflow is {out.get('status')}.",
         }
     else:
         out["next_action"] = {
@@ -2098,7 +2101,8 @@ def _continue_adaptive_workflow(
     state: Dict[str, Any],
     claim: store.RunClaim,
 ) -> Dict[str, Any]:
-    if state.get("status") in {"completed", "failed"}:
+    store.validate_run_status(state)
+    if state.get("status") in run_lifecycle.TERMINAL_STATUSES:
         public = _adaptive_public_state(store.abort_claim(claim))
         return envelope(
             "continue_workflow",
@@ -2107,7 +2111,10 @@ def _continue_adaptive_workflow(
                 "text": (
                     "Adaptive workflow is already complete."
                     if state.get("status") == "completed"
-                    else str(state.get("error") or "Adaptive workflow already failed.")
+                    else str(
+                        state.get("error")
+                        or f"Adaptive workflow is {state.get('status')}."
+                    )
                 ),
                 **public,
             },
@@ -2235,12 +2242,22 @@ def _continue_adaptive_workflow(
         if isinstance(item, dict) and item.get("success")
     }
     result_status = str(result.get("status") or "failed")
+    failure_type: str | None = None
     if result_status in {"timed_out", "budget_exhausted"}:
         persisted_status = "paused"
         pause_reason = str(result.get("error") or result_status)
-    else:
+    elif result_status == "blocked":
+        persisted_status = "failed"
+        pause_reason = None
+        failure_type = "adaptive_blocked"
+    elif result_status in {"completed", "failed", "paused"}:
         persisted_status = result_status
         pause_reason = "wave_limit" if result_status == "paused" else None
+        failure_type = result_status if result_status == "failed" else None
+    else:
+        persisted_status = "failed"
+        pause_reason = None
+        failure_type = "adaptive_invalid_status"
     state.update(
         {
             "status": persisted_status,
@@ -2260,7 +2277,9 @@ def _continue_adaptive_workflow(
         state["text"] = str(result.get("text") or "")
         state.pop("error", None)
     elif persisted_status == "failed":
-        state["error"] = str(result.get("error") or "adaptive_step_failed")
+        state["error"] = str(
+            result.get("error") or failure_type or "adaptive_step_failed"
+        )
     else:
         state.pop("text", None)
         state.pop("error", None)
@@ -2283,7 +2302,7 @@ def _continue_adaptive_workflow(
         status=persisted_status,
         success=persisted_status != "failed",
         error_type=(
-            result_status if persisted_status == "failed" else None
+            failure_type if persisted_status == "failed" else None
         ),
         retryable=persisted_status == "paused",
         elapsed_ms=int(state["elapsed_ms_last_call"]),
@@ -2334,6 +2353,11 @@ def _run_store_error_response(
         details = {"expected": error.expected, "current": error.current}
     elif isinstance(error, store.RunLeaseLost):
         error_type = "run_lease_lost"
+        retryable = True
+        revision = None
+        details = {}
+    elif isinstance(error, store.RunStateDigestConflict):
+        error_type = "run_state_digest_conflict"
         retryable = True
         revision = None
         details = {}
@@ -2490,7 +2514,12 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
         return _run_store_error_response(store.validate_run_id(run_id), exc)
     return envelope(
         "continue_workflow",
-        {"success": state.get("status") != "failed", "text": "Workflow advanced.", **state},
+        {
+            "success": state.get("status")
+            not in {"failed", "cancelled", "archived"},
+            "text": "Workflow advanced.",
+            **state,
+        },
     )
 
 
@@ -2566,6 +2595,88 @@ def _get_run_events(args: Dict[str, Any]) -> Dict[str, Any]:
         {
             "success": True,
             "text": f"{len(result['events'])} committed run events loaded.",
+            **result,
+        },
+        success=True,
+    )
+
+
+def _cancel_run(args: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = store.validate_run_id(args.get("run_id"))
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    try:
+        result = run_lifecycle.cancel_run(
+            run_id,
+            project_root=project_root,
+            expected_revision=args.get("expected_revision"),
+            reason_code=str(args.get("reason_code") or "user_requested"),
+        )
+    except store.RunStoreError as exc:
+        return _run_store_error_response(run_id, exc, operation="cancel_run")
+    return envelope(
+        "cancel_run",
+        {
+            "success": True,
+            "text": (
+                "Run cancelled."
+                if result["changed"]
+                else "Run was already cancelled."
+            ),
+            **result,
+        },
+        success=True,
+    )
+
+
+def _archive_run(args: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = store.validate_run_id(args.get("run_id"))
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    try:
+        result = run_lifecycle.archive_run(
+            run_id,
+            project_root=project_root,
+            expected_revision=args.get("expected_revision"),
+        )
+    except store.RunStoreError as exc:
+        return _run_store_error_response(run_id, exc, operation="archive_run")
+    return envelope(
+        "archive_run",
+        {
+            "success": True,
+            "text": (
+                "Run archived."
+                if result["changed"]
+                else "Run was already archived."
+            ),
+            **result,
+        },
+        success=True,
+    )
+
+
+def _gc_run(args: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = store.validate_run_id(args.get("run_id"))
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    apply = bool(args.get("apply", False))
+    try:
+        result = run_lifecycle.gc_run(
+            run_id,
+            project_root=project_root,
+            apply=apply,
+            expected_revision=args.get("expected_revision"),
+            expected_state_sha256=args.get("expected_state_sha256"),
+        )
+    except store.RunStoreError as exc:
+        return _run_store_error_response(run_id, exc, operation="gc_run")
+    return envelope(
+        "gc_run",
+        {
+            "success": True,
+            "text": (
+                "Archived run deleted."
+                if result["deleted"]
+                else "Archived run GC plan prepared; no state was changed."
+            ),
             **result,
         },
         success=True,
@@ -3660,6 +3771,90 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         idempotent=True,
     ),
     _spec(
+        "agent_hub_cancel_run",
+        "Cancel Run",
+        (
+            "Revision-fenced cancellation for an active project-scoped run. "
+            "No provider call is started by this operation."
+        ),
+        _object(
+            {
+                "project_root": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "reason_code": {
+                    "type": "string",
+                    "enum": sorted(run_lifecycle.CANCEL_REASONS),
+                    "default": "user_requested",
+                },
+            },
+            required=("project_root", "run_id", "expected_revision"),
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    ),
+    _spec(
+        "agent_hub_archive_run",
+        "Archive Run",
+        "Revision-fenced archival for a completed, failed, or cancelled run.",
+        _object(
+            {
+                "project_root": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+            },
+            required=("project_root", "run_id", "expected_revision"),
+        ),
+        read_only=False,
+        destructive=True,
+        idempotent=True,
+    ),
+    _spec(
+        "agent_hub_gc_run",
+        "Garbage Collect Run",
+        (
+            "Prepare or explicitly apply deletion of one archived run. "
+            "Apply requires both revision and complete-state SHA fences."
+        ),
+        _object(
+            {
+                "project_root": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                },
+                "apply": {
+                    "type": "boolean",
+                    "default": False,
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "expected_state_sha256": {
+                    "type": "string",
+                    "pattern": store.STATE_SHA256_PATTERN,
+                },
+            },
+            required=("project_root", "run_id"),
+        ),
+        read_only=False,
+        destructive=True,
+    ),
+    _spec(
         "agent_hub_run_workflow",
         "Run Workflow",
         "Run a workflow end-to-end with in-process provider adapters.",
@@ -3769,6 +3964,9 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_list_runs": _list_runs,
     "agent_hub_get_run": _get_run,
     "agent_hub_get_run_events": _get_run_events,
+    "agent_hub_cancel_run": _cancel_run,
+    "agent_hub_archive_run": _archive_run,
+    "agent_hub_gc_run": _gc_run,
     "agent_hub_run_workflow": _run_workflow,
     "agent_hub_delegate": _delegate,
     "agent_hub_verify": _verify,

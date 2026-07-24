@@ -216,7 +216,7 @@ def _preflight_capsule(capsule: Any) -> None:
 
 def _capsule_body(state: Dict[str, Any]) -> Dict[str, Any]:
     status = str(state.get("status") or "")
-    if status in {"completed", "failed", "cancelled", "archived"}:
+    if status in store.TERMINAL_RUN_STATUSES:
         raise ValueError("terminal run cannot be prepared for takeover")
     run_kind = str(
         state.get("run_kind") or ("fixed" if state.get("recipe_id") else "")
@@ -310,7 +310,7 @@ def validate(
 
     state = store.load_strict(store.validate_run_id(capsule.get("run_id")))
     current_status = str(state.get("status") or "")
-    if current_status in {"completed", "failed", "cancelled", "archived"}:
+    if current_status in store.TERMINAL_RUN_STATUSES:
         if unsigned.get("status") != current_status:
             raise ValueError("stale takeover capsule: status changed")
         raise ValueError("terminal run cannot be resumed from takeover")
