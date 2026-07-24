@@ -19,6 +19,7 @@ from agent_hub import (
 )
 from agent_hub.core import handoff as handoff_state
 from agent_hub.core import media, parallel
+from agent_hub.core import takeover as takeover_state
 from claude_codex import auth as claude_auth
 from claude_codex import models as claude_models
 from claude_codex import mcp_server as claude_mcp
@@ -2451,6 +2452,77 @@ def _list_runs(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _prepare_takeover(args: Dict[str, Any]) -> Dict[str, Any]:
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    prepared = takeover_state.prepare(
+        store.validate_run_id(args.get("run_id")),
+        project_root=project_root,
+    )
+    return envelope(
+        "prepare_takeover",
+        {
+            "success": True,
+            "text": "Takeover capsule prepared from authoritative run state.",
+            **prepared,
+        },
+        success=True,
+    )
+
+
+def _resume_takeover(args: Dict[str, Any]) -> Dict[str, Any]:
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    capsule = args.get("capsule")
+    if not isinstance(capsule, dict):
+        raise ValueError("capsule must be an object")
+    try:
+        resumed = takeover_state.resume(
+            capsule,
+            project_root=project_root,
+            lease_seconds=max(
+                5.0,
+                min(float(args.get("lease_seconds") or 320), 600.0),
+            ),
+            handoff_drift_policy=args.get("handoff_drift_policy"),
+        )
+    except handoff_state.HandoffDrift as exc:
+        return envelope(
+            "resume_takeover",
+            {
+                "success": False,
+                "text": str(exc),
+                "error": {
+                    "type": "handoff_drift",
+                    "message": str(exc),
+                    "retryable": True,
+                },
+                "run_id": store.validate_run_id(capsule.get("run_id")),
+                "handoff_drift": exc.drift,
+            },
+        )
+    except store.RunStoreError as exc:
+        return _run_store_error_response(
+            store.validate_run_id(capsule.get("run_id")),
+            exc,
+            operation="resume_takeover",
+        )
+    return envelope(
+        "resume_takeover",
+        {
+            "success": True,
+            "text": (
+                "Fixed action claimed from a revalidated takeover capsule."
+                if resumed.get("resume_mode") == "claimed_fixed_action"
+                else (
+                    "Adaptive takeover capsule revalidated; call the returned "
+                    "revision-fenced continuation to execute the next wave."
+                )
+            ),
+            **resumed,
+        },
+        success=True,
+    )
+
+
 def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     from agent_hub.core.inprocess import make_resolver
 
@@ -3325,6 +3397,50 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         read_only=False,
     ),
     _spec(
+        "agent_hub_prepare_takeover",
+        "Prepare Takeover",
+        "Prepare a redacted capsule bound to the current run revision and project.",
+        _object(
+            {
+                "project_root": {"type": "string", "default": "."},
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                }
+            },
+            required=("project_root", "run_id"),
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    _spec(
+        "agent_hub_resume_takeover",
+        "Resume Takeover",
+        (
+            "Revalidate a capsule, then claim its fixed action or return a "
+            "revision-fenced adaptive continuation without executing it."
+        ),
+        _object(
+            {
+                "project_root": {"type": "string"},
+                "capsule": takeover_state.CAPSULE_JSON_SCHEMA,
+                "lease_seconds": {
+                    "type": "number",
+                    "minimum": 5,
+                    "maximum": 600,
+                    "default": 320,
+                },
+                "handoff_drift_policy": {
+                    "type": "string",
+                    "enum": ["pause", "use-snapshot"],
+                    "default": "pause",
+                },
+            },
+            required=("project_root", "capsule"),
+        ),
+        read_only=False,
+    ),
+    _spec(
         "agent_hub_list_runs",
         "List Project Runs",
         "List bounded, redacted workflow summaries for one canonical project root.",
@@ -3479,6 +3595,8 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_start_workflow": _start_workflow,
     "agent_hub_claim_run_action": _claim_run_action,
     "agent_hub_continue_workflow": _continue_workflow,
+    "agent_hub_prepare_takeover": _prepare_takeover,
+    "agent_hub_resume_takeover": _resume_takeover,
     "agent_hub_list_runs": _list_runs,
     "agent_hub_get_run": _get_run,
     "agent_hub_run_workflow": _run_workflow,
