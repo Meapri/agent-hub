@@ -1518,6 +1518,214 @@ def test_connection_test_can_diagnose_authenticated_not_ready_provider(monkeypat
     assert job["state"] == "failed"
 
 
+def test_gemini_connection_test_requires_a_real_selected_model_response(
+    monkeypatch,
+):
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=True,
+                    ready=True,
+                    default_model="gemini-3.6-flash-high",
+                )
+            }
+        )
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def dispatch(name, args):
+        calls.append((name, args))
+        return {
+            "success": True,
+            "provider": "gemini",
+            "model": "gemini-3.6-flash-high",
+            "text": "AGENT_HUB_CONNECTION_OK",
+            "data": {"capacity_fallback": False},
+        }
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.operations.dispatch_tool",
+        dispatch,
+    )
+
+    started = manager.start_test("gemini")
+    deadline = time.time() + 1
+    job = manager.job(started["id"])
+    while job["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+        job = manager.job(started["id"])
+
+    assert job["state"] == "complete"
+    assert [name for name, _args in calls] == ["agent_hub_chat"]
+    probe = calls[-1][1]
+    assert probe["provider"] == "gemini"
+    assert probe["model"] == "gemini-3.6-flash-high"
+    assert probe["max_tokens"] == 512
+    assert probe["retry_count"] == 0
+    assert probe["retry_sleep_cap_sec"] == 0
+    assert probe["timeout_sec"] == 30
+    assert probe["policy_mode"] == "off"
+
+
+def test_gemini_connection_test_fails_when_generation_fails(monkeypatch):
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=True,
+                    ready=True,
+                    default_model="gemini-3.6-flash-high",
+                )
+            }
+        )
+    )
+
+    def dispatch(_name, _args):
+        return {
+            "success": False,
+            "error": {
+                "type": "antigravity_http_404",
+                "message": "provider body omitted",
+            },
+        }
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.operations.dispatch_tool",
+        dispatch,
+    )
+
+    started = manager.start_test("gemini")
+    deadline = time.time() + 1
+    job = manager.job(started["id"])
+    while job["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+        job = manager.job(started["id"])
+
+    assert job["state"] == "failed"
+    assert "provider body omitted" not in str(job)
+
+
+def test_gemini_connection_test_requires_a_selected_model(monkeypatch):
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=True,
+                    ready=True,
+                    default_model="",
+                )
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "agent_hub.connect_service.operations.dispatch_tool",
+        lambda *_args, **_kwargs: pytest.fail("generation must not start"),
+    )
+
+    with pytest.raises(ConnectionError) as error:
+        manager.start_test("gemini")
+
+    assert error.value.code == "model_unavailable"
+
+
+def test_gemini_connection_test_fences_late_success_after_auth_change(
+    monkeypatch,
+):
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=True,
+                    ready=True,
+                    default_model="gemini-3.6-flash-high",
+                )
+            }
+        )
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def dispatch(_name, _args):
+        entered.set()
+        release.wait(timeout=1)
+        return {
+            "success": True,
+            "provider": "gemini",
+            "model": "gemini-3.6-flash-high",
+            "text": "AGENT_HUB_CONNECTION_OK",
+            "data": {"capacity_fallback": False},
+        }
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.operations.dispatch_tool",
+        dispatch,
+    )
+
+    started = manager.start_test("gemini")
+    assert entered.wait(timeout=1)
+    manager._invalidate_model_catalog("gemini")  # noqa: SLF001
+    release.set()
+
+    deadline = time.time() + 1
+    job = manager.job(started["id"])
+    while job["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+        job = manager.job(started["id"])
+
+    assert job["state"] == "failed"
+    assert "다시" in job["message"]
+
+
+def test_close_during_gemini_connection_test_keeps_cancelled_state(
+    monkeypatch,
+):
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=True,
+                    ready=True,
+                    default_model="gemini-3.6-flash-high",
+                )
+            }
+        )
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def dispatch(_name, _args):
+        entered.set()
+        release.wait(timeout=1)
+        return {
+            "success": True,
+            "provider": "gemini",
+            "model": "gemini-3.6-flash-high",
+            "text": "AGENT_HUB_CONNECTION_OK",
+            "data": {"capacity_fallback": False},
+        }
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.operations.dispatch_tool",
+        dispatch,
+    )
+
+    started = manager.start_test("gemini")
+    assert entered.wait(timeout=1)
+    manager.close()
+    release.set()
+    time.sleep(0.02)
+
+    job = manager.job(started["id"])
+    assert job["state"] == "cancelled"
+    assert "AGENT_HUB_CONNECTION_OK" not in str(job)
+
+
 def test_connection_test_rejects_curated_fallback_false_positive(monkeypatch):
     manager = ConnectionManager(
         status_reader=_reader(

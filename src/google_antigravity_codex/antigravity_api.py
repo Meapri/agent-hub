@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +14,6 @@ from . import __version__, agy_auth
 
 ENDPOINT = "https://cloudcode-pa.googleapis.com"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
-MODEL_ALIAS_CACHE_TTL_SECONDS = 5 * 60.0
 
 # Aliases informed by Meapri/hermes-google-antigravity-plugin Cloud Code PA client.
 MODEL_ALIASES = {
@@ -46,12 +44,6 @@ CAPACITY_FALLBACK_CHAIN: Dict[str, List[str]] = {
     "gemini-3.5-flash-low": ["gemini-3.5-flash-extra-low", "gemini-pro-agent"],
     "gemini-3.5-flash-extra-low": ["gemini-pro-agent"],
 }
-
-_MODEL_ALIAS_CACHE_LOCK = threading.Lock()
-_MODEL_ALIAS_CACHE: Dict[str, str] = {}
-_MODEL_ALIAS_CACHE_EXPIRES_AT = 0.0
-_MODEL_ALIAS_CACHE_PROJECT = ""
-
 
 class AntigravityApiError(RuntimeError):
     def __init__(self, message: str, *, code: str = "antigravity_api_error", status_code: Optional[int] = None) -> None:
@@ -138,62 +130,13 @@ def _credentials_and_project(
     return credentials, resolve_project_id(credentials)
 
 
-def _remember_live_model_aliases(
-    models: List[Dict[str, Any]],
-    *,
-    project: str,
-) -> None:
-    aliases: Dict[str, str] = {}
-    for item in models:
-        public_id = str(item.get("id") or "").strip()
-        internal_id = str(item.get("internal_id") or public_id).strip()
-        if public_id and internal_id:
-            aliases[public_id] = internal_id
-    with _MODEL_ALIAS_CACHE_LOCK:
-        global _MODEL_ALIAS_CACHE, _MODEL_ALIAS_CACHE_EXPIRES_AT
-        global _MODEL_ALIAS_CACHE_PROJECT
-        _MODEL_ALIAS_CACHE = aliases
-        _MODEL_ALIAS_CACHE_EXPIRES_AT = (
-            time.monotonic() + MODEL_ALIAS_CACHE_TTL_SECONDS
-        )
-        _MODEL_ALIAS_CACHE_PROJECT = project
-
-
-def _cached_live_model_alias(model: str, *, project: str) -> str | None:
-    with _MODEL_ALIAS_CACHE_LOCK:
-        if (
-            project != _MODEL_ALIAS_CACHE_PROJECT
-            or time.monotonic() >= _MODEL_ALIAS_CACHE_EXPIRES_AT
-        ):
-            return None
-        return _MODEL_ALIAS_CACHE.get(model)
-
-
-def _resolve_model(
-    model: str,
-    *,
-    project: str,
-    refresh_live: bool = False,
-) -> str:
+def _resolve_model(model: str) -> str:
     requested = str(model or "").strip() or "gemini-3.5-flash-high"
-    static_alias = MODEL_ALIASES.get(requested)
-    if static_alias:
-        return static_alias
-    if requested.startswith("MODEL_") or requested in MODEL_ALIASES.values():
-        return requested
-    live_alias = _cached_live_model_alias(requested, project=project)
-    if live_alias:
-        return live_alias
-    if refresh_live:
-        list_models(refresh=True)
-        live_alias = _cached_live_model_alias(requested, project=project)
-        if live_alias:
-            return live_alias
-    return requested
+    return MODEL_ALIASES.get(requested, requested)
 
 
-def _resolved_model_chain(model: str, *, project: str) -> tuple[str, List[str]]:
-    resolved = _resolve_model(model, project=project, refresh_live=True)
+def _resolved_model_chain(model: str) -> tuple[str, List[str]]:
+    resolved = _resolve_model(model)
     return resolved, [resolved] + CAPACITY_FALLBACK_CHAIN.get(resolved, [])
 
 
@@ -278,7 +221,7 @@ def generate_content(
     credentials, project = _credentials_and_project()
     if not project:
         raise AntigravityApiError("Could not resolve the Antigravity project id.", code="antigravity_project_missing")
-    resolved, fallback_models = _resolved_model_chain(model, project=project)
+    resolved, fallback_models = _resolved_model_chain(model)
     attempts = max(0, min(int(max_retries), 5)) + 1
     request_count = 0
     auth_refreshed = False
@@ -325,10 +268,7 @@ def generate_content(
                             "Could not resolve the Antigravity project id after OAuth refresh.",
                             code="antigravity_project_missing",
                         )
-                    resolved, fallback_models = _resolved_model_chain(
-                        model,
-                        project=project,
-                    )
+                    resolved, fallback_models = _resolved_model_chain(model)
                     model_index = 0
                     attempt_model = fallback_models[model_index]
                     body["project"] = project
@@ -363,7 +303,7 @@ def generate_content_stream(
     credentials, project = _credentials_and_project()
     if not project:
         raise AntigravityApiError("Could not resolve the Antigravity project id.", code="antigravity_project_missing")
-    resolved, fallback_models = _resolved_model_chain(model, project=project)
+    resolved, fallback_models = _resolved_model_chain(model)
     last_error: Optional[AntigravityApiError] = None
     auth_refreshed = False
 
@@ -417,10 +357,7 @@ def generate_content_stream(
                             "Could not resolve the Antigravity project id after OAuth refresh.",
                             code="antigravity_project_missing",
                         )
-                    resolved, fallback_models = _resolved_model_chain(
-                        model,
-                        project=project,
-                    )
+                    resolved, fallback_models = _resolved_model_chain(model)
                     model_index = 0
                     attempt_model = fallback_models[model_index]
                     body["project"] = project
@@ -505,7 +442,6 @@ def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
                 "methods": ["generateContent", "generateImages"],
             }
         )
-    _remember_live_model_aliases(models, project=project)
     return models
 
 

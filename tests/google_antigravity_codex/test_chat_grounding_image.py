@@ -32,10 +32,14 @@ def test_chat_request_adds_google_search_grounding():
     assert "Google Search grounding" in request["systemInstruction"]["parts"][0]["text"]
 
 
-def test_chat_floors_small_generation_limits_for_reasoning_models():
+@pytest.mark.parametrize(
+    "model",
+    ["gemini-3.5-flash", "gemini-3.6-flash-high"],
+)
+def test_chat_floors_small_generation_limits_for_reasoning_models(model):
     request = chat.build_request(
         messages=[{"role": "user", "content": "short answer"}],
-        model="gemini-3.5-flash",
+        model=model,
         max_tokens=16,
     )
 
@@ -60,6 +64,18 @@ def test_chat_exposes_official_thinking_level():
     )
 
     assert request["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "high"}
+
+
+@pytest.mark.parametrize("level", ["high", "medium", "low"])
+def test_chat_infers_thinking_level_from_gemini_36_tier(level):
+    request = chat.build_request(
+        messages=[{"role": "user", "content": "reason carefully"}],
+        model=f"gemini-3.6-flash-{level}",
+    )
+
+    assert request["generationConfig"]["thinkingConfig"] == {
+        "thinkingLevel": level
+    }
 
 
 def test_chat_uses_grounding_env_default():

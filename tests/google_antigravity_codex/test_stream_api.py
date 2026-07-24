@@ -69,7 +69,7 @@ def test_generate_content_stream_yields_chunks_and_diagnostics():
     assert events[-1]["_antigravity_diagnostics"]["streamed"] is True
 
 
-def test_stream_refresh_reresolves_dynamic_model_after_project_change():
+def test_stream_refresh_keeps_public_model_after_project_change():
     stale = agy_auth.AgyCredentials(
         access_token="stale-token",
         refresh_token="refresh-secret",
@@ -120,9 +120,6 @@ def test_stream_refresh_reresolves_dynamic_model_after_project_change():
         yield {"response": {"candidates": []}}
 
     with (
-        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE", {}),
-        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_EXPIRES_AT", 0.0),
-        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_PROJECT", ""),
         patch.object(
             antigravity_api.agy_auth,
             "valid_credentials",
@@ -144,9 +141,9 @@ def test_stream_refresh_reresolves_dynamic_model_after_project_change():
         )
 
     assert stream_calls == [
-        ("stale-token", "project-one", "MODEL_PROJECT_ONE"),
-        ("fresh-token", "project-two", "MODEL_PROJECT_TWO"),
+        ("stale-token", "project-one", "gemini-3.6-flash-high"),
+        ("fresh-token", "project-two", "gemini-3.6-flash-high"),
     ]
     diagnostics = events[-1]["_antigravity_diagnostics"]
-    assert diagnostics["used_model"] == "MODEL_PROJECT_TWO"
+    assert diagnostics["used_model"] == "gemini-3.6-flash-high"
     assert diagnostics["auth_refreshed"] is True

@@ -144,6 +144,7 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         assert "providerAuthFingerprint(previous)" in javascript
         assert "최신 모델 목록 불러오기" in javascript
         assert "loadModels({ refresh: Boolean(provider?.ready) })" in javascript
+        assert "소량의 사용량이 발생합니다." in javascript
         assert (
             "provider.local_credentials_present || provider.pending_login_present"
             in javascript

@@ -11,7 +11,74 @@
 
 - **현재 단계**
 
-  **[2026-07-24 Agent Hub 1.4.2 provider 연결·웹 모델 설정 전수 수정 — 이 블록이 최신]**
+  **[2026-07-25 Agent Hub 1.4.3 Gemini 3.6 실제 실행 복구 — 이 블록이 최신]**
+
+  - **원래 목표**: 동적 catalog에 표시되는 `gemini-3.6-flash-{high,medium,low}`를 Agent Hub의
+    공통 provider 경로와 연결 관리 GUI에서 실제로 실행하고, 단순 로그인·목록 조회와 실제 생성 성공을
+    구분해 사용자가 연결 상태를 정확히 판단하도록 고칩니다.
+  - **현재 단계**: Gemini의 public model ID 실행과 GUI의 bounded 실제 연결 테스트를 구현하고
+    Agent Hub 1.4.3으로 검증·설치했습니다. Python editable package, Codex plugin, Claude Code user
+    plugin이 모두 1.4.3이며, 새 MCP stdio process도 1.4.3과 `agent_hub_*` 도구 37개를 반환합니다.
+  - **완료**:
+    - Antigravity `fetchAvailableModels` 응답의 dictionary key를 실행 가능한 public model ID로
+      유지합니다. 중첩 `internal_id`는 catalog metadata로만 노출하고 generation body의 model로
+      치환하지 않습니다. non-stream, stream, 401 뒤 project/token refresh도 같은 public ID를
+      유지합니다.
+    - Gemini 3.6 Flash tier의 작은 출력 한도를 최소 256 token으로 보정하고 `-medium` suffix를
+      `thinking_level=medium`으로 해석합니다.
+    - GUI의 Gemini `연결 테스트`는 현재 선택 모델을 시작 시점에 고정해 짧은 실제 요청 한 번만
+      보냅니다. 30초 timeout, 최대 512 output token, retry 0, tools·grounding·policy off로 제한하며
+      소량의 사용량이 발생한다는 문구를 UI, README, provider-connect skill에 표시합니다. 상태 새로고침과
+      catalog 조회는 계속 생성 요청을 보내지 않습니다.
+    - 테스트 시작 전후의 auth generation을 비교하고 manager 종료를 terminal state로 보호해,
+      재로그인·동의 변경·종료와 겹친 늦은 성공을 완료로 기록하지 않습니다. prompt, model output,
+      provider 원문 오류는 job·GUI에 저장하거나 복사하지 않습니다.
+    - 로컬 브라우저에서 `gemini-3.6-flash-high`를 선택한 뒤 실제 연결 테스트가
+      `Gemini 선택 모델의 실제 응답까지 정상입니다.`로 완료되는 것을 확인했고 console error는
+      0건이었습니다.
+  - **미완**:
+    - 현재 실행 중인 Codex Desktop과 Claude Code process는 설치 전 plugin/MCP를 적재했을 수 있어
+      1.4.3을 확실히 사용하려면 각 host를 재시작해야 합니다.
+    - live catalog와 실제 응답 가능 여부는 Google 서비스와 현재 계정 권한에 따라 이후 달라질 수
+      있습니다. GUI 연결 테스트는 사용자가 누를 때마다 작은 생성 요청 한 번을 사용합니다.
+  - **변경 파일**:
+    - 실행·GUI: `src/google_antigravity_codex/{antigravity_api.py,chat.py}`,
+      `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/app.js`
+    - 버전·plugin: `pyproject.toml`, `src/agent_hub/__init__.py`,
+      `.claude-plugin/marketplace.json`,
+      `hubs/{codex/.codex-plugin/plugin.json,claude-code/.claude-plugin/plugin.json}`
+    - 문서·skill: `README.md`, `HANDOFF.md`, `hubs/{shared,codex,claude-code}/skills/provider-connect/SKILL.md`
+    - 회귀 테스트: `tests/agent_hub/{test_connect_app.py,test_connect_service.py,test_hub_plugins.py}`,
+      `tests/google_antigravity_codex/{test_agy_auth_provider.py,test_chat_grounding_image.py,test_stream_api.py}`
+  - **검증 실행 결과**:
+    - 새 회귀 테스트의 수정 전 실패 5건을 재현한 뒤 관련 suite → `135 passed`
+    - credential 경로를 임시 디렉터리로 격리하고 `PYTHONPATH=.`을 지정한 전체 pytest →
+      `684 passed, 2 skipped`; 첫 실행은 repo root import 경로가 없어 `scripts` collection error가
+      났으며 코드 실패가 아니어서 같은 격리 조건에 import 경로를 추가해 재실행했습니다.
+    - `./.venv/bin/ruff check .`, `node --check src/agent_hub/connect_ui/app.js`,
+      `git diff --check` → 통과
+    - `./scripts/check-hub-plugins.sh`, `./scripts/check-sync.sh`, `./scripts/test-phase1.sh`,
+      `scripts/check_release_version.py --tag v1.4.3` → 통과
+    - `./.venv/bin/python -m build` → 1.4.3 sdist·wheel 성공; wheel에서 Gemini adapter와 연결 UI
+      파일 포함 확인
+    - 설치 후 `agent-hub-setup --check --json` → changed 0;
+      `agent-hub-doctor --json` → `8 pass, 0 warn, 0 fail`
+    - Python package, Codex plugin, Claude Code user plugin → 모두 1.4.3 installed/enabled;
+      새 MCP stdio → server 1.4.3, 도구 37개, 모두 `agent_hub_*`
+    - source·Codex cache·Claude cache의 provider-connect skill 5개 SHA-256 일치
+  - **현재 리스크**: live catalog의 nested `internal_id`는 불투명 metadata이므로 실행 ID로 다시
+    사용하면 같은 404 회귀가 발생합니다. 이 대화에서 이미 실행 중인 MCP process는 설치된 1.4.3으로
+    자동 hot reload되지 않습니다.
+  - **Do-Not-Repeat**: catalog의 nested placeholder를 generation body의 model로 보내지 마세요.
+    `agent_hub_status`나 model-list 성공만으로 실제 generation까지 성공했다고 쓰지 마세요. 연결 테스트
+    결과에 prompt, model output, provider response body·원문 오류를 복사하지 마세요. 재로그인과 겹친
+    테스트 결과를 auth generation fence 없이 완료 처리하지 마세요.
+  - **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새로 연 연결 관리 화면의 Gemini 카드에서
+    `연결 테스트`를 한 번 실행해 host 재적재 후에도 1.4.3 실제 응답 성공 문구가 표시되는지 확인하세요.
+
+  ---
+
+  **[2026-07-24 Agent Hub 1.4.2 provider 연결·웹 모델 설정 전수 수정 — 이전 기록]**
 
   원래 목표는 Claude, Grok, Gemini, GPT의 동의·로그인·다시 로그인 버튼을 실제로 동작하게 고치고,
   같은 웹 화면에서 provider별 기본 LLM 모델까지 안전하게 선택하도록 만드는 것입니다. 공식 로그인
@@ -859,37 +926,26 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-24 Agent Hub 1.4.2 provider 연결·인증 경계·동적 모델 catalog 완성
+## 2026-07-25 Agent Hub 1.4.3 Gemini 3.6 실제 실행 복구
 
-- **원래 목표**: Claude, Grok, Gemini, GPT를 같은 Agent Hub provider 계약으로 관리하고, 사용자가 로컬 웹 화면에서 동의·로그인·재로그인·연결 확인·로컬 credential 정리와 기본 LLM 모델 선택을 안전하게 처리하도록 완성합니다.
-- **현재 단계**: provider 연결 GUI, 공통 모델 설정, GPT/Gemini 동적 catalog, OAuth 취소·refresh·logout 경계, 로컬 설치와 플러그인 배포를 1.4.2로 마쳤습니다. Python editable package와 Codex·Claude Code 플러그인은 모두 1.4.2이며, 최신 연결 관리 서버가 `127.0.0.1:8765`에서 실행 중입니다.
+- **원래 목표**: 동적 catalog에 표시되는 `gemini-3.6-flash-{high,medium,low}`를 Agent Hub의 공통 provider 경로와 연결 관리 GUI에서 실제로 실행하고, 로그인·목록 조회와 실제 생성 성공을 구분해 연결 상태를 정확히 보여 줍니다.
+- **현재 단계**: public model ID 실행, bounded GUI 연결 테스트, 회귀 검증, 1.4.3 로컬 설치까지 완료했습니다. Python editable package와 Codex·Claude Code plugin은 모두 1.4.3이며 새 MCP stdio process도 1.4.3을 반환합니다.
 - **완료**:
-  - `agent-hub-connect`의 네 provider 카드에서 동의, 공식 또는 provider-owned 로그인, 다시 로그인, 연결 테스트, 연결 해제와 허용된 로컬 credential 삭제를 한 화면에서 처리합니다. Claude와 GPT 공동 세션은 각각 공식 Claude Code와 Codex가 계속 소유합니다.
-  - provider별 Agent Hub 기본 텍스트 모델을 선택·저장·초기화하고 fixed, delegate, adaptive 실행에 같은 우선순위로 적용합니다. 인증 세대와 catalog revision/TTL로 stale 목록과 계정 변경 경합을 차단합니다.
-  - GPT는 공식 Codex app-server `model/list`를 동적으로 사용합니다. 최종 설치본 브라우저 QA에서 `gpt-5.6-sol`, `gpt-5.6-terra`, 두 Luna ID, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`의 8개 항목을 확인했습니다. 같은 표시명의 Luna 항목은 model ID를 함께 표시해 구분합니다.
-  - Gemini는 Antigravity `fetchAvailableModels` 결과를 동적으로 사용하고 public ID를 project-scoped internal execution ID로 매핑합니다. 401 뒤 project가 바뀌면 catalog와 매핑을 다시 읽습니다. 이 작업 앞선 read-only live QA에서는 23개와 `gemini-3.6-flash-{high,medium,low}`를 확인했고, 최종 설치 QA 시 현재 Gemini 로그인이 준비되지 않은 상태에서도 static fallback에 세 tier가 모두 표시됐습니다.
-  - OAuth pending은 `flow_id`, format version, consent revision으로 소유권을 확인합니다. manager `close()`의 cancel event와 token commit을 같은 manager lock으로 선형화해 종료가 먼저 이긴 Grok·Gemini 로그인이 credential을 저장하지 못하게 했습니다. Grok은 성공 응답 직후에도 취소를 재확인합니다.
-  - Google·Grok refresh는 시작 시 credential revision을 기록하고 commit 직전에 다시 비교해 삭제·교체된 credential을 되살리지 않습니다. Google은 실제 선택된 canonical/override token 경로를 같은 규칙으로 처리합니다.
-  - OAuth HTTP 오류는 status와 안정된 error code만 노출하고 provider 응답 본문을 예외·CLI·GUI로 전달하지 않습니다. status와 logout도 token, account email, credential 절대경로를 반환하지 않습니다.
-  - 손상된 consent JSON과 문자열·boolean·float version은 안전하게 미동의로 취급하고 재동의로 원자적으로 복구합니다. 이미 유효한 consent는 grant ID와 revision을 바꾸지 않습니다.
-  - 로컬 credential 삭제는 provider별 서버 lock과 UI 전역 in-flight guard를 사용합니다. 이중 제출, Escape로 dialog를 닫은 뒤 다른 provider 삭제를 시작하는 경합, 실패 시 현재 job/poll 관측 손실을 막고 요청 시점에 브라우저 model catalog를 폐기합니다.
-  - Google logout은 일부 파일 삭제 실패를 typed `credential_removal_failed`로 반환하고 성공/실패 수만 공개합니다. Grok도 실패 여부와 무관하게 model catalog를 무효화합니다. 손상·만료 credential과 pending state는 로그인 완료 여부와 별도로 GUI에 표시해 복구 버튼을 제공합니다.
-  - 기본 Claude/Codex 로그인 subprocess를 manager가 추적하고 종료 시 process group을 bounded SIGTERM/SIGKILL로 정리합니다. callback·worker 등록과 close를 같은 lock으로 묶어 미등록 helper가 남지 않게 했습니다.
-  - 예전 managed TOML block의 사용자 top-level 설정은 block 밖으로 보존하며 MCP 부분만 갱신합니다. 공용·Codex·Claude Code hub에 동일한 `provider-connect` 스킬과 절대 실행 경로 계약을 배포했습니다.
-  - release metadata, Python editable package, Codex plugin cache, Claude Code user plugin을 1.4.2로 설치했습니다. 설치된 provider-connect 스킬 세 사본의 SHA-256이 일치하며 MCP stdio는 `agent-hub` 1.4.2와 `agent_hub_*` 도구 37개를 반환합니다.
+  - Antigravity catalog의 dictionary key인 public model ID를 generation에 그대로 사용합니다. 중첩 `internal_id`는 metadata로만 보존하고 non-stream, stream, 401 뒤 project/token refresh에서도 실행 ID로 치환하지 않습니다.
+  - Gemini 3.6 Flash tier의 작은 출력 한도를 최소 256 token으로 보정하고 `-medium`을 `thinking_level=medium`으로 해석합니다.
+  - Gemini GUI 연결 테스트는 시작 시점의 선택 모델과 auth generation을 고정해 30초 timeout, 최대 512 output token, retry 0, tools·grounding·policy off인 실제 요청 한 번을 보냅니다. 사용량 안내를 UI, README, provider-connect skill에 표시하고 평소 상태·catalog 조회는 생성 요청을 보내지 않습니다.
+  - 재로그인·동의 변경·manager 종료와 겹친 늦은 성공을 fail closed하고 prompt, model output, provider 원문 오류를 job·GUI에 저장하지 않습니다.
+  - 로컬 브라우저에서 `gemini-3.6-flash-high` 실제 연결 테스트가 성공했고 console error는 0건이었습니다.
 - **미완**:
-  - provider consent 변경, 실제 로그인/logout, 모델 저장, generation은 계정 상태나 사용량을 바꾸므로 자동 실행하지 않았습니다. 최종 상태에서 Claude·Grok·GPT는 ready이고 Gemini는 consent는 있으나 로그인 재완료가 필요합니다.
-  - Claude Code update 명령은 restart 필요를 명시했고 현재 Codex Desktop process도 설치 전 플러그인을 적재했을 수 있으므로 두 host의 새 process에서 1.4.2를 사용해야 합니다.
-- **변경 파일**: 연결 GUI·서비스는 `src/agent_hub/connect_app.py`, `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/`; 인증·동의·설정은 `src/agent_hub/core/`, `src/agent_hub/provider_settings.py`, `src/{google_antigravity_codex,grok_codex,openai_codex}/`; 실행 주입은 `src/agent_hub/{operations.py,orchestrator.py}`와 `src/orchestrate_codex/`; 설치·플러그인·문서는 `src/agent_hub/local_setup.py`, `pyproject.toml`, `hubs/`, `.claude-plugin/marketplace.json`, `README.md`, `HANDOFF.md`; 회귀 검증은 관련 `tests/`를 갱신했습니다.
+  - 현재 실행 중인 Codex Desktop과 Claude Code process는 설치 전 plugin/MCP를 적재했을 수 있어 host 재시작이 필요합니다.
+  - live catalog와 응답 가능 여부는 Google 서비스와 현재 계정 권한에 따라 달라질 수 있으며 GUI 연결 테스트는 누를 때마다 작은 생성 요청 한 번을 사용합니다.
+- **변경 파일**: 실행·GUI는 `src/google_antigravity_codex/{antigravity_api.py,chat.py}`, `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/app.js`; 버전·plugin은 `pyproject.toml`, `src/agent_hub/__init__.py`, `.claude-plugin/marketplace.json`, `hubs/{codex/.codex-plugin/plugin.json,claude-code/.claude-plugin/plugin.json}`; 문서·skill은 `README.md`, `HANDOFF.md`, `hubs/{shared,codex,claude-code}/skills/provider-connect/SKILL.md`; 회귀 테스트는 관련 `tests/agent_hub/`와 `tests/google_antigravity_codex/` 파일을 갱신했습니다.
 - **검증 실행 결과**:
-  - credential 경로를 임시 디렉터리로 격리한 `./.venv/bin/python -m pytest -q` → `675 passed, 2 skipped`
-  - `./.venv/bin/ruff check .`, `node --check src/agent_hub/connect_ui/app.js`, `git diff --check` → 통과
-  - `./scripts/check-hub-plugins.sh`, `./scripts/check-sync.sh`, `./scripts/test-phase1.sh` → 통과
-  - release version 5개 필드 → 모두 1.4.2; `./.venv/bin/python -m build` → 1.4.2 sdist·wheel 성공
-  - `agent-hub-setup --check --json` → changed 0; `agent-hub-doctor --json` → `8 pass, 0 warn, 0 fail`
-  - Python package, Codex plugin, Claude Code user plugin → 모두 1.4.2 installed/enabled; installed MCP stdio → server 1.4.2, 37개 도구, 모두 `agent_hub_*`
-  - 최종 로컬 브라우저 QA → GPT live source `codex-app-server` 8개와 중복 display 구분, Gemini static fallback의 3.6 Flash 세 tier, 연결 요약 `3 / 4 ready` 확인
-- **현재 리스크**: live catalog는 provider 서비스와 현재 계정 권한에 따라 달라지고 실패하면 local fallback으로 전환됩니다. Gemini의 최종 live catalog는 현재 로그인을 다시 완료하기 전까지 재확인할 수 없습니다. 이 대화의 이미 실행 중인 Codex MCP process는 설치된 1.4.2로 자동 hot reload되지 않습니다.
-- **Do-Not-Repeat**: 연결된 provider의 첫 모델 요청을 정적 catalog 전용으로 되돌리지 마세요. GPT를 `DEFAULT_MODEL` 하나로 제한하거나 Gemini live ID와 tier suffix를 고정 allowlist로 자르지 마세요. cancel event 설정과 token commit guard를 서로 다른 lock 경계로 분리하지 마세요. refresh에서 credential revision 검사를 제거하지 마세요. OAuth 응답 body, token, credential 경로, account email을 오류·UI·이벤트에 넣지 마세요. 사용자를 대신해 consent, login/logout, 모델 저장을 실행하지 마세요. 예전 managed TOML block을 통째로 지워 사용자 설정을 잃지 마세요.
-- **다음 한 걸음**: Codex Desktop을 재시작한 뒤 `http://127.0.0.1:8765/`의 Gemini 카드에서 `로그인`으로 Google PKCE를 완료하고 `최신 모델 목록 새로고침`의 출처가 live인지와 `gemini-3.6-flash-high`, `-medium`, `-low` 세 항목을 확인하세요.
+  - 수정 전 신규 회귀 5건 실패 재현; 관련 suite → `135 passed`; 격리된 전체 pytest → `684 passed, 2 skipped`
+  - Ruff, `node --check`, `git diff --check`, hub plugin·Ruler sync·phase1·release version 검사 → 통과
+  - 1.4.3 sdist·wheel build와 필수 파일 포함 확인; setup check → changed 0; doctor → `8 pass, 0 warn, 0 fail`
+  - Python package와 Codex·Claude Code plugin → 1.4.3 installed/enabled; 새 MCP stdio → server 1.4.3, `agent_hub_*` 도구 37개; 설치 skill SHA-256 일치
+- **현재 리스크**: nested `internal_id`를 다시 generation model로 사용하면 404 회귀가 발생합니다. 이미 실행 중인 MCP process는 1.4.3으로 자동 hot reload되지 않습니다.
+- **Do-Not-Repeat**: nested placeholder를 generation body에 보내지 마세요. status나 model-list 성공만으로 generation 성공을 주장하지 마세요. 연결 테스트에 prompt, model output, provider response body·원문 오류를 복사하지 마세요. auth generation fence 없이 늦은 성공을 완료 처리하지 마세요.
+- **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새 연결 관리 화면의 Gemini 카드에서 `연결 테스트`를 한 번 실행해 host 재적재 후에도 1.4.3 실제 응답 성공 문구가 표시되는지 확인하세요.
 <!-- agent-hub:handoff:v1:end -->

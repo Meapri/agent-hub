@@ -70,6 +70,11 @@ MAX_MODELS = 150
 MAX_MODEL_TEXT_CHARS = 180
 MODEL_CATALOG_TTL_SECONDS = 10 * 60
 MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+GEMINI_CONNECTION_TEST_MAX_TOKENS = 512
+GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS = 30
+GEMINI_CONNECTION_TEST_PROMPT = (
+    "This is a connection check. Reply with exactly AGENT_HUB_CONNECTION_OK."
+)
 ACTIVE_JOB_STATES = frozenset({"pending", "working", "waiting"})
 PUBLIC_WARNING_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:- "
@@ -585,6 +590,13 @@ class ConnectionManager:
                     "동의와 로그인을 모두 완료한 뒤 연결을 테스트할 수 있습니다.",
                     code="provider_not_ready",
                 )
+            selected_model = _public_model_id(state.get("default_model"))
+            if provider == "gemini" and not selected_model:
+                raise ConnectionError(
+                    "테스트할 Gemini 모델을 확인하지 못했습니다.",
+                    code="model_unavailable",
+                )
+            auth_generation = self._auth_generations[provider]
             active = self._active_job(provider)
             if active is not None:
                 if active.kind == "test":
@@ -610,11 +622,15 @@ class ConnectionManager:
                     provider,
                     kind="test",
                     state="working",
-                    message="모델 목록을 요청해 연결을 확인하는 중입니다.",
+                    message=(
+                        "선택한 Gemini 모델에 짧은 실제 요청을 보내는 중입니다."
+                        if provider == "gemini"
+                        else "모델 목록을 요청해 연결을 확인하는 중입니다."
+                    ),
                 )
                 threading.Thread(
                     target=self._run_test,
-                    args=(job.id,),
+                    args=(job.id, selected_model, auth_generation),
                     daemon=True,
                 ).start()
             return job.public()
@@ -1352,18 +1368,74 @@ class ConnectionManager:
             ),
         )
 
-    def _run_test(self, job_id: str) -> None:
+    def _run_test(
+        self,
+        job_id: str,
+        selected_model: str,
+        auth_generation: int,
+    ) -> None:
         provider = self._job(job_id).provider
+        generated = False
+        auth_changed = False
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if (
+                self._closed
+                or job is None
+                or job.state not in ACTIVE_JOB_STATES
+            ):
+                return
+            if self._auth_generations[provider] != auth_generation:
+                self._update_job(
+                    job_id,
+                    state="failed",
+                    message="연결 상태가 바뀌어 테스트를 다시 실행해야 합니다.",
+                )
+                return
         try:
-            result = operations.dispatch_tool(
-                "agent_hub_list_models",
-                {"provider": provider, "probe": True},
-            )
-            payload = (result.get("data") or {}).get("models", {}).get(provider, {})
-            success = bool(result.get("success")) and _live_model_payload(
-                provider,
-                payload,
-            )
+            if provider == "gemini":
+                generated_result = operations.dispatch_tool(
+                    "agent_hub_chat",
+                    {
+                        "provider": "gemini",
+                        "model": selected_model,
+                        "prompt": GEMINI_CONNECTION_TEST_PROMPT,
+                        "temperature": 0.0,
+                        "max_tokens": GEMINI_CONNECTION_TEST_MAX_TOKENS,
+                        "grounding": "off",
+                        "stream": False,
+                        "tools": [],
+                        "retry_count": 0,
+                        "retry_sleep_cap_sec": 0,
+                        "timeout_sec": GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS,
+                        "policy_mode": "off",
+                    },
+                )
+                generated_data = (
+                    generated_result.get("data")
+                    if isinstance(generated_result.get("data"), dict)
+                    else {}
+                )
+                generated = (
+                    bool(generated_result.get("success"))
+                    and generated_result.get("provider") == "gemini"
+                    and generated_result.get("model") == selected_model
+                    and bool(str(generated_result.get("text") or "").strip())
+                    and not bool(generated_data.get("capacity_fallback"))
+                )
+                success = generated
+            else:
+                result = operations.dispatch_tool(
+                    "agent_hub_list_models",
+                    {"provider": provider, "probe": True},
+                )
+                payload = (
+                    (result.get("data") or {}).get("models", {}).get(provider, {})
+                )
+                success = bool(result.get("success")) and _live_model_payload(
+                    provider,
+                    payload,
+                )
         except Exception:  # noqa: BLE001
             self._update_job(
                 job_id,
@@ -1371,15 +1443,26 @@ class ConnectionManager:
                 message="연결 테스트에 실패했습니다. 다시 시도해 주세요.",
             )
             return
-        self._update_job(
-            job_id,
-            state="complete" if success else "failed",
-            message=(
-                f"{PROVIDER_LABELS[provider]} 모델 연결이 정상입니다."
-                if success
-                else f"{PROVIDER_LABELS[provider]} 모델 목록을 확인하지 못했습니다."
-            ),
-        )
+        with self._lock:
+            if self._auth_generations[provider] != auth_generation:
+                success = False
+                generated = False
+                auth_changed = True
+            self._update_job(
+                job_id,
+                state="complete" if success else "failed",
+                message=(
+                    "연결 상태가 바뀌어 테스트를 다시 실행해야 합니다."
+                    if auth_changed
+                    else "Gemini 선택 모델의 실제 응답까지 정상입니다."
+                    if success and generated
+                    else f"{PROVIDER_LABELS[provider]} 모델 연결이 정상입니다."
+                    if success
+                    else "Gemini 선택 모델의 실제 응답을 확인하지 못했습니다."
+                    if provider == "gemini"
+                    else f"{PROVIDER_LABELS[provider]} 모델 목록을 확인하지 못했습니다."
+                ),
+            )
 
     def _create_job(
         self,

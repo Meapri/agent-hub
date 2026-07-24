@@ -260,9 +260,14 @@ function renderDetail() {
     : !authComplete
       ? "로그인 시작"
       : "연결 테스트";
-  const testCopy = ready
-    ? "모델 목록을 안전하게 조회해 실제 연결을 확인할 수 있습니다."
-    : "동의와 로그인을 완료하면 안전한 상태 검사를 실행합니다.";
+  const testCopy =
+    provider.id === "gemini"
+      ? ready
+        ? "선택한 모델에 짧은 실제 요청을 보내 응답까지 확인합니다. 소량의 사용량이 발생합니다."
+        : "동의와 로그인을 완료하면 선택한 모델의 실제 응답을 확인할 수 있습니다."
+      : ready
+        ? "모델 목록을 안전하게 조회해 연결을 확인할 수 있습니다."
+        : "동의와 로그인을 완료하면 안전한 상태 검사를 실행합니다.";
 
   $("#detail-panel").innerHTML = `
     <div class="detail-header">

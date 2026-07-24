@@ -221,7 +221,7 @@ def test_direct_transport_uses_token_in_memory_and_maps_default_model():
     assert "access-secret" not in json.dumps(payload)
 
 
-def test_dynamic_catalog_model_uses_internal_id_for_generation():
+def test_dynamic_catalog_metadata_does_not_replace_public_generation_id():
     credentials = agy_auth.AgyCredentials(
         access_token="access-secret",
         expires_at_ms=4102444800000,
@@ -241,26 +241,20 @@ def test_dynamic_catalog_model_uses_internal_id_for_generation():
                     }
                 }
             }
+        if str(body.get("model") or "").startswith("MODEL_"):
+            raise antigravity_api.AntigravityApiError(
+                "catalog metadata is not an executable model id",
+                code="antigravity_http_404",
+                status_code=404,
+            )
         return {"response": {"candidates": []}}
 
-    with (
-        patch.object(
-            antigravity_api,
-            "_MODEL_ALIAS_CACHE",
-            {},
-        ),
-        patch.object(
-            antigravity_api,
-            "_MODEL_ALIAS_CACHE_EXPIRES_AT",
-            0.0,
-        ),
-        patch.object(
-            antigravity_api.agy_auth,
-            "valid_credentials",
-            return_value=credentials,
-        ),
-        patch.object(antigravity_api, "_post", side_effect=fake_post),
-    ):
+    with patch.object(
+        antigravity_api.agy_auth,
+        "valid_credentials",
+        return_value=credentials,
+    ), patch.object(antigravity_api, "_post", side_effect=fake_post):
+        listed = antigravity_api.list_models(refresh=False)
         payload = antigravity_api.generate_content(
             model="gemini-3.6-flash-high",
             request={"contents": [{"parts": [{"text": "hello"}]}]},
@@ -271,8 +265,9 @@ def test_dynamic_catalog_model_uses_internal_id_for_generation():
         "/v1internal:fetchAvailableModels",
         "/v1internal:generateContent",
     ]
-    assert calls[-1][1]["model"] == "MODEL_PLACEHOLDER_M71"
-    assert payload["_antigravity_diagnostics"]["used_model"] == "MODEL_PLACEHOLDER_M71"
+    assert listed[0]["internal_id"] == "MODEL_PLACEHOLDER_M71"
+    assert calls[-1][1]["model"] == "gemini-3.6-flash-high"
+    assert payload["_antigravity_diagnostics"]["used_model"] == "gemini-3.6-flash-high"
 
 
 def test_direct_transport_capacity_fallback_to_next_model_tier():
@@ -344,7 +339,7 @@ def test_direct_transport_refreshes_via_oauth_after_unauthorized():
     assert payload["_antigravity_diagnostics"]["auth_refreshed"] is True
 
 
-def test_direct_transport_reresolves_dynamic_model_after_project_change():
+def test_direct_transport_keeps_public_model_after_project_change():
     stale = agy_auth.AgyCredentials(
         access_token="stale-token",
         refresh_token="refresh-secret",
@@ -392,9 +387,6 @@ def test_direct_transport_reresolves_dynamic_model_after_project_change():
         return {"response": {"candidates": []}}
 
     with (
-        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE", {}),
-        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_EXPIRES_AT", 0.0),
-        patch.object(antigravity_api, "_MODEL_ALIAS_CACHE_PROJECT", ""),
         patch.object(
             antigravity_api.agy_auth,
             "valid_credentials",
@@ -414,10 +406,10 @@ def test_direct_transport_reresolves_dynamic_model_after_project_change():
         )
 
     assert generation_calls == [
-        ("stale-token", "project-one", "MODEL_PROJECT_ONE"),
-        ("fresh-token", "project-two", "MODEL_PROJECT_TWO"),
+        ("stale-token", "project-one", "gemini-3.6-flash-high"),
+        ("fresh-token", "project-two", "gemini-3.6-flash-high"),
     ]
-    assert payload["_antigravity_diagnostics"]["used_model"] == "MODEL_PROJECT_TWO"
+    assert payload["_antigravity_diagnostics"]["used_model"] == "gemini-3.6-flash-high"
     assert payload["_antigravity_diagnostics"]["auth_refreshed"] is True
 
 

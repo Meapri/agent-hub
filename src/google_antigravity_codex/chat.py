@@ -15,6 +15,7 @@ DEFAULT_MODEL = "gemini-3.5-flash"
 DEFAULT_MAX_TOKENS = 65536
 MIN_REASONING_MODEL_OUTPUT_TOKENS = 256
 MIN_OUTPUT_TOKEN_MODEL_MARKERS = (
+    "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.1-pro",
     "gemini-3-flash",
@@ -250,6 +251,8 @@ def _thinking_level_from_model(model: str) -> str:
     normalized = str(model or "").strip().removeprefix("models/").lower()
     if normalized.endswith("-high"):
         return "high"
+    if normalized.endswith("-medium"):
+        return "medium"
     if normalized.endswith("-low"):
         return "low"
     return ""
