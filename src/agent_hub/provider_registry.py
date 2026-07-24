@@ -109,6 +109,36 @@ _MANIFESTS: Tuple[ProviderManifest, ...] = (
         adapter="agent_hub.providers.antigravity:antigravity_provider",
         settings_fields=("model", "transport", "profile", "temperature", "max_tokens"),
     ),
+    ProviderManifest(
+        id="gpt",
+        aliases=("codex", "chatgpt", "openai-codex"),
+        model_prefixes=("gpt", "codex"),
+        capabilities={
+            "chat": {
+                "supported": True,
+                "reasoning_effort": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            },
+            "vision": {"supported": True, "remote_images": False},
+            "search": {
+                "supported": False,
+                "reason": "The isolated GPT leaf disables web search",
+            },
+            "write": {"supported": True},
+            "image_generation": {
+                "supported": False,
+                "reason": "Codex exec returns text",
+            },
+            "compare": {"supported": True},
+            "review_diff": {"supported": True},
+            "release_draft": {"supported": True},
+            "settings": {"supported": True, "scope": ["model"]},
+        },
+        chat_tool="openai_codex_chat",
+        adapter="agent_hub.providers.openai:gpt_provider",
+        settings_fields=("model",),
+        planner_enabled=True,
+        default_compare=False,
+    ),
 )
 
 MANIFESTS: Mapping[str, ProviderManifest] = {item.id: item for item in _MANIFESTS}

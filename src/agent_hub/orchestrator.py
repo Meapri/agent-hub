@@ -378,13 +378,19 @@ def validate_plan(
         min_successes: int | None = None
         if capability == "compare":
             participants = _unique_strings(
-                raw.get("participants", ["claude", "grok", "gemini"]),
+                raw.get("participants", list(provider_registry.DEFAULT_COMPARE_PROVIDERS)),
                 field=f"{step_id}.participants",
             )
-            if not 2 <= len(participants) <= 3 or any(
-                item not in {"claude", "grok", "gemini"} for item in participants
+            compare_providers = set(
+                provider_registry.providers_supporting("compare", planner_only=True)
+            )
+            if not 2 <= len(participants) <= len(compare_providers) or any(
+                item not in compare_providers for item in participants
             ):
-                raise ValueError(f"{step_id}.participants must contain 2-3 model providers")
+                raise ValueError(
+                    f"{step_id}.participants must contain 2-{len(compare_providers)} "
+                    "model providers"
+                )
             raw_min_successes = raw.get("min_successes", min(2, len(participants)))
             if isinstance(raw_min_successes, bool) or not isinstance(raw_min_successes, int):
                 raise ValueError(f"{step_id}.min_successes must be an integer")

@@ -28,7 +28,12 @@ _KNOWN_LEAF_TOOLS = {c["leaf"] for c in catalog.CAPABILITIES} | set(catalog.LATE
 # Standard per-provider CLI/console commands present in every leaf repo (e.g. the MCP
 # launcher `grok_codex_mcp`, `*_doctor`, `*_consent`). A meta-doc referencing these is
 # not hallucinating — but the local fact pack can't see the sibling repos.
-_LEAF_PROVIDERS = ("claude_codex", "grok_codex", "google_antigravity")
+_LEAF_PROVIDERS = (
+    "claude_codex",
+    "grok_codex",
+    "google_antigravity",
+    "openai_codex",
+)
 _LEAF_CMD_SUFFIXES = (
     "mcp", "doctor", "consent", "login", "logout",
     "consent_status", "login_status", "provider_status", "list_models",
@@ -165,7 +170,13 @@ def verify_text(
             )
         # flag tool-like tokens not in fact pack when pack known
         if tools:
-            claimed = set(re.findall(r"\b(?:google|claude_codex|grok_codex|orchestrate)_[a-z0-9_]+\b", body))
+            claimed = set(
+                re.findall(
+                    r"\b(?:google|claude_codex|grok_codex|openai_codex|orchestrate)"
+                    r"_[a-z0-9_]+\b",
+                    body,
+                )
+            )
             unknown = sorted(t for t in claimed if not _is_known_token(t, allowed))
             for t in unknown:
                 warnings.append(f"tool_not_in_fact_pack:{t}")

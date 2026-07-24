@@ -11,6 +11,7 @@ from typing import Any, Dict
 ALLOWED = {
     "claude": {"model", "temperature", "max_tokens"},
     "grok": {"model", "temperature", "max_tokens", "api_mode"},
+    "gpt": {"model"},
 }
 
 

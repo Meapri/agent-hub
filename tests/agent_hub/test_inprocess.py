@@ -24,6 +24,7 @@ def test_inprocess_call_preserves_consent_no_bypass(monkeypatch):
 def test_inprocess_resolver_routes_leaves_only():
     resolve = make_resolver()
     assert resolve("grok_codex_chat") is not None      # leaf -> in-process client
+    assert resolve("openai_codex_chat") is not None
     assert resolve("orchestrate_run") is None          # broker never recurses into orchestrate
     assert resolve("does_not_exist") is None
 

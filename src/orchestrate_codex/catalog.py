@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 LATEST_MODELS: Dict[str, str] = {
     "claude_codex_chat": "claude-opus-4-8",
     "grok_codex_chat": "grok-4.5",
+    "openai_codex_chat": "gpt-5.6-sol",
     "google_antigravity_chat": "gemini-3.1-pro-high",
     "google_antigravity_write": "gemini-3.1-pro-high",
     # grounded_search / image keep their own provider defaults.
@@ -27,6 +28,7 @@ LATEST_MODELS: Dict[str, str] = {
 PROBE_CANDIDATES: Dict[str, List[str]] = {
     "claude_codex_chat": ["claude-opus-4-8", "claude-sonnet-5", "claude-opus-4-6"],
     "grok_codex_chat": ["grok-4.5", "grok-4", "grok-4-fast-reasoning"],
+    "openai_codex_chat": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"],
     "google_antigravity_chat": ["gemini-3.1-pro-high", "gemini-3.5-flash-high"],
 }
 
@@ -54,6 +56,15 @@ CAPABILITIES: List[Dict[str, Any]] = [
         "leaf": "google_antigravity_chat",
         "good_for": "General Gemini reasoning; can enable inline grounding. A third distinct lens.",
         "avoid_for": "Structured document authoring — use the write leaf instead.",
+    },
+    {
+        "capability": "chat",
+        "role": "reasoning-gpt",
+        "leaf": "openai_codex_chat",
+        "good_for": "A GPT/Codex reasoning pass using the user's official ChatGPT login; "
+        "use as an explicit participant or fallback when a distinct GPT lens helps.",
+        "avoid_for": "Web search or autonomous workspace changes; this leaf is isolated and "
+        "fails closed on side effects.",
     },
     {
         "capability": "write",

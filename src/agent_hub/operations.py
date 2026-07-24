@@ -44,6 +44,10 @@ from google_antigravity_codex import release as google_release
 from google_antigravity_codex import security as google_security
 from google_antigravity_codex import session_prefs as google_session_prefs
 from google_antigravity_codex import writing as google_writing
+from openai_codex import auth as openai_auth
+from openai_codex import models as openai_models
+from openai_codex import mcp_server as openai_mcp
+from openai_codex import security as openai_security
 from orchestrate_codex import broker, gather, policy, recipes, runner, store, verify
 
 
@@ -297,6 +301,23 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "capabilities": capabilities.provider_capabilities("grok"),
                 "warnings": [],
             }
+        elif provider == "gpt":
+            consent = openai_security.consent_status()
+            auth = openai_auth.status()
+            warnings = [str(auth["warning"])] if auth.get("warning") else []
+            if auth.get("error_type"):
+                warnings.append(str(auth["error_type"]))
+            states[provider] = {
+                "consent": bool(consent.get("user_consent")),
+                "authenticated": bool(auth.get("logged_in")),
+                "ready": bool(consent.get("user_consent") and auth.get("configured")),
+                "auth_mode": auth.get("auth_mode"),
+                "plan_type": auth.get("plan_type"),
+                "default_model": openai_models.DEFAULT_MODEL,
+                "settings": provider_settings.get("gpt"),
+                "capabilities": capabilities.provider_capabilities("gpt"),
+                "warnings": warnings,
+            }
         else:
             consent = google_security.consent_status()
             provider_state = google_provider.status(probe=probe)
@@ -349,6 +370,8 @@ def _list_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 listed[provider] = claude_models.list_models({"probe": probe})
             elif provider == "grok":
                 listed[provider] = grok_models.list_models({"probe": probe})
+            elif provider == "gpt":
+                listed[provider] = openai_models.list_models({"probe": probe})
             else:
                 listed[provider] = _unwrap_mcp_result(
                     google_mcp.dispatch_tool("google_antigravity_list_models", {})
@@ -379,6 +402,11 @@ def _auth_start(args: Dict[str, Any]) -> Dict[str, Any]:
     elif provider == "grok":
         grok_security.require_consent()
         raw = grok_oauth.start_login(open_browser=bool(args.get("open_browser", True)))
+    elif provider == "gpt":
+        openai_security.require_consent()
+        raw = openai_auth.login_action(
+            device=bool(args.get("device") or args.get("login_method") == "device")
+        )
     else:
         _require_google_consent()
         raw = google_oauth.start_login(
@@ -396,6 +424,15 @@ def _auth_complete(args: Dict[str, Any]) -> Dict[str, Any]:
     if provider == "grok":
         grok_security.require_consent()
         raw = grok_oauth.complete_login()
+    elif provider == "gpt":
+        openai_security.require_consent()
+        state = openai_auth.require_subscription()
+        raw = {
+            "success": True,
+            "text": "Official Codex subscription login is ready.",
+            "auth_mode": state.get("auth_mode"),
+            "plan_type": state.get("plan_type"),
+        }
     else:
         _require_google_consent()
         value = str(args.get("code_or_url") or args.get("code") or args.get("url") or "")
@@ -409,6 +446,15 @@ def _auth_refresh(args: Dict[str, Any]) -> Dict[str, Any]:
         raw = claude_mcp.dispatch_tool("claude_codex_login_refresh", {})
     elif provider == "gemini":
         raw = google_auth.refresh_tool({})
+    elif provider == "gpt":
+        openai_security.require_consent()
+        state = openai_auth.require_subscription(refresh=True)
+        raw = {
+            "success": True,
+            "text": "Official Codex refreshed and validated the shared ChatGPT login.",
+            "auth_mode": state.get("auth_mode"),
+            "plan_type": state.get("plan_type"),
+        }
     else:
         token = grok_oauth.resolve_access_token()
         raw = {
@@ -432,6 +478,16 @@ def _auth_logout(args: Dict[str, Any]) -> Dict[str, Any]:
     elif provider == "grok":
         removed = grok_oauth.clear_tokens()
         raw = {"success": True, "removed": removed, "text": "Local SuperGrok tokens removed."}
+    elif provider == "gpt":
+        raw = {
+            "success": False,
+            "text": (
+                "Agent Hub will not log out the shared Codex account. "
+                "Run `codex logout` explicitly if you intend to sign every Codex client out."
+            ),
+            "error": "shared_codex_logout_refused",
+            "next_action": {"type": "external_cli", "command": "codex logout"},
+        }
     else:
         raw = google_account.logout({"forget_client": bool(args.get("forget_client", False))})
     return envelope("auth_logout", raw, provider=provider)
@@ -442,10 +498,9 @@ def _auto_chat_provider(args: Dict[str, Any]) -> str:
     if requested != "auto":
         return requested
     model = str(args.get("model") or "").lower()
-    if model.startswith("grok"):
-        return "grok"
-    if model.startswith("gemini") or model.startswith("models/gemini"):
-        return "gemini"
+    routed = provider_registry.provider_for_model(model, default="")
+    if routed:
+        return routed
     return "claude"
 
 
@@ -472,12 +527,9 @@ def _operation_provider(args: Dict[str, Any], capability: str, *, default: str =
         capabilities.require(requested, capability)
         return requested
     model = str(args.get("model") or "").lower()
-    if model.startswith("claude"):
-        selected = "claude"
-    elif model.startswith("grok"):
-        selected = "grok"
-    elif model.startswith("gemini") or model.startswith("models/gemini"):
-        selected = "gemini"
+    routed = provider_registry.provider_for_model(model, default="")
+    if routed:
+        selected = routed
     elif capability == "search" and str(args.get("source") or "").lower() in {"x", "both"}:
         selected = "grok"
     else:
@@ -530,7 +582,7 @@ def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in args.items()
         if k != "provider" and k not in _PROVIDER_CALL_INTERNAL_KEYS and v is not None
     }
-    if provider in {"claude", "grok"}:
+    if provider in {"claude", "grok", "gpt"}:
         defaults = provider_settings.get(provider)
         for key, value in defaults.items():
             call_args.setdefault(key, value)
@@ -546,6 +598,11 @@ def _chat_raw(provider: str, args: Dict[str, Any]) -> Dict[str, Any]:
         elif provider == "grok":
             raw = grok_mcp.dispatch_tool(
                 "grok_codex_chat",
+                {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS},
+            )
+        elif provider == "gpt":
+            raw = openai_mcp.dispatch_tool(
+                "openai_codex_chat",
                 {k: v for k, v in call_args.items() if k in _BASIC_CHAT_KEYS},
             )
         else:
@@ -736,12 +793,14 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
     requested = str(args.get("provider") or "auto").lower()
     if not providers and requested not in {"auto", "all", ""}:
         providers = [_normalize_provider(requested)]
+    if not providers and requested == "all":
+        providers = list(PROVIDERS)
     if not providers and models:
         providers = [_model_provider(model.split("/", 1)[-1]) for model in models]
     if not providers:
         providers = list(DEFAULT_COMPARE_PROVIDERS)
     targets: List[tuple[str, str | None]] = []
-    for index, provider in enumerate(providers[:3]):
+    for index, provider in enumerate(providers[: len(PROVIDERS)]):
         model = models[index] if index < len(models) else None
         if model and "/" in model and model.split("/", 1)[0] in PROVIDERS:
             prefix, model = model.split("/", 1)
@@ -1131,6 +1190,13 @@ def _get_settings(args: Dict[str, Any]) -> Dict[str, Any]:
             "overrides": provider_settings.get("grok"),
             "scope": capabilities.provider_capabilities("grok")["settings"]["scope"],
         }
+    if "gpt" in providers:
+        values["gpt"] = {
+            "defaults": {"model": openai_models.DEFAULT_MODEL},
+            "overrides": provider_settings.get("gpt"),
+            "scope": capabilities.provider_capabilities("gpt")["settings"]["scope"],
+            "auth_owner": "official-codex",
+        }
     if "gemini" in providers:
         values["gemini"] = {
             "model_preferences": google_model_prefs.get_prefs_tool({}),
@@ -1146,11 +1212,16 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = _normalize_provider(args.get("provider") or "gemini", allow_auto=True)
     if provider == "auto":
         provider = "gemini"
-    if provider in {"claude", "grok"}:
+    if provider in {"claude", "grok", "gpt"}:
         changes = {
             key: args.get(key)
             for key in ("model", "temperature", "max_tokens", "api_mode")
-            if args.get(key) is not None and (provider == "grok" or key != "api_mode")
+            if args.get(key) is not None
+            and (
+                provider == "grok"
+                or (provider == "claude" and key != "api_mode")
+                or (provider == "gpt" and key == "model")
+            )
         }
         if not changes:
             raise ValueError(f"provide a supported {provider} setting to update")
@@ -1206,7 +1277,7 @@ def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     provider = str(args.get("provider") or "gemini").lower()
-    if provider in {"claude", "grok"}:
+    if provider in {"claude", "grok", "gpt"}:
         removed = provider_settings.reset(provider)
         return envelope(
             "reset_settings",
@@ -1214,7 +1285,10 @@ def _reset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
             provider=provider,
         )
     if provider == "all":
-        removed = [provider_settings.reset(item) for item in ("claude", "grok")]
+        removed = [
+            provider_settings.reset(item)
+            for item in ("claude", "grok", "gpt")
+        ]
     else:
         removed = []
     reset = str(args.get("reset") or "all")
@@ -1782,7 +1856,7 @@ def _adaptive_step_call(
             }
         )
     if capability == "compare":
-        participants = step.get("participants") or ["claude", "grok", "gemini"]
+        participants = step.get("participants") or list(DEFAULT_COMPARE_PROVIDERS)
         participant_models = [
             str(model_map.get(participant) or "").strip() for participant in participants
         ]
@@ -2588,7 +2662,7 @@ COMPARE_SCHEMA = _operation_schema(
             "type": "array",
             "items": {"type": "string", "enum": list(PROVIDERS)},
             "minItems": 1,
-            "maxItems": 3,
+            "maxItems": len(PROVIDERS),
         },
         "system": {"type": "string"},
         "project_root": {"type": "string"},
@@ -2599,11 +2673,16 @@ COMPARE_SCHEMA = _operation_schema(
             "enum": ["parallel", "sequential"],
             "default": "parallel",
         },
-        "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
+        "max_concurrency": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": len(PROVIDERS),
+            "default": 3,
+        },
         "min_successes": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 3,
+            "maximum": len(PROVIDERS),
             "default": 2,
             "description": "Minimum successful provider responses required for an open compare.",
         },
@@ -2625,7 +2704,12 @@ COMPARE_SCHEMA = _operation_schema(
                     "default": 1.0,
                 },
                 "require_all": {"type": "boolean", "default": True},
-                "min_responses": {"type": "integer", "minimum": 2, "maximum": 3, "default": 2},
+                "min_responses": {
+                    "type": "integer",
+                    "minimum": 2,
+                    "maximum": len(PROVIDERS),
+                    "default": 2,
+                },
                 "project_root": {"type": "string"},
                 **POLICY_CONTROL_SCHEMA,
             },
@@ -2666,6 +2750,7 @@ WORKFLOW_BASE = {
             "claude": {"type": "string"},
             "grok": {"type": "string"},
             "gemini": {"type": "string"},
+            "gpt": {"type": "string"},
         },
         "additionalProperties": False,
         "description": "Optional explicit model id per provider for every adaptive step.",
@@ -2699,7 +2784,12 @@ WORKFLOW_BASE = {
         "maximum": orchestrator.MAX_PLAN_STEPS,
         "default": orchestrator.MAX_PLAN_STEPS,
     },
-    "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
+    "max_concurrency": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": len(PROVIDERS),
+        "default": 3,
+    },
     **POLICY_CONTROL_SCHEMA,
     "handoff_mode": {
         "type": "string",
@@ -2778,6 +2868,16 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                 **AUTH_PROVIDER_SCHEMA,
                 "open_browser": {"type": "boolean", "default": True},
                 "use_local_redirect": {"type": "boolean", "default": True},
+                "device": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "For GPT, return the official Codex device-login command.",
+                },
+                "login_method": {
+                    "type": "string",
+                    "enum": ["browser", "device"],
+                    "default": "browser",
+                },
             },
             required=("provider",),
         ),

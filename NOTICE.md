@@ -44,9 +44,10 @@ The GPT provider is informed by two upstream projects:
    agent loop, gateway, installer, or token store.
 2. [openai/codex](https://github.com/openai/codex) (Apache-2.0), pinned for this
    integration at commit `94ebae725e5e8f22b5d86773d9223047f57b6118`.
-   Agent Hub uses the public `codex app-server` JSON-RPC interface so the
-   official Codex installation remains the sole owner of ChatGPT OAuth tokens
-   and refresh behavior.
+   Agent Hub uses the public `codex app-server` JSON-RPC account/model
+   interfaces and isolated `codex exec` generation so the official Codex
+   installation remains the sole owner of ChatGPT OAuth tokens and refresh
+   behavior.
 
 No Codex access token, refresh token, Keychain entry, or `auth.json` payload is
 read, copied, returned, or persisted by Agent Hub. See

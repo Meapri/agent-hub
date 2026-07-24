@@ -19,7 +19,7 @@ def _spec(name: str):
 
 
 def test_provider_registry_is_the_ordered_metadata_source():
-    assert provider_registry.AVAILABLE_PROVIDERS == ("claude", "grok", "gemini")
+    assert provider_registry.AVAILABLE_PROVIDERS == ("claude", "grok", "gemini", "gpt")
     assert provider_registry.DEFAULT_COMPARE_PROVIDERS == ("claude", "grok", "gemini")
     assert provider_registry.normalize("anthropic") == "claude"
     assert provider_registry.normalize("google-antigravity") == "gemini"
@@ -27,6 +27,7 @@ def test_provider_registry_is_the_ordered_metadata_source():
         "claude_codex_chat",
         "grok_codex_chat",
         "google_antigravity_chat",
+        "openai_codex_chat",
     )
 
 
@@ -36,6 +37,7 @@ def test_public_schemas_expose_real_provider_capabilities():
         "claude",
         "grok",
         "gemini",
+        "gpt",
     ]
     assert _spec("agent_hub_generate_image")["inputSchema"]["properties"]["provider"][
         "enum"
@@ -257,6 +259,54 @@ def test_compare_defaults_to_three_providers(monkeypatch):
     ]
     assert result["data"]["execution"] == "parallel"
     assert result["provider"] == "multiple"
+
+
+def test_explicit_all_compare_includes_opt_in_gpt(monkeypatch):
+    called = []
+
+    def fake_chat(provider, arguments):
+        called.append(provider)
+        return {"success": True, "text": provider, "model": f"{provider}-test", "warnings": []}
+
+    monkeypatch.setattr(operations, "_chat_raw", fake_chat)
+    result = operations.dispatch_tool(
+        "agent_hub_compare_models",
+        {"provider": "all", "prompt": "compare", "min_successes": 2},
+    )
+    assert called == ["claude", "grok", "gemini", "gpt"]
+    assert [item["provider"] for item in result["data"]["results"]] == called
+
+
+def test_gpt_aliases_and_model_routing_are_canonical():
+    assert provider_registry.normalize("codex") == "gpt"
+    assert provider_registry.normalize("chatgpt") == "gpt"
+    assert provider_registry.normalize("openai-codex") == "gpt"
+    assert operations._auto_chat_provider({"model": "gpt-5.6-sol"}) == "gpt"
+
+
+def test_gpt_chat_uses_canonical_agent_hub_envelope(monkeypatch):
+    captured = {}
+
+    def fake_dispatch(name, arguments):
+        captured.update({"name": name, "arguments": arguments})
+        return {
+            "success": True,
+            "provider": "openai",
+            "model": "gpt-test",
+            "text": "answer",
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(operations.openai_mcp, "dispatch_tool", fake_dispatch)
+    result = operations.dispatch_tool(
+        "agent_hub_chat",
+        {"provider": "gpt", "prompt": "question", "reasoning_effort": "high"},
+    )
+    assert captured["name"] == "openai_codex_chat"
+    assert captured["arguments"]["prompt"] == "question"
+    assert result["success"] is True
+    assert result["provider"] == "gpt"
+    assert result["data"]["provider"] == "openai"
 
 
 def test_provider_settings_are_persistent_and_scoped(tmp_path, monkeypatch):

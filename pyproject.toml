@@ -21,6 +21,7 @@ agent-hub-mcp = "agent_hub.server:serve"
 claude-codex-consent = "claude_codex.consent_cli:main"
 grok-codex-consent = "grok_codex.consent_cli:main"
 google-antigravity-consent = "google_antigravity_codex.consent_cli:main"
+openai-codex-consent = "openai_codex.consent_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -30,6 +31,7 @@ include = [
   "claude_codex*",
   "grok_codex*",
   "google_antigravity_codex*",
+  "openai_codex*",
 ]
 
 [tool.pytest.ini_options]
