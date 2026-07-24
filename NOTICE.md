@@ -1,12 +1,13 @@
 # NOTICE
 
 agent-hub is a unified personal multi-model coding hub. It consolidates one
-substrate (instructions / handoff / memory) and four formerly-separate MIT
-plugins into a single project. Each vendored package keeps its own attribution
-below; the originals live at `github.com/Meapri/{orchestrate-codex,claude-codex,
+substrate (instructions / handoff / memory), four formerly separate MIT
+packages, and an OpenAI GPT adapter backed by the official Codex CLI into a
+single project. Each source boundary keeps its own attribution below; the four
+original packages live at `github.com/Meapri/{orchestrate-codex,claude-codex,
 grok-codex,google-antigravity-codex}`.
 
-All model/provider calls require explicit user consent, enforced per leaf.
+All model/provider calls require explicit user consent, enforced per adapter.
 
 ## orchestrate-codex (`src/orchestrate_codex`)
 

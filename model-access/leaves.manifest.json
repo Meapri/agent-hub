@@ -41,7 +41,7 @@
     {
       "name": "openai-codex",
       "src": "src/openai_codex",
-      "role": "internal adapter (OpenAI GPT through official Codex)",
+      "role": "provider adapter (OpenAI GPT through official Codex; private leaf surface)",
       "upstream_sources": [
         {
           "url": "https://github.com/NousResearch/hermes-agent",

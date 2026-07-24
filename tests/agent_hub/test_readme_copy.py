@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from agent_hub import operations
 from orchestrate_codex.document_quality import review_natural_korean
 
 
@@ -14,7 +15,11 @@ REQUIRED_COMMANDS = (
     "./.venv/bin/claude-codex-consent grant --i-understand-and-consent",
     "./.venv/bin/grok-codex-consent grant --i-understand-and-consent",
     "./.venv/bin/google-antigravity-consent grant --i-understand-and-consent",
+    "./.venv/bin/openai-codex-consent grant --i-understand-and-consent",
+    "./.venv/bin/agent-hub-setup --apply",
     "claude auth login --claudeai",
+    "codex login",
+    "codex login --device-auth",
     "scripts/grok_codex_login.py interactive",
     "scripts/google_antigravity_login.py interactive",
     "codex plugin add agent-hub@agent-hub",
@@ -37,6 +42,13 @@ def test_readme_keeps_copyable_setup_commands() -> None:
 
     for command in REQUIRED_COMMANDS:
         assert command in text
+    assert "Claude, Grok, Gemini, GPT" in text
+    assert "공개 도구 37개" in text
+    assert "/Users/" not in text
+
+    tools_section = text.split("## 공개 도구 37개", 1)[1].split("\n## ", 1)[0]
+    for tool in operations.tool_definitions():
+        assert f"`{tool['name']}`" in tools_section
 
 
 def test_document_quality_check_catches_process_narration() -> None:

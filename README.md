@@ -1,16 +1,16 @@
 # Agent Hub
 
-Claude, Grok, Gemini를 Codex와 Claude Code에서 같은 방식으로 쓰기 위한 개인용 MCP 서버입니다.
+Claude, Grok, Gemini, GPT를 Codex와 Claude Code에서 같은 방식으로 쓰기 위한 개인용 MCP 서버입니다.
 
 코딩하다 보면 모델 하나만 계속 쓰지는 않게 됩니다. 코드 조사는 Claude에게 맡기고, 다른 모델에게
 의견을 물어보거나 검색 결과를 비교할 때도 있습니다. 그런데 모델을 바꿀 때마다 도구 이름과 로그인
 방식이 달라지고, 앱을 옮기면 프로젝트 규칙이나 진행 상황도 쉽게 끊깁니다.
 
-Agent Hub는 제가 그 불편을 줄이려고 만든 개인용 도구입니다. 각 서비스의 인증과 요청 형식은 서버 안에서 처리하고,
-사용하는 쪽에는 `agent_hub_*` 도구 29개만 보여 줍니다. Codex에서 시작한 일을 Claude Code에서 이어도
-같은 규칙 파일과 인계 기록을 읽습니다.
+Agent Hub는 제가 그 불편을 줄이려고 만든 개인용 도구입니다. 각 서비스의 인증과 요청 형식은 provider
+adapter 안에서 처리하고, 사용하는 쪽에는 `agent_hub_*` 도구 37개만 보여 줍니다. Codex에서 시작한
+일을 Claude Code에서 이어도 같은 규칙 파일과 인계 기록을 읽습니다.
 
-> 이 프로젝트는 Anthropic, xAI, Google의 공식 제품이 아닙니다.
+> 이 프로젝트는 Anthropic, xAI, Google, OpenAI의 공식 제품이 아닙니다.
 
 ## 바로 설치하기
 
@@ -28,31 +28,29 @@ uv tool install basic-memory
 실행에 필요한 패키지만 설치하려면 `./.venv/bin/pip install -e .`로 충분합니다. `.[dev]`에는 테스트,
 Ruff, 빌드 도구가 함께 들어 있습니다.
 
-### 로컬 경로 확인
+### 로컬 경로 설정
 
-MCP 설정에는 저장소와 가상환경의 절대경로가 들어갑니다. 다른 위치에 클론했다면 아래 세 파일에서
-`agent-hub-mcp`, `BASIC_MEMORY_CONFIG_DIR`, `BASIC_MEMORY_HOME` 경로를 먼저 고쳐 주세요.
-
-- `instructions/.ruler/ruler.toml`
-- `hubs/codex/.mcp.json`
-- `hubs/claude-code/.mcp.json`
-
-그다음 프로젝트 규칙을 각 앱의 설정 파일로 동기화합니다.
+MCP 설정에는 저장소와 가상환경의 절대경로가 들어갑니다. `agent-hub-setup`은 현재 clone 경로를 기준으로
+Codex, Claude Code, Cursor, Gemini와 공통 MCP 설정의 변경 계획을 먼저 보여 줍니다. 확인한 뒤에만
+`--apply`로 반영하세요. 의존성 설치, provider 로그인, 전역 플러그인 등록, 네트워크 호출은 하지 않습니다.
 
 ```bash
+./.venv/bin/agent-hub-setup
+./.venv/bin/agent-hub-setup --apply
 ./scripts/sync.sh
 ./scripts/check-sync.sh
 ```
 
 ### 사용할 모델 로그인
 
-세 모델을 한꺼번에 연결할 필요는 없습니다. 처음에는 자주 쓰는 모델 하나만 설정해도 됩니다. 각 연결은
+네 provider를 한꺼번에 연결할 필요는 없습니다. 처음에는 자주 쓰는 모델 하나만 설정해도 됩니다. 각 연결은
 로컬 사용 동의를 받은 뒤 로그인하도록 되어 있습니다.
 
 ```bash
 ./.venv/bin/claude-codex-consent grant --i-understand-and-consent
 ./.venv/bin/grok-codex-consent grant --i-understand-and-consent
 ./.venv/bin/google-antigravity-consent grant --i-understand-and-consent
+./.venv/bin/openai-codex-consent grant --i-understand-and-consent
 ```
 
 Claude는 Claude Code의 구독 OAuth 정보를 연결합니다.
@@ -77,7 +75,18 @@ Gemini 연결에는 Google Antigravity의 PKCE 로그인을 사용합니다.
 ./.venv/bin/python scripts/google_antigravity_login.py status
 ```
 
-설정이 끝나면 `./scripts/doctor.sh`로 로컬 준비 상태를 확인할 수 있습니다.
+GPT는 별도 MCP나 별도 오케스트레이터를 설치하지 않습니다. 공식 Codex CLI의 ChatGPT 구독 로그인을
+그대로 사용합니다.
+
+```bash
+codex login
+# 브라우저를 열기 어려운 환경에서는:
+codex login --device-auth
+```
+
+Agent Hub는 Codex OAuth token, Keychain 항목, `auth.json` 내용을 읽거나 복사하지 않습니다. 로그인과
+refresh는 공식 Codex가 계속 소유하며, Agent Hub는 redacted 계정 상태와 격리된 `codex exec` 결과만
+사용합니다. 설정이 끝나면 `./.venv/bin/agent-hub-doctor`로 로컬 준비 상태를 확인할 수 있습니다.
 
 ### Codex 또는 Claude Code에 추가
 
@@ -159,6 +168,13 @@ MCP 서버가 재시작돼도 같은 `run_id`로 이어갈 수 있습니다. 기
 continue에는 저장된 run의 `run_id`가 항상 필요합니다. 응답의 전체 `state`만 다시 보내는 방식은 revision,
 lease, handoff drift를 증명할 수 없어 거부합니다.
 
+실행을 더 진행하지 않을 때는 `agent_hub_cancel_run`에 현재 `store_revision`을 넘깁니다. 취소는 활성
+lease를 무효화하고 이후에 도착한 provider 결과를 저장하지 않지만, 이미 시작된 네트워크 요청이나 provider
+사용량을 강제로 되돌리지는 않습니다. 종료된 run은 `agent_hub_archive_run`으로 보관 상태로 바꿀 수
+있습니다. 실제 상태 JSON 삭제는 `agent_hub_gc_run`의 dry-run 결과에서 revision과 전체 상태 SHA를
+확인한 뒤 `apply=true`로 다시 호출해야 합니다. `agent_hub_list_runs`는 같은 프로젝트의 run만 요약해
+보여 주며 prompt, 결과 본문, lease token은 반환하지 않습니다.
+
 계획을 만들 때 읽은 `HANDOFF.md`도 실행 상태에 스냅샷으로 보관합니다. 재개 전에 파일이 바뀌면
 `handoff_drift`로 멈추므로 새 인계 내용을 검토할 수 있습니다. 변경 전 문맥을 그대로 쓰는 것이
 의도라면 `handoff_drift_policy="use-snapshot"`을 명시해야 합니다.
@@ -181,30 +197,32 @@ lease, handoff drift를 증명할 수 없어 거부합니다.
 중간 단계에서 나온 글은 최종 결과로 저장하지 마세요. `status=completed`인지, 마지막 품질 검사까지
 통과했는지 확인한 뒤 파일에 반영하는 것이 안전합니다.
 
-`max_leaf_calls`는 provider adapter에 실제로 전달한 논리 호출 수를 셉니다. 예를 들어 세 모델 비교는
-세 번을 사용하며, 비교 안쪽 호출과 바깥 단계를 합쳐 같은 동시 실행 제한을 공유합니다. HTTP transport
-내부의 재시도나 인증 갱신은 별도 leaf call로 세지 않습니다. 동시 실행 제한은 한 workflow 안에서
-공유되며, 서로 다른 workflow 프로세스 전체를 묶는 전역 제한은 아닙니다.
+`max_leaf_calls`는 provider adapter에 실제로 전달한 논리 호출 수를 셉니다. 기본 비교는 Claude, Grok,
+Gemini 세 번을 사용하고, `provider=all`이면 GPT까지 네 번을 사용합니다. 비교 안쪽 호출과 바깥 단계를
+합쳐 같은 동시 실행 제한을 공유합니다. HTTP transport 내부의 재시도나 인증 갱신은 별도 leaf call로
+세지 않습니다. 동시 실행 제한은 한 workflow 안에서 공유되며, 서로 다른 workflow 프로세스 전체를
+묶는 전역 제한은 아닙니다.
 
 ## 연결별 지원 범위
 
-| 기능 | Claude | Grok | Gemini |
-|---|:---:|:---:|:---:|
-| 대화와 이미지 입력 | 지원 | 지원 | 지원 |
-| 웹 검색 | 지원¹ | 지원¹ | 지원 |
-| 문서 작성과 Git 변경 검토 | 지원 | 지원 | 지원 |
-| 모델 비교와 릴리스 문서 작성 | 지원 | 지원 | 지원 |
-| 이미지 생성 | 미지원 | 지원¹ | 지원 |
+| 기능 | Claude | Grok | Gemini | GPT |
+|---|:---:|:---:|:---:|:---:|
+| 대화와 로컬 이미지 입력 | 지원 | 지원 | 지원 | 지원 |
+| 웹 검색 | 지원¹ | 지원¹ | 지원 | 미지원 |
+| 문서 작성과 Git 변경 검토 | 지원 | 지원 | 지원 | 지원 |
+| 모델 비교와 릴리스 문서 작성 | 지원 | 지원 | 지원 | 지원 |
+| 이미지 생성 | 미지원 | 지원¹ | 지원 | 미지원 |
 
 ¹ 계정에 해당 API 권한이 있어야 할 수 있습니다.
 
-`reasoning_effort`는 `low`, `medium`, `high` 중 하나를 고를 수 있습니다. 서버는 이 값을 각 서비스가
-이해하는 요청 형식으로 바꿉니다. 선택한 모델이 해당 설정을 지원하지 않으면 조용히 무시하지 않고 오류를
-반환합니다.
+workflow 계획에서 쓰는 `reasoning_effort`의 공통 값은 `low`, `medium`, `high`입니다.
+`agent_hub_chat`이나 `agent_hub_write`로 GPT를 직접 부를 때는 `xhigh`, `max`, `ultra`도 사용할 수
+있습니다. 서버는 값을 각 서비스가 이해하는 요청 형식으로 바꾸며, 선택한 provider나 모델이 해당 설정을
+지원하지 않으면 조용히 무시하지 않고 오류를 반환합니다.
 
-## 공개 도구 29개
+## 공개 도구 37개
 
-모델마다 다른 내부 도구는 밖으로 노출하지 않습니다. 앱에서 보이는 이름은 아래 29개가 전부입니다.
+모델마다 다른 내부 도구는 밖으로 노출하지 않습니다. 앱에서 보이는 이름은 아래 37개가 전부입니다.
 
 | 구분 | 도구 |
 |---|---|
@@ -214,7 +232,8 @@ lease, handoff drift를 증명할 수 없어 거부합니다.
 | 검토와 릴리스 | `agent_hub_compare_models`, `agent_hub_review_diff`, `agent_hub_release_snapshot`, `agent_hub_release_draft` |
 | 설정 | `agent_hub_get_settings`, `agent_hub_update_settings`, `agent_hub_reset_settings` |
 | 인계 기록 | `agent_hub_get_handoff`, `agent_hub_prepare_handoff_update`, `agent_hub_apply_handoff_update` |
-| 작업 흐름 | `agent_hub_list_workflows`, `agent_hub_get_workflow`, `agent_hub_plan_workflow`, `agent_hub_start_workflow`, `agent_hub_continue_workflow`, `agent_hub_get_run`, `agent_hub_run_workflow` |
+| 작업 흐름 | `agent_hub_list_workflows`, `agent_hub_get_workflow`, `agent_hub_plan_workflow`, `agent_hub_start_workflow`, `agent_hub_continue_workflow`, `agent_hub_run_workflow` |
+| 실행 제어 | `agent_hub_claim_run_action`, `agent_hub_prepare_takeover`, `agent_hub_resume_takeover`, `agent_hub_list_runs`, `agent_hub_get_run`, `agent_hub_get_run_events`, `agent_hub_cancel_run`, `agent_hub_archive_run`, `agent_hub_gc_run` |
 | 위임과 검증 | `agent_hub_delegate`, `agent_hub_verify` |
 
 `agent_hub_release_snapshot`과 `agent_hub_verify`는 모델을 부르지 않고 로컬에서 처리합니다. 이처럼 외부
@@ -241,7 +260,8 @@ README를 직접 작성 도구에 맡길 때는 `project_root`, `policy_mode=req
 
 `agent_hub_compare_models`의 Consistency Gate는 승인과 거절처럼 답의 선택지가 정해진 판단에 씁니다.
 각 모델은 허용된 답 중 하나를 정해진 JSON 형식으로 반환해야 합니다. 기본 설정에서는 모델이 둘 이상
-유효하게 답하고, 모든 답이 일치해야 통과합니다.
+유효하게 답하고, 모든 답이 일치해야 통과합니다. 기본 참여자는 Claude, Grok, Gemini입니다. GPT까지
+같은 gate에 넣으려면 `provider=all`을 명시합니다.
 
 응답이 빠지거나 형식이 틀리거나 의견이 갈리면 사람이 확인해야 한다고 표시합니다. 자유롭게 쓴 글의
 품질을 숫자 하나로 평가하는 기능은 아닙니다.
@@ -254,8 +274,8 @@ README를 직접 작성 도구에 맡길 때는 `project_root`, `policy_mode=req
 
 Agent Hub는 중요한 문맥을 세 곳에 나눠 둡니다.
 
-- `instructions/.ruler/`에는 사람이 관리하는 프로젝트 규칙이 있습니다. `AGENTS.md`, `CLAUDE.md`,
-  `.gemini/settings.json`은 여기서 생성합니다.
+- `instructions/.ruler/`에는 사람이 관리하는 프로젝트 규칙이 있습니다. `AGENTS.md`와 `CLAUDE.md`는
+  여기서 생성하고, Gemini용 machine-local 설정도 같은 규칙을 가리키게 합니다.
 - 각 프로젝트의 `HANDOFF.md`에는 지금 어디까지 했는지, 무엇을 확인했고 다음에 무엇을 해야 하는지
   적습니다. monorepo 하위 프로젝트에 자체 파일이 있으면 그것을 먼저 사용하고, 없을 때만 같은 Git
   저장소 안의 가까운 상위 파일을 찾습니다.
@@ -266,10 +286,15 @@ Agent Hub는 중요한 문맥을 세 곳에 나눠 둡니다.
 대신하지는 않습니다.
 
 인계 기록을 갱신할 때는 먼저 `agent_hub_prepare_handoff_update`로 변경 내용과 현재 파일 SHA를
-확인하고, 그 결과를 `agent_hub_apply_handoff_update`에 넘깁니다. apply는 SHA가 그대로일 때만 marker
-블록을 원자적으로 교체합니다. prepare의 기본 대상은 현재 `project_root`의 `HANDOFF.md`이며, 상위
-파일을 의도적으로 갱신하려면 `search=nearest`나 명시적인 `file`을 사용합니다. apply에는 prepare가
-반환한 정확한 `target`이 필요합니다. Git stage, commit, push는 자동으로 하지 않습니다.
+확인하고, 그 결과를 `agent_hub_apply_handoff_update`에 넘깁니다. prepare는 원래 목표, 현재 단계,
+완료, 미완, 변경 파일, 검증, 위험, Do-Not-Repeat와 단 하나의 구체적인 다음 행동이 있는지 검사합니다.
+apply는 전체 파일 SHA가 그대로일 때만 marker 블록을 원자적으로 교체합니다.
+
+prepare의 기본 대상은 현재 `project_root`의 `HANDOFF.md`이며, 상위 파일을 의도적으로 갱신하려면
+`search=nearest`나 명시적인 `file`을 사용합니다. apply에는 prepare가 반환한 정확한 `target`이
+필요합니다. prepare 뒤 marker 밖의 과거 기록만 바뀌었다면 이전 `base_managed_sha256`으로 안전하게
+재준비할 수 있습니다. managed SHA도 달라졌다면 최신 패킷을 읽고 충돌을 직접 조정해야 합니다. Git
+stage, commit, push는 자동으로 하지 않습니다.
 
 ## 보안상 알아둘 점
 
@@ -278,6 +303,8 @@ Agent Hub는 중요한 문맥을 세 곳에 나눠 둡니다.
 - `project_root`와 `workspace_root`에는 파일시스템 루트나 홈 디렉터리 전체를 지정할 수 없습니다.
 - `HANDOFF.md`는 정책이나 검증된 코드 근거가 아니라 신뢰되지 않은 운영 문맥으로 모델에 전달합니다.
   ignored 파일, symlink, hardlink, 저장소 밖 파일은 읽거나 갱신하지 않습니다.
+- GPT adapter는 공식 Codex 로그인만 사용하며 token이나 `auth.json`을 직접 읽지 않습니다. 격리된
+  `codex exec`에서 shell, 파일 변경, MCP, web search event가 나타나면 결과를 실패 처리합니다.
 - 모델 검색과 이미지 생성은 계정 권한과 사용량을 쓸 수 있습니다. 긴 작업에는 `max_leaf_calls`를 정해
   두는 편이 좋습니다.
 
@@ -293,7 +320,9 @@ agent-hub/
 ├── src/claude_codex/              # Claude 연결
 ├── src/grok_codex/                # Grok 연결
 ├── src/google_antigravity_codex/  # Gemini 연결
+├── src/openai_codex/              # 공식 Codex 로그인을 쓰는 GPT 연결
 ├── src/orchestrate_codex/         # 고정 workflow와 실행 상태 저장
+├── model-access/                  # provider 출처와 고정 upstream 경계
 ├── hubs/codex/                    # Codex 플러그인
 ├── hubs/claude-code/              # Claude Code 플러그인
 ├── instructions/.ruler/           # 프로젝트 규칙 원본

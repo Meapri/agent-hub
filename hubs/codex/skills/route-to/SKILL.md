@@ -1,9 +1,9 @@
 ---
 name: route-to
 description: >
-  현재 하위 작업을 다른 provider 모델(Claude/Grok/Gemini)이나 다단계 오케스트레이션에 위임하고 결과를
+  현재 하위 작업을 다른 provider 모델(Claude/Grok/Gemini/GPT)이나 다단계 오케스트레이션에 위임하고 결과를
   회수한다. Trigger when the user wants a second opinion, a specific provider, cross-model review, a
-  multi-step doc/change recipe, or says "Claude/Grok/Gemini에게 물어봐", "다른 모델로 돌려봐".
+  multi-step doc/change recipe, or says "Claude/Grok/Gemini/GPT에게 물어봐", "다른 모델로 돌려봐".
 ---
 
 ## 위임 경로

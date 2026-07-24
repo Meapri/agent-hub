@@ -1,11 +1,8 @@
-"""Contract test: the args this orchestrator sends must be valid for the *real* leaf
-schemas, which live in sibling plugin repos (Antigravity/Claude/Grok Codex).
+"""Validate fixed-workflow arguments against the co-located private leaf schemas.
 
-These four plugins evolve independently. If a leaf renames a field or tightens its
-schema, the orchestrator would silently send rejected calls. This test reads each
-leaf's `inputSchema` straight from its `mcp_server.py` and validates the arguments
-`runner` produces for each domain recipe against it. Skips cleanly if the sibling
-repos aren't checked out next to this one.
+The public surface is one Agent Hub MCP, while Claude, Grok, Gemini, and GPT keep
+private adapter schemas under ``src/``. If an adapter tightens its contract, these
+tests catch stale fixed-workflow arguments without exposing the leaf tools publicly.
 """
 
 from __future__ import annotations
@@ -18,11 +15,12 @@ import pytest
 
 from orchestrate_codex import runner
 
-_SIBLINGS = Path(__file__).resolve().parents[2]
+_ROOT = Path(__file__).resolve().parents[2]
 _LEAF_FILES = {
-    "antigravity": _SIBLINGS / "Antigravity Codex" / "google_antigravity_codex" / "mcp_server.py",
-    "claude": _SIBLINGS / "Claude Codex" / "claude_codex" / "mcp_server.py",
-    "grok": _SIBLINGS / "Grok Codex" / "grok_codex" / "mcp_server.py",
+    "antigravity": _ROOT / "src/google_antigravity_codex/mcp_server.py",
+    "claude": _ROOT / "src/claude_codex/mcp_server.py",
+    "grok": _ROOT / "src/grok_codex/mcp_server.py",
+    "gpt": _ROOT / "src/openai_codex/mcp_server.py",
 }
 
 
@@ -92,8 +90,7 @@ def _tool_schema_var(source: str, tool: str) -> Optional[str]:
 
 def _validate(leaf_key: str, tool: str, args: Dict[str, Any]) -> None:
     path = _LEAF_FILES[leaf_key]
-    if not path.is_file():
-        pytest.skip(f"sibling leaf repo not present: {path}")
+    assert path.is_file(), f"co-located leaf schema is missing: {path}"
     source = path.read_text(encoding="utf-8")
     var = _tool_schema_var(source, tool)
     assert var, f"could not find inputSchema for {tool} in {path}"
@@ -145,3 +142,17 @@ def test_write_chat_fallback_matches_claude_schema(tmp_path):
     assert na["tool"] == "claude_codex_chat"
     assert na["expected_revision"] == out["store_revision"]
     _validate("claude", na["tool"], na["arguments"])
+
+
+def test_gpt_fixed_binding_matches_private_leaf_schema(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('version = "1.0.0"\n', encoding="utf-8")
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "go"},
+        bindings={"chat": "openai_codex_chat"},
+        project_root=str(tmp_path),
+    )
+    action = state["next_action"]
+
+    assert action["tool"] == "openai_codex_chat"
+    _validate("gpt", action["tool"], action["arguments"])

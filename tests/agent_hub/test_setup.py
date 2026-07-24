@@ -215,6 +215,9 @@ def test_machine_local_runtime_configs_are_ignored_not_tracked():
             (ROOT / ".gitignore").read_text(encoding="utf-8"),
             (ROOT / "instructions/.ruler/ruler.toml").read_text(encoding="utf-8"),
             (ROOT / "src/agent_hub/local_setup.py").read_text(encoding="utf-8"),
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            (ROOT / "hubs/codex/README.md").read_text(encoding="utf-8"),
+            (ROOT / "hubs/claude-code/README.md").read_text(encoding="utf-8"),
         )
     )
     assert "/Users/naen/" not in canonical

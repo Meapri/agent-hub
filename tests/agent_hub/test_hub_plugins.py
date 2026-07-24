@@ -84,11 +84,13 @@ def test_public_hub_tools_do_not_expose_private_provider_leaf_names():
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():
     codex = _json(HUBS / "codex/.codex-plugin/plugin.json")
     claude = _json(HUBS / "claude-code/.claude-plugin/plugin.json")
-    assert codex["version"] == "1.3.2"
-    assert claude["version"] == "1.3.2"
+    assert codex["version"] == "1.4.0"
+    assert claude["version"] == "1.4.0"
     assert codex["mcpServers"] == "./.mcp.json"
     assert "adaptive" in codex["description"].lower()
     assert "adaptive" in claude["description"].lower()
+    assert "GPT" in codex["interface"]["longDescription"]
+    assert "provider=all" in " ".join(codex["interface"]["defaultPrompt"])
     for name in ("agent-hub-plan.md", "agent-hub-run.md"):
         command = (HUBS / "claude-code/commands" / name).read_text(encoding="utf-8")
         assert "adaptive" in command
@@ -103,7 +105,7 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["name"] == "agent-hub"
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
-    assert claude["plugins"][0]["version"] == "1.3.2"
+    assert claude["plugins"][0]["version"] == "1.4.0"
 
 
 def test_release_version_check_uses_unified_agent_hub_fields():
@@ -116,4 +118,21 @@ def test_release_version_check_uses_unified_agent_hub_fields():
         "claude_plugin",
         "claude_marketplace",
     }
-    assert set(found.values()) == {"1.3.2"}
+    assert set(found.values()) == {"1.4.0"}
+
+
+def test_hub_readmes_describe_the_same_four_provider_surface():
+    for hub in ("codex", "claude-code"):
+        text = (HUBS / hub / "README.md").read_text(encoding="utf-8")
+        assert "Claude, Grok, Gemini, GPT" in text
+        assert "`agent_hub_*` 37개" in text
+        assert "`openai_codex_*`" in text
+        assert "gpt-provider/SKILL.md" in text
+        assert "/Users/" not in text
+        route = (HUBS / hub / "skills/route-to/SKILL.md").read_text(encoding="utf-8")
+        assert "Claude/Grok/Gemini/GPT" in route
+
+    provenance = _json(ROOT / "model-access/leaves.manifest.json")
+    gpt = next(item for item in provenance["packages"] if item["name"] == "openai-codex")
+    assert gpt["role"].startswith("provider adapter")
+    assert "private leaf surface" in gpt["role"]

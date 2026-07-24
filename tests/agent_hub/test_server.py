@@ -10,9 +10,10 @@ from agent_hub import operations
 from claude_codex import mcp_server as claude
 from grok_codex import mcp_server as grok
 from google_antigravity_codex import mcp_server as antigravity
+from openai_codex import mcp_server as openai
 from orchestrate_codex import mcp_server as orchestrate
 
-_OWNERS = [orchestrate, claude, grok, antigravity]
+_OWNERS = [orchestrate, claude, grok, antigravity, openai]
 
 
 def test_only_canonical_tools_are_public_or_callable():
@@ -26,6 +27,7 @@ def test_only_canonical_tools_are_public_or_callable():
         "claude_codex_chat",
         "grok_codex_chat",
         "google_antigravity_chat",
+        "openai_codex_chat",
     ):
         assert _call(server, old_name, {})["error"]["code"] == -32602
 
@@ -37,6 +39,7 @@ def test_workflows_resolve_internal_leaf_adapters_without_public_tools():
     assert resolve("claude_codex_chat") is not None
     assert resolve("grok_codex_chat") is not None
     assert resolve("google_antigravity_chat") is not None
+    assert resolve("openai_codex_chat") is not None
     assert resolve("orchestrate_list_recipes") is None
 
 
