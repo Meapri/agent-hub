@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import fcntl
 from hashlib import sha256
 import os
@@ -30,6 +31,74 @@ START_MARKER = "<!-- agent-hub:handoff:v1:start -->"
 END_MARKER = "<!-- agent-hub:handoff:v1:end -->"
 _LATEST_BLOCK_RE = re.compile(r"(?m)^[ \t]*\*\*\[[^\]\n]*최신[^\]\n]*\]\*\*[ \t]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_HEADING_RE = re.compile(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_LIST_ITEM_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.+?)\s*$")
+_LABELED_FIELD_RE = re.compile(
+    r"(?m)^[ \t]*[-*+][ \t]+\*\*([^*\n]+?)\*\*[ \t]*:[ \t]*(.*)$"
+)
+_UNSET = object()
+QUALITY_SCHEMA = "agent_hub_handoff_quality_v1"
+REQUIRED_SECTIONS = (
+    "original_goal",
+    "current_stage",
+    "completed",
+    "incomplete",
+    "changed_files",
+    "verification",
+    "risks",
+    "do_not_repeat",
+    "next_step",
+)
+_SECTION_ALIASES = {
+    "original_goal": {"원래 목표", "original goal"},
+    "current_stage": {"현재 단계", "current stage"},
+    "completed": {"완료", "완료한 내용", "completed"},
+    "incomplete": {"미완", "미완료", "남은 작업", "incomplete"},
+    "changed_files": {"변경 파일", "주요 변경 파일", "changed files"},
+    "verification": {
+        "검증",
+        "검증 결과",
+        "검증 실행 결과",
+        "verification",
+    },
+    "risks": {"위험", "현재 위험", "남은 위험", "현재 리스크", "risks"},
+    "do_not_repeat": {
+        "반복 금지",
+        "반복하면 안 되는 실패",
+        "do not repeat",
+        "do-not-repeat",
+    },
+    "next_step": {"다음 한 걸음", "next step"},
+}
+_NEXT_STEP_PLACEHOLDER_RE = re.compile(
+    r"(?ix)^("
+    r"todo|tbd|n/?a|none|없음|미정|추후|나중에|"
+    r"다음\s*작업|계속(?:\s*진행)?|결정\s*필요|확인\s*필요|"
+    r"placeholder|작성\s*예정|\.*|<[^>]+>|\[[^\]]+\]"
+    r")[.!?。]?$"
+)
+_PLACEHOLDER_TOKEN_RE = re.compile(
+    r"(?ix)(<[^>\n]+>|\[(?:todo|tbd|placeholder|fill)[^\]\n]*\]|"
+    r"\b(?:todo|tbd|placeholder)\b)"
+)
+_ACTION_VERB_RE = re.compile(
+    r"(?ix)("
+    r"실행|추가|수정|구현|검증|확인|검토|작성|커밋|연결|비교|제거|"
+    r"갱신|재현|조사|분석|적용|해결|준비|읽(?:기|어|고)?|"
+    r"\b(?:run|add|update|implement|verify|review|write|commit|connect|"
+    r"compare|remove|reproduce|inspect|analyze|apply|fix|prepare|read|test)\b"
+    r")"
+)
+_CONCRETE_TARGET_RE = re.compile(
+    r"(?ix)("
+    r"`[^`\n]+`|['\"][^'\"\n]+['\"]|"
+    r"(?:^|[\s(])(?:\./|\.\./|/)[^\s`]+|"
+    r"\b[a-z0-9_.-]+\.(?:py|md|json|toml|ya?ml|sh|ts|tsx|js|jsx)\b|"
+    r"\b(?:pytest|ruff|readme\.md|handoff\.md|"
+    r"gpt|claude|gemini|grok)\b|"
+    r"\btest_[a-z0-9_]+\b|\b[A-Z]{2,}-\d+\b|\b[0-9a-f]{7,40}\b"
+    r")"
+)
 
 
 class HandoffError(ValueError):
@@ -52,6 +121,22 @@ class HandoffRevisionConflict(HandoffError):
             f"handoff revision conflict: expected {expected or '<missing>'}, "
             f"current {current or '<missing>'}"
         )
+
+
+class HandoffManagedRevisionConflict(HandoffError):
+    def __init__(self, *, expected: str | None, current: str | None) -> None:
+        self.expected = expected
+        self.current = current
+        super().__init__(
+            f"handoff managed revision conflict: expected {expected or '<missing>'}, "
+            f"current {current or '<missing>'}"
+        )
+
+
+class HandoffQualityError(HandoffError):
+    def __init__(self, issues: list[str]) -> None:
+        self.issues = list(issues)
+        super().__init__("handoff managed body failed quality checks: " + "; ".join(issues))
 
 
 class HandoffDrift(HandoffError):
@@ -227,7 +312,15 @@ def _latest_block(text: str) -> str | None:
     return "\n\n".join(part for part in (prefix, block) if part) + "\n"
 
 
-def _managed_block(text: str) -> str | None:
+@dataclass(frozen=True)
+class _ManagedBlock:
+    start: int
+    end: int
+    block: str
+    body: str
+
+
+def _parse_managed_block(text: str) -> _ManagedBlock | None:
     starts = text.count(START_MARKER)
     ends = text.count(END_MARKER)
     if starts == 0 and ends == 0:
@@ -239,27 +332,158 @@ def _managed_block(text: str) -> str | None:
     if end_start < 0:
         raise HandoffError("handoff managed markers are out of order")
     end = end_start + len(END_MARKER)
-    return text[start:end].strip() + "\n"
+    return _ManagedBlock(
+        start=start,
+        end=end,
+        block=text[start:end],
+        body=text[start + len(START_MARKER) : end_start],
+    )
+
+
+def _managed_block(text: str) -> str | None:
+    parsed = _parse_managed_block(text)
+    return parsed.block.strip() + "\n" if parsed is not None else None
+
+
+def _managed_sha256(text: str) -> str | None:
+    parsed = _parse_managed_block(text)
+    if parsed is None:
+        return None
+    return sha256(parsed.block.encode("utf-8")).hexdigest()
+
+
+def _normalize_heading(value: str) -> str:
+    normalized = str(value or "").strip().strip("`*_").strip()
+    normalized = re.sub(r"[：:]+$", "", normalized).strip().lower()
+    normalized = re.sub(r"\s*\([^)\n]*\)\s*$", "", normalized).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _section_matches(body: str) -> dict[str, list[tuple[str, str]]]:
+    headings = list(_HEADING_RE.finditer(body))
+    labels = list(_LABELED_FIELD_RE.finditer(body))
+    matched: dict[str, list[tuple[str, str]]] = {
+        key: [] for key in REQUIRED_SECTIONS
+    }
+    aliases = {
+        key: {_normalize_heading(alias) for alias in values}
+        for key, values in _SECTION_ALIASES.items()
+    }
+    for index, heading in enumerate(headings):
+        level = len(heading.group(1))
+        end = len(body)
+        for following in headings[index + 1 :]:
+            if len(following.group(1)) <= level:
+                end = following.start()
+                break
+        title = _normalize_heading(heading.group(2))
+        for key, accepted in aliases.items():
+            if title in accepted:
+                matched[key].append(("heading", body[heading.end() : end].strip()))
+                break
+    for index, label in enumerate(labels):
+        end = labels[index + 1].start() if index + 1 < len(labels) else len(body)
+        title = _normalize_heading(label.group(1))
+        inline = label.group(2).strip()
+        continuation = body[label.end() : end].strip()
+        content = "\n".join(part for part in (inline, continuation) if part)
+        for key, accepted in aliases.items():
+            if title in accepted:
+                matched[key].append(
+                    (
+                        "labeled-field-inline"
+                        if inline
+                        else "labeled-field-block",
+                        content,
+                    )
+                )
+                break
+    return matched
+
+
+def validate_managed_body(body: str) -> Dict[str, Any]:
+    """Validate the exact marker-managed recovery packet."""
+
+    normalized = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    issues: list[str] = []
+    sections = _section_matches(normalized)
+    for key in REQUIRED_SECTIONS:
+        matches = sections[key]
+        if not matches:
+            issues.append(f"missing required section: {key}")
+        elif len(matches) > 1:
+            issues.append(f"duplicate required section: {key}")
+        elif not matches[0][1].strip():
+            issues.append(f"empty required section: {key}")
+
+    next_step_count = 0
+    next_step = ""
+    if len(sections["next_step"]) == 1:
+        section_style, section_body = sections["next_step"][0]
+        items = [
+            match.group(1).strip()
+            for line in section_body.splitlines()
+            if (match := _LIST_ITEM_RE.match(line))
+        ]
+        if section_style == "labeled-field-inline":
+            first_line = section_body.splitlines()[0].strip() if section_body else ""
+            next_step_count = (1 if first_line else 0) + len(items)
+            next_step = " ".join(line.strip() for line in section_body.splitlines())
+        else:
+            next_step_count = len(items)
+            next_step = items[0] if next_step_count == 1 else ""
+        if next_step_count != 1:
+            issues.append("next_step must contain exactly one action")
+        else:
+            if (
+                len(next_step) < 10
+                or _NEXT_STEP_PLACEHOLDER_RE.fullmatch(next_step) is not None
+                or _PLACEHOLDER_TOKEN_RE.search(next_step) is not None
+                or _ACTION_VERB_RE.search(next_step) is None
+                or _CONCRETE_TARGET_RE.search(next_step) is None
+            ):
+                issues.append("next_step must be one concrete non-placeholder action")
+
+    quality = {
+        "schema": QUALITY_SCHEMA,
+        "valid": not issues,
+        "required_sections": list(REQUIRED_SECTIONS),
+        "found_sections": [
+            key for key in REQUIRED_SECTIONS if len(sections[key]) == 1
+        ],
+        "next_step_count": next_step_count,
+        "next_step": next_step,
+        "issues": issues,
+    }
+    if issues:
+        raise HandoffQualityError(issues)
+    return quality
 
 
 def _select_text(text: str, limit: int) -> tuple[str, str, bool]:
     managed = _managed_block(text)
-    if len(text) <= limit:
-        return text, "full", False
     if managed is not None and len(managed) <= limit:
         return managed, "managed-block", False
+    if managed is not None:
+        suffix = "\n[handoff content truncated]\n"
+        keep = max(0, limit - len(suffix))
+        return (
+            managed[:keep] + suffix,
+            "managed-block-truncated",
+            True,
+        )
+    if len(text) <= limit:
+        return text, "full", False
     latest = _latest_block(text) if managed is None else None
     if latest is not None and len(latest) <= limit:
         return latest, "latest-block", False
-    selected = managed if managed is not None else latest if latest is not None else text
+    selected = latest if latest is not None else text
     suffix = "\n[handoff content truncated]\n"
     keep = max(0, limit - len(suffix))
     return (
         selected[:keep] + suffix,
         (
-            "managed-block-truncated"
-            if managed is not None
-            else "latest-block-truncated"
+            "latest-block-truncated"
             if latest is not None
             else "truncated"
         ),
@@ -476,20 +700,16 @@ def _marker_block(body: str) -> str:
 
 
 def _replace_managed_block(existing: str, block: str) -> str:
-    starts = existing.count(START_MARKER)
-    ends = existing.count(END_MARKER)
-    if starts != ends or starts > 1:
-        raise HandoffError("handoff file has an invalid managed marker structure")
-    if starts == 0:
-        prefix = existing.rstrip()
-        return f"{prefix}\n\n{block}" if prefix else block
-    start = existing.index(START_MARKER)
-    end_start = existing.find(END_MARKER, start + len(START_MARKER))
-    if end_start < 0:
-        raise HandoffError("handoff markers are out of order")
-    end = end_start + len(END_MARKER)
-    suffix = existing[end:].lstrip("\n")
-    return existing[:start] + block + suffix
+    parsed = _parse_managed_block(existing)
+    if parsed is None:
+        if not existing:
+            return block
+        separator = "" if existing.endswith("\n\n") else "\n" if existing.endswith("\n") else "\n\n"
+        return existing + separator + block
+    replacement = _parse_managed_block(block)
+    if replacement is None:
+        raise HandoffError("replacement is missing its managed block")
+    return existing[: parsed.start] + replacement.block + existing[parsed.end :]
 
 
 def _update_target(
@@ -547,6 +767,7 @@ def prepare_handoff_update(
     body: str,
     file: str = "",
     search: str = "project-only",
+    base_managed_sha256: str | None | object = _UNSET,
 ) -> Dict[str, Any]:
     """Prepare, but do not write, a marker-managed whole-file update."""
 
@@ -559,7 +780,29 @@ def prepare_handoff_update(
     )
     raw = _read_update_target(target, scope, git_root=git_root)
     existing = raw.decode("utf-8") if raw is not None else ""
-    content = _replace_managed_block(existing, _marker_block(body))
+    current_managed_sha256 = _managed_sha256(existing)
+    if base_managed_sha256 is not _UNSET:
+        if (
+            base_managed_sha256 is not None
+            and (
+                not isinstance(base_managed_sha256, str)
+                or _SHA256_RE.fullmatch(base_managed_sha256) is None
+            )
+        ):
+            raise ValueError(
+                "base_managed_sha256 must be omitted, null, or 64 lowercase hex characters"
+            )
+        if current_managed_sha256 != base_managed_sha256:
+            raise HandoffManagedRevisionConflict(
+                expected=base_managed_sha256,
+                current=current_managed_sha256,
+            )
+    block = _marker_block(body)
+    parsed_proposal = _parse_managed_block(block)
+    if parsed_proposal is None:
+        raise HandoffError("prepared handoff is missing its managed block")
+    quality = validate_managed_body(parsed_proposal.body)
+    content = _replace_managed_block(existing, block)
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_HANDOFF_FILE_BYTES:
         raise ValueError("prepared handoff file exceeds the maximum size")
@@ -568,6 +811,9 @@ def prepare_handoff_update(
         "project_root": str(root),
         "expected_sha256": sha256(raw).hexdigest() if raw is not None else None,
         "proposed_sha256": sha256(encoded).hexdigest(),
+        "base_managed_sha256": current_managed_sha256,
+        "proposed_managed_sha256": _managed_sha256(content),
+        "quality": quality,
         "content": content,
         "chars": len(content),
         "created": raw is None,
@@ -683,16 +929,16 @@ def apply_handoff_update(
         raise ValueError("file is required; apply the exact target returned by prepare")
     if expected_sha256 is not None and _SHA256_RE.fullmatch(expected_sha256) is None:
         raise ValueError("expected_sha256 must be null or 64 lowercase hex characters")
-    if content.count(START_MARKER) != 1 or content.count(END_MARKER) != 1:
-        raise ValueError("handoff content must contain exactly one managed marker block")
-    if content.index(START_MARKER) > content.index(END_MARKER):
-        raise ValueError("handoff managed markers are out of order")
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_HANDOFF_FILE_BYTES:
         raise ValueError("handoff content exceeds the maximum size")
 
     root = _validated_project_root(project_root)
     target, scope, git_root = _update_target(root, file=file, search="nearest")
+    managed = _parse_managed_block(content)
+    if managed is None:
+        raise ValueError("handoff content must contain exactly one managed marker block")
+    quality = validate_managed_body(managed.body)
     relative = target.relative_to(scope)
     temp_name = f".{target.name}.{secrets.token_hex(8)}.tmp"
     temp_fd: int | None = None
@@ -771,6 +1017,8 @@ def apply_handoff_update(
         "target": str(target),
         "sha256": sha256(encoded).hexdigest(),
         "previous_sha256": expected_sha256,
+        "managed_sha256": sha256(managed.block.encode("utf-8")).hexdigest(),
+        "quality": quality,
         "chars": len(content),
         "created": expected_sha256 is None,
     }

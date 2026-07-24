@@ -1352,11 +1352,16 @@ def _get_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _prepare_handoff_update(args: Dict[str, Any]) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "body": str(args.get("body") or ""),
+        "file": str(args.get("file") or ""),
+        "search": str(args.get("search") or "project-only"),
+    }
+    if "base_managed_sha256" in args:
+        kwargs["base_managed_sha256"] = args.get("base_managed_sha256")
     prepared = handoff_state.prepare_handoff_update(
         str(args.get("project_root") or "."),
-        body=str(args.get("body") or ""),
-        file=str(args.get("file") or ""),
-        search=str(args.get("search") or "project-only"),
+        **kwargs,
     )
     return envelope(
         "prepare_handoff_update",
@@ -3461,6 +3466,10 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                 "project_root": {"type": "string", "default": "."},
                 "body": {"type": "string"},
                 "file": {"type": "string"},
+                "base_managed_sha256": {
+                    "type": ["string", "null"],
+                    "pattern": "^[0-9a-f]{64}$",
+                },
                 "search": {
                     "type": "string",
                     "enum": ["project-only", "nearest"],

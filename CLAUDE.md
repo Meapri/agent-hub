@@ -52,10 +52,15 @@
 ## 종료
 
 - 관련 테스트와 동기화 검사를 실행하고, `git diff`와 `git status`로 실제 변경 범위를 확인한다.
-- `HANDOFF.md`의 현재 단계, 완료, 미완, 변경 파일, 검증 결과, 위험, 다음 한 걸음을 갱신한다.
-- 다음 한 걸음은 이어받는 에이전트가 원 대화 없이 바로 실행할 수 있는 단 하나의 구체적 행동으로 쓴다.
-- Agent Hub 도구로 갱신할 때는 prepare 결과의 전체 파일 SHA를 확인한 뒤 apply하고, 충돌 시 다른 변경을
-  덮어쓰지 않는다. stage·commit·push는 요청된 범위에서만 수행한다.
+- `HANDOFF.md`의 원래 목표, 현재 단계, 완료, 미완, 변경 파일, 검증 실행 결과, 현재 리스크,
+  Do-Not-Repeat, 다음 한 걸음을 빠짐없이 갱신한다.
+- 다음 한 걸음은 이어받는 에이전트가 원 대화 없이 바로 실행할 수 있도록 파일, 명령, 심볼, 이슈 같은
+  대상을 포함한 단 하나의 구체적 행동으로 쓴다. `TODO`, “계속 진행”, “관련 파일 확인” 같은
+  placeholder나 모호한 표현은 쓰지 않는다.
+- Agent Hub 도구로 갱신할 때는 prepare 결과의 `quality`, 전체 파일 SHA, base/proposed managed SHA를
+  확인한 뒤 apply한다. 전체 파일 SHA가 충돌했지만 managed SHA가 그대로면 직전
+  `base_managed_sha256`으로 재준비하고, managed SHA도 바뀌었으면 최신 패킷을 읽어 충돌을 조정한다.
+  apply에는 계속 전체 파일 SHA를 사용한다. stage·commit·push는 요청된 범위에서만 수행한다.
 - 검증된 변경과 `HANDOFF.md`를 같은 커밋에 포함한다. 그 최종 커밋 해시는 사용자 인계 메시지와 다음 `HANDOFF.md` 갱신 때 기록한다.
 
 

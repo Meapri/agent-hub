@@ -31,6 +31,25 @@ def _git_repo(path: Path) -> Path:
     return path
 
 
+def _valid_body(
+    label: str = "Current packet",
+    *,
+    next_step: str = "Run the focused `test_handoff.py` test file now.",
+) -> str:
+    return (
+        f"## {label}\n\n"
+        "- **원래 목표**: Keep project work resumable across agent harnesses.\n"
+        f"- **현재 단계**: {label} is ready for a fenced update.\n"
+        "- **완료**: The bounded implementation change is complete.\n"
+        "- **미완**: The final focused test run remains.\n"
+        "- **변경 파일**: `src/agent_hub/core/handoff.py`\n"
+        "- **검증 실행 결과**: Static validation completed without warnings.\n"
+        "- **현재 리스크**: A stale full-file SHA must still reject apply.\n"
+        "- **Do-Not-Repeat**: Do not overwrite an external HANDOFF edit.\n"
+        f"- **다음 한 걸음**: {next_step}\n"
+    )
+
+
 def test_handoff_discovery_respects_project_git_and_explicit_boundaries(tmp_path):
     repo = _git_repo(tmp_path / "repo")
     nested = repo / "packages" / "app"
@@ -125,7 +144,7 @@ def test_handoff_updates_reject_repository_metadata_targets(tmp_path):
     with pytest.raises(handoff.HandoffUnsafePath):
         handoff.prepare_handoff_update(
             repo,
-            body="# Must not become a Git ref\n",
+            body=_valid_body("Unsafe Git target"),
             file=target,
         )
     with pytest.raises(handoff.HandoffUnsafePath):
@@ -133,7 +152,9 @@ def test_handoff_updates_reject_repository_metadata_targets(tmp_path):
             repo,
             file=target,
             content=(
-                f"{handoff.START_MARKER}\n# Must not become a Git ref\n{handoff.END_MARKER}\n"
+                f"{handoff.START_MARKER}\n"
+                f"{_valid_body('Unsafe Git target')}"
+                f"{handoff.END_MARKER}\n"
             ),
             expected_sha256=None,
         )
@@ -198,6 +219,30 @@ def test_long_handoff_prefers_the_managed_current_packet(tmp_path):
     assert "obsolete action" not in snapshot["text"]
 
 
+def test_short_handoff_also_selects_only_the_managed_packet(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    managed = (
+        f"{handoff.START_MARKER}\n"
+        f"{_valid_body('Managed packet')}"
+        f"{handoff.END_MARKER}\n"
+    )
+    (repo / "HANDOFF.md").write_text(
+        f"# Historical preface\n\n{managed}\nLegacy suffix\n",
+        encoding="utf-8",
+    )
+
+    snapshot = handoff.load_handoff(
+        repo,
+        mode="required",
+        max_chars=10_000,
+    )
+
+    assert snapshot["extraction"] == "managed-block"
+    assert "Managed packet" in snapshot["text"]
+    assert "Historical preface" not in snapshot["text"]
+    assert "Legacy suffix" not in snapshot["text"]
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -219,10 +264,14 @@ def test_prepare_and_apply_handoff_update_use_markers_and_sha_cas(tmp_path):
 
     prepared = handoff.prepare_handoff_update(
         repo,
-        body="# Current work\n\n- next: run tests\n",
+        body=_valid_body("Current work"),
     )
 
     assert prepared["expected_sha256"] is None
+    assert prepared["base_managed_sha256"] is None
+    assert len(prepared["proposed_managed_sha256"]) == 64
+    assert prepared["quality"]["valid"] is True
+    assert prepared["quality"]["next_step_count"] == 1
     assert prepared["content"].count(handoff.START_MARKER) == 1
     assert prepared["content"].count(handoff.END_MARKER) == 1
     applied = handoff.apply_handoff_update(
@@ -232,11 +281,16 @@ def test_prepare_and_apply_handoff_update_use_markers_and_sha_cas(tmp_path):
         expected_sha256=prepared["expected_sha256"],
     )
     assert applied["sha256"] == prepared["proposed_sha256"]
+    assert applied["managed_sha256"] == prepared["proposed_managed_sha256"]
+    assert applied["quality"]["valid"] is True
     assert (repo / "HANDOFF.md").read_text(encoding="utf-8") == prepared["content"]
 
     replacement = handoff.prepare_handoff_update(
         repo,
-        body="# Updated work\n\n- next: commit\n",
+        body=_valid_body(
+            "Updated work",
+            next_step="Commit the verified `HANDOFF.md` update locally.",
+        ),
     )
     stale_expected = replacement["expected_sha256"]
     (repo / "HANDOFF.md").write_text(
@@ -254,17 +308,234 @@ def test_prepare_and_apply_handoff_update_use_markers_and_sha_cas(tmp_path):
     assert (repo / "HANDOFF.md").read_text(encoding="utf-8").endswith("external edit\n")
 
 
+def test_handoff_quality_accepts_canonical_fields_and_heading_sections():
+    canonical = handoff.validate_managed_body(_valid_body())
+    heading_packet = """
+# Heading packet
+
+## 원래 목표
+
+- Preserve a project handoff.
+
+## 현재 단계
+
+- The packet is being validated.
+
+## 완료
+
+- The parser implementation is complete.
+
+## 미완
+
+- The focused test remains.
+
+## 변경 파일
+
+- `src/agent_hub/core/handoff.py`
+
+## 검증
+
+- Static checks passed.
+
+## 위험
+
+- A stale SHA must fail.
+
+## 반복 금지
+
+- Do not overwrite an external edit.
+
+## 다음 한 걸음
+
+- Run the focused `test_handoff.py` test file now.
+"""
+
+    headings = handoff.validate_managed_body(heading_packet)
+
+    assert canonical["valid"] is True
+    assert headings["valid"] is True
+    assert headings["found_sections"] == list(handoff.REQUIRED_SECTIONS)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "# Missing packet\n",
+        _valid_body(next_step="TODO"),
+        _valid_body(next_step="코드를 적당히 계속 진행한다."),
+        _valid_body(next_step="관련 파일을 확인한다."),
+        _valid_body(next_step="관련 테스트를 실행한다."),
+        _valid_body(next_step="HANDOFF 문서를 검토한다."),
+        _valid_body().replace(
+            "- **현재 단계**: Current packet is ready for a fenced update.\n",
+            "- **현재 단계**:\n",
+        ),
+        _valid_body()
+        + "\n- **다음 한 걸음**: Run another `test_handoff.py` test now.\n",
+    ],
+)
+def test_handoff_quality_rejects_missing_placeholder_or_multiple_actions(body):
+    with pytest.raises(handoff.HandoffQualityError):
+        handoff.validate_managed_body(body)
+
+
+def test_handoff_quality_accepts_one_nested_next_step_item():
+    nested = _valid_body().replace(
+        "- **다음 한 걸음**: Run the focused `test_handoff.py` test file now.\n",
+        "- **다음 한 걸음**:\n"
+        "  - Run the focused `test_handoff.py` test file now.\n",
+    )
+
+    quality = handoff.validate_managed_body(nested)
+
+    assert quality["valid"] is True
+    assert quality["next_step_count"] == 1
+
+
+def test_apply_revalidates_the_exact_managed_body(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    prepared = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Prepared packet"),
+    )
+    tampered = prepared["content"].replace(
+        "- **미완**: The final focused test run remains.\n",
+        "",
+    )
+
+    with pytest.raises(handoff.HandoffQualityError):
+        handoff.apply_handoff_update(
+            repo,
+            file=prepared["target"],
+            content=tampered,
+            expected_sha256=prepared["expected_sha256"],
+        )
+
+    assert not (repo / "HANDOFF.md").exists()
+
+
+def test_first_managed_insert_preserves_existing_bytes_as_exact_prefix(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    existing = "# Historical notes   \n\n\n"
+    (repo / "HANDOFF.md").write_text(existing, encoding="utf-8")
+
+    prepared = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("First managed packet"),
+    )
+
+    assert prepared["content"].startswith(existing)
+    assert prepared["content"][: len(existing)] == existing
+
+
+def test_managed_sha_allows_safe_reprepare_but_rejects_managed_drift(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    initial = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Initial packet"),
+    )
+    handoff.apply_handoff_update(
+        repo,
+        file=initial["target"],
+        content=initial["content"],
+        expected_sha256=initial["expected_sha256"],
+    )
+    desired = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Desired packet"),
+    )
+    target = repo / "HANDOFF.md"
+    before_external = target.read_text(encoding="utf-8")
+    target.write_text(
+        "# External history\n\n" + before_external + "\nExternal suffix\n",
+        encoding="utf-8",
+    )
+    external = target.read_text(encoding="utf-8")
+    external_block = handoff._parse_managed_block(external)
+    assert external_block is not None
+    external_outside = (
+        external[: external_block.start],
+        external[external_block.end :],
+    )
+    with pytest.raises(handoff.HandoffRevisionConflict):
+        handoff.apply_handoff_update(
+            repo,
+            file=desired["target"],
+            content=desired["content"],
+            expected_sha256=desired["expected_sha256"],
+        )
+
+    reprepared = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Desired packet"),
+        base_managed_sha256=desired["base_managed_sha256"],
+    )
+
+    proposal_block = handoff._parse_managed_block(reprepared["content"])
+    assert proposal_block is not None
+    assert reprepared["proposed_managed_sha256"] == hashlib.sha256(
+        proposal_block.block.encode("utf-8")
+    ).hexdigest()
+    assert reprepared["base_managed_sha256"] == desired["base_managed_sha256"]
+    assert (
+        reprepared["content"][: proposal_block.start],
+        reprepared["content"][proposal_block.end :],
+    ) == external_outside
+
+    competing = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Competing packet"),
+    )
+    handoff.apply_handoff_update(
+        repo,
+        file=competing["target"],
+        content=competing["content"],
+        expected_sha256=competing["expected_sha256"],
+    )
+    with pytest.raises(handoff.HandoffManagedRevisionConflict):
+        handoff.prepare_handoff_update(
+            repo,
+            body=_valid_body("Stale desired packet"),
+            base_managed_sha256=desired["base_managed_sha256"],
+        )
+
+
+def test_explicit_null_managed_fence_detects_a_new_managed_packet(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    prepared = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("First packet"),
+        base_managed_sha256=None,
+    )
+    handoff.apply_handoff_update(
+        repo,
+        file=prepared["target"],
+        content=prepared["content"],
+        expected_sha256=prepared["expected_sha256"],
+    )
+
+    with pytest.raises(handoff.HandoffManagedRevisionConflict):
+        handoff.prepare_handoff_update(
+            repo,
+            body=_valid_body("Unexpected second packet"),
+            base_managed_sha256=None,
+        )
+
+
 def test_concurrent_handoff_applies_allow_only_one_sha_winner(tmp_path):
     repo = _git_repo(tmp_path / "repo")
-    first = handoff.prepare_handoff_update(repo, body="# Initial packet\n")
+    first = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Initial packet"),
+    )
     handoff.apply_handoff_update(
         repo,
         file=first["target"],
         content=first["content"],
         expected_sha256=first["expected_sha256"],
     )
-    left = handoff.prepare_handoff_update(repo, body="# Left packet\n")
-    right = handoff.prepare_handoff_update(repo, body="# Right packet\n")
+    left = handoff.prepare_handoff_update(repo, body=_valid_body("Left packet"))
+    right = handoff.prepare_handoff_update(repo, body=_valid_body("Right packet"))
 
     def apply(prepared):
         try:
@@ -289,14 +560,20 @@ def test_concurrent_handoff_applies_allow_only_one_sha_winner(tmp_path):
 
 def test_apply_rechecks_sha_after_writing_the_temporary_file(tmp_path, monkeypatch):
     repo = _git_repo(tmp_path / "repo")
-    initial = handoff.prepare_handoff_update(repo, body="# Initial packet\n")
+    initial = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Initial packet"),
+    )
     handoff.apply_handoff_update(
         repo,
         file=initial["target"],
         content=initial["content"],
         expected_sha256=initial["expected_sha256"],
     )
-    prepared = handoff.prepare_handoff_update(repo, body="# Agent Hub packet\n")
+    prepared = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Agent Hub packet"),
+    )
     target = repo / "HANDOFF.md"
     original_write = handoff._write_all
 
@@ -320,7 +597,10 @@ def test_apply_rechecks_sha_after_writing_the_temporary_file(tmp_path, monkeypat
 @pytest.mark.parametrize("replacement", ["symlink", "hardlink", "fifo"])
 def test_apply_rejects_untrusted_current_handoff_types(tmp_path, replacement):
     repo = _git_repo(tmp_path / "repo")
-    prepared = handoff.prepare_handoff_update(repo, body="# Safe packet\n")
+    prepared = handoff.prepare_handoff_update(
+        repo,
+        body=_valid_body("Safe packet"),
+    )
     target = repo / "HANDOFF.md"
     outside = tmp_path / "outside.md"
     outside.write_text("# Must stay unchanged\n", encoding="utf-8")
@@ -350,7 +630,7 @@ def test_prepare_defaults_to_a_project_local_handoff(tmp_path):
 
     prepared = handoff.prepare_handoff_update(
         project,
-        body="# App handoff\n\n- next: local work\n",
+        body=_valid_body("App handoff"),
     )
 
     assert prepared["target"] == str(project / "HANDOFF.md")
@@ -377,6 +657,9 @@ def test_handoff_tools_are_public_and_apply_requires_expected_sha(tmp_path):
         specs["agent_hub_prepare_handoff_update"]["inputSchema"]["properties"]["search"]["default"]
         == "project-only"
     )
+    assert "base_managed_sha256" in (
+        specs["agent_hub_prepare_handoff_update"]["inputSchema"]["properties"]
+    )
     assert specs["agent_hub_apply_handoff_update"]["annotations"]["idempotentHint"] is False
     assert specs["agent_hub_apply_handoff_update"]["annotations"]["destructiveHint"] is True
     apply_required = set(specs["agent_hub_apply_handoff_update"]["inputSchema"]["required"])
@@ -386,7 +669,11 @@ def test_handoff_tools_are_public_and_apply_requires_expected_sha(tmp_path):
         "agent_hub_apply_handoff_update",
         {
             "project_root": str(repo),
-            "content": (f"{handoff.START_MARKER}\n# packet\n{handoff.END_MARKER}\n"),
+            "content": (
+                f"{handoff.START_MARKER}\n"
+                f"{_valid_body('Missing fence packet')}"
+                f"{handoff.END_MARKER}\n"
+            ),
         },
     )
     assert missing_fence["success"] is False
