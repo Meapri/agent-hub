@@ -1064,6 +1064,7 @@ def test_adaptive_continue_releases_lease_after_unexpected_exception(tmp_path, m
 def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     specs = {item["name"]: item for item in operations.tool_definitions()}
     start_props = specs["agent_hub_start_workflow"]["inputSchema"]["properties"]
+    claim_props = specs["agent_hub_claim_run_action"]["inputSchema"]["properties"]
     continue_props = specs["agent_hub_continue_workflow"]["inputSchema"]["properties"]
     get_props = specs["agent_hub_get_run"]["inputSchema"]["properties"]
 
@@ -1071,6 +1072,8 @@ def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     assert continue_props["workflow_timeout"]["maximum"] == 290
     assert continue_props["max_waves_per_call"]["default"] == 1
     assert continue_props["expected_revision"]["minimum"] == 0
+    assert claim_props["action_id"]["pattern"] == "^[0-9a-f]{64}$"
+    assert continue_props["claim_token"]["pattern"] == "^[0-9a-f]{32}$"
     assert continue_props["run_id"]["pattern"] == "^[0-9a-f]{12}$"
     assert get_props["run_id"]["pattern"] == "^[0-9a-f]{12}$"
 
@@ -1196,7 +1199,7 @@ def test_workflow_catalog_and_schema_expose_adaptive_mode():
     assert planned["annotations"]["readOnlyHint"] is False
     assert "planner_provider" in planned["inputSchema"]["properties"]
     assert "models" in planned["inputSchema"]["properties"]
-    assert len(operations.tool_definitions()) == 30
+    assert len(operations.tool_definitions()) == 31
 
 
 def test_adaptive_review_requires_a_completed_result(tmp_path, monkeypatch):

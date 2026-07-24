@@ -124,6 +124,40 @@ def tool_definitions() -> List[Dict[str, Any]]:
             },
         },
         {
+            "name": "orchestrate_claim_next_action",
+            "description": (
+                "Claim the authoritative fixed provider action before dispatch. "
+                "The returned token must be submitted exactly once with the result."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "pattern": store.RUN_ID_PATTERN,
+                    },
+                    "expected_revision": {"type": "integer", "minimum": 0},
+                    "action_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                    },
+                    "lease_seconds": {
+                        "type": "number",
+                        "minimum": 5,
+                        "maximum": 600,
+                        "default": 320,
+                    },
+                    "handoff_drift_policy": {
+                        "type": "string",
+                        "enum": ["pause", "use-snapshot"],
+                        "default": "pause",
+                    },
+                },
+                "required": ["run_id", "expected_revision", "action_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "orchestrate_continue_recipe",
             "description": (
                 "Advance a persisted run after a leaf tool result. Pass run_id; an optional "
@@ -145,6 +179,18 @@ def tool_definitions() -> List[Dict[str, Any]]:
                         ),
                     },
                     "expected_revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                    },
+                    "action_id": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                    },
+                    "claim_token": {
+                        "type": "string",
+                        "pattern": store.CLAIM_TOKEN_PATTERN,
+                    },
+                    "base_revision": {
                         "type": "integer",
                         "minimum": 0,
                     },
@@ -390,6 +436,9 @@ _CONTROL_KEYS = frozenset(
         "run_id",
         "state",
         "expected_revision",
+        "action_id",
+        "claim_token",
+        "base_revision",
         "stage_id",
         "result_text",
         "leaf_result",
@@ -438,6 +487,18 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     auto_local=bool(arguments.get("auto_local", True)),
                 )
             )
+        if name == "orchestrate_claim_next_action":
+            claimed = runner.claim_next_action(
+                run_id=arguments.get("run_id"),
+                expected_revision=arguments.get("expected_revision"),
+                action_id=str(arguments.get("action_id") or ""),
+                lease_seconds=max(
+                    5.0,
+                    min(float(arguments.get("lease_seconds") or 320), 600.0),
+                ),
+                handoff_drift_policy=arguments.get("handoff_drift_policy"),
+            )
+            return _ok(claimed.public())
         if name == "orchestrate_continue_recipe":
             return _ok(
                 runner.continue_run(
@@ -454,6 +515,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     error=str(arguments.get("error") or ""),
                     auto_local=bool(arguments.get("auto_local", True)),
                     expected_revision=arguments.get("expected_revision"),
+                    action_id=str(arguments.get("action_id") or ""),
+                    claim_token=str(arguments.get("claim_token") or ""),
+                    base_revision=arguments.get("base_revision"),
                     handoff_drift_policy=arguments.get("handoff_drift_policy"),
                 )
             )

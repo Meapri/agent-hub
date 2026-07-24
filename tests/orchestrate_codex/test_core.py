@@ -233,6 +233,73 @@ def test_fixed_next_action_id_is_stable_and_revision_bound(tmp_path):
     assert rotated["next_action"]["expected_revision"] == 1
 
 
+def test_fixed_action_claim_fences_duplicate_dispatch_and_token_replay(tmp_path):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+    action = state["next_action"]
+    claimed = runner.claim_next_action(
+        run_id=state["run_id"],
+        expected_revision=state["store_revision"],
+        action_id=action["action_id"],
+        lease_seconds=60,
+    )
+    claim_payload = claimed.public()
+
+    assert claim_payload["action"]["tool"] == action["tool"]
+    assert claim_payload["base_revision"] == 0
+    assert claim_payload["claim_token"] not in json.dumps(runner.get_run(state["run_id"]))
+    with pytest.raises(store.RunLeaseActive):
+        runner.claim_next_action(
+            run_id=state["run_id"],
+            expected_revision=0,
+            action_id=action["action_id"],
+        )
+
+    completed = runner.continue_run(
+        run_id=state["run_id"],
+        action_id=action["action_id"],
+        claim_token=claim_payload["claim_token"],
+        base_revision=claim_payload["base_revision"],
+        result_text="done",
+        success=True,
+    )
+    assert completed["status"] == "completed"
+    assert completed["store_revision"] == 1
+
+    with pytest.raises(store.RunLeaseLost):
+        runner.continue_run(
+            run_id=state["run_id"],
+            action_id=action["action_id"],
+            claim_token=claim_payload["claim_token"],
+            base_revision=claim_payload["base_revision"],
+            result_text="replay",
+        )
+    assert runner.get_run(state["run_id"])["artifacts"]["draft"] == "done"
+
+
+def test_wrong_fixed_action_id_releases_claim_without_provider_state_change(tmp_path):
+    state = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hi"},
+        project_root=str(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match="action_id"):
+        runner.claim_next_action(
+            run_id=state["run_id"],
+            expected_revision=0,
+            action_id="f" * 64,
+        )
+
+    persisted = store.load_strict(state["run_id"])
+    assert persisted["store_revision"] == 0
+    assert "_lease" not in persisted
+    assert persisted["steps"][0]["status"] == "pending"
+
+
 def test_fixed_terminal_runs_are_immutable(tmp_path):
     completed = runner.start_run(
         "direct_chat",
@@ -1313,6 +1380,7 @@ def test_plan_binding_override():
 def test_mcp_tools():
     names = {t["name"] for t in tool_definitions()}
     assert "orchestrate_start_run" in names
+    assert "orchestrate_claim_next_action" in names
     assert "orchestrate_continue_recipe" in names
     listed = handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     assert listed["result"]["tools"]

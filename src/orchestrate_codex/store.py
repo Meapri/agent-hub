@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterator, List, Optional
 _ENV_DIR = "ORCHESTRATE_CODEX_STATE_DIR"
 RUN_ID_PATTERN = r"^[0-9a-f]{12}$"
 _RUN_ID_RE = re.compile(RUN_ID_PATTERN)
+CLAIM_TOKEN_PATTERN = r"^[0-9a-f]{32}$"
+_CLAIM_TOKEN_RE = re.compile(CLAIM_TOKEN_PATTERN)
 _LOCAL_LOCKS: Dict[str, Lock] = {}
 _LOCAL_LOCKS_GUARD = Lock()
 RUN_SUMMARY_SCHEMA = "run_summary_v1"
@@ -84,6 +86,12 @@ def validate_run_id(run_id: Any) -> str:
     if not isinstance(run_id, str) or _RUN_ID_RE.fullmatch(run_id) is None:
         raise ValueError("run_id must be exactly 12 lowercase hexadecimal characters")
     return run_id
+
+
+def validate_claim_token(token: Any) -> str:
+    if not isinstance(token, str) or _CLAIM_TOKEN_RE.fullmatch(token) is None:
+        raise ValueError("claim_token must be exactly 32 lowercase hexadecimal characters")
+    return token
 
 
 def _trusted_system_alias(path: Path, path_stat: os.stat_result) -> bool:
@@ -515,6 +523,46 @@ def commit_claim(claim: RunClaim, state: Dict[str, Any]) -> Dict[str, Any]:
         committed.pop("_lease", None)
         committed["store_revision"] = revision + 1
         return _write_state_to_dir(directory_fd, committed)
+
+
+def resume_claim(
+    run_id: str,
+    *,
+    token: str,
+    base_revision: int,
+) -> RunClaim:
+    """Reconstruct a claimed capability without exposing it through normal reads."""
+
+    validated = validate_run_id(run_id)
+    validated_token = validate_claim_token(token)
+    if isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision < 0:
+        raise ValueError("base_revision must be a non-negative integer")
+    with _locked_state_dir(validated) as directory_fd:
+        current = _read_state_from_dir(
+            directory_fd,
+            validated,
+            strict_owner=True,
+        )
+        revision = _current_revision(current)
+        active = current.get("_lease")
+        if (
+            not isinstance(active, dict)
+            or active.get("token") != validated_token
+            or active.get("base_revision") != base_revision
+            or revision != base_revision
+        ):
+            raise RunLeaseLost("run continuation lease was replaced or released")
+        try:
+            expires_at = float(active.get("expires_at"))
+        except (TypeError, ValueError) as exc:
+            raise RunPersistenceError("run lease expiry is invalid") from exc
+        return RunClaim(
+            run_id=validated,
+            token=validated_token,
+            base_revision=base_revision,
+            expires_at=expires_at,
+            state=current,
+        )
 
 
 def abort_claim(claim: RunClaim) -> Dict[str, Any]:

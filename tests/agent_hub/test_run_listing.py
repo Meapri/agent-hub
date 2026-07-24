@@ -147,3 +147,60 @@ def test_run_listing_cursor_is_bound_to_project(tmp_path, monkeypatch):
 
     assert result["success"] is False
     assert result["error"]["type"] == "ValueError"
+
+
+def test_canonical_action_claim_commits_once_without_token_leak(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    started = runner.start_run(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(project),
+    )
+    action = started["next_action"]
+
+    claimed = operations.dispatch_tool(
+        "agent_hub_claim_run_action",
+        {
+            "run_id": started["run_id"],
+            "expected_revision": started["store_revision"],
+            "action_id": action["action_id"],
+        },
+    )
+
+    assert claimed["success"] is True
+    token = claimed["data"]["claim_token"]
+    loaded = operations.dispatch_tool(
+        "agent_hub_get_run",
+        {"run_id": started["run_id"]},
+    )
+    assert token not in json.dumps(loaded)
+    assert "_lease" not in json.dumps(loaded)
+
+    completed = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {
+            "run_id": started["run_id"],
+            "action_id": action["action_id"],
+            "claim_token": token,
+            "base_revision": claimed["data"]["base_revision"],
+            "result_text": "done",
+            "success": True,
+        },
+    )
+    assert completed["success"] is True
+    assert completed["data"]["status"] == "completed"
+
+    replay = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {
+            "run_id": started["run_id"],
+            "action_id": action["action_id"],
+            "claim_token": token,
+            "base_revision": claimed["data"]["base_revision"],
+            "result_text": "replacement",
+        },
+    )
+    assert replay["success"] is False
+    assert replay["error"]["type"] == "run_lease_lost"

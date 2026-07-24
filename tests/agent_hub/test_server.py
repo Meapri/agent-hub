@@ -18,7 +18,7 @@ _OWNERS = [orchestrate, claude, grok, antigravity]
 def test_only_canonical_tools_are_public_or_callable():
     canonical = {t["name"] for t in operations.tool_definitions()}
     assert {t["name"] for t in server.tool_definitions()} == canonical
-    assert len(canonical) == 30
+    assert len(canonical) == 31
     assert set(server._REGISTRY) == canonical
 
     for old_name in (

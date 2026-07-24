@@ -281,4 +281,4 @@ def test_public_schema_exposes_parallel_and_gate_controls():
     assert props["max_concurrency"]["maximum"] == 4
     assert props["min_successes"]["default"] == 2
     assert props["consistency"]["required"] == ["decision_labels"]
-    assert len(operations.tool_definitions()) == 30
+    assert len(operations.tool_definitions()) == 31

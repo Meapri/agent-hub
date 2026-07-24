@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from hashlib import sha256
 import json
 import time
@@ -41,6 +42,24 @@ DEFAULT_WRITE_MAX_TOKENS = 65536
 DEFAULT_CHAT_MAX_TOKENS = 65536
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
+
+
+@dataclass(frozen=True)
+class FixedActionClaim:
+    store_claim: store.RunClaim
+    action: Dict[str, Any]
+    handoff_drift_policy: str
+
+    def public(self) -> Dict[str, Any]:
+        return {
+            "schema": "fixed_action_claim_v1",
+            "run_id": self.store_claim.run_id,
+            "action_id": self.action["action_id"],
+            "claim_token": self.store_claim.token,
+            "base_revision": self.store_claim.base_revision,
+            "expires_at": self.store_claim.expires_at,
+            "action": copy.deepcopy(self.action),
+        }
 
 
 def _load_handoff_snapshot(user_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -819,6 +838,171 @@ def _validate_fixed_run_state(state: Dict[str, Any]) -> None:
         raise ValueError("persisted run is not a fixed recipe run")
 
 
+def _handoff_policy(state: Dict[str, Any], override: str | None) -> str:
+    drift_policy = (
+        str(
+            override
+            or (state.get("user_args") or {}).get("handoff_drift_policy")
+            or "pause"
+        )
+        .strip()
+        .lower()
+    )
+    if drift_policy not in {"pause", "use-snapshot"}:
+        raise ValueError("handoff_drift_policy must be pause or use-snapshot")
+    return drift_policy
+
+
+def _apply_handoff_drift_policy(
+    state: Dict[str, Any],
+    *,
+    drift_policy: str,
+) -> Dict[str, Any]:
+    handoff_snapshot = state.get("_handoff_snapshot")
+    drift = handoff_state.check_drift(
+        handoff_snapshot if isinstance(handoff_snapshot, dict) else None
+    )
+    if drift.get("drifted") and drift_policy == "pause":
+        raise handoff_state.HandoffDrift(drift)
+    if drift.get("drifted"):
+        state["handoff_drift"] = drift
+        warnings = state.setdefault("warnings", [])
+        if "handoff_drift_using_snapshot" not in warnings:
+            warnings.append("handoff_drift_using_snapshot")
+    else:
+        state.pop("handoff_drift", None)
+    return drift
+
+
+def claim_next_action(
+    *,
+    run_id: str,
+    expected_revision: int | None = None,
+    action_id: str = "",
+    lease_seconds: float = RUN_LEASE_SECONDS,
+    handoff_drift_policy: str | None = None,
+) -> FixedActionClaim:
+    """Claim the authoritative fixed action before invoking its provider."""
+
+    claim = store.claim(
+        store.validate_run_id(run_id),
+        expected_revision=expected_revision,
+        lease_seconds=lease_seconds,
+    )
+    try:
+        _validate_fixed_run_state(claim.state)
+        if claim.state.get("status") in {"completed", "failed", "cancelled", "archived"}:
+            raise ValueError("terminal run has no claimable action")
+        drift_policy = _handoff_policy(claim.state, handoff_drift_policy)
+        _apply_handoff_drift_policy(
+            copy.deepcopy(claim.state),
+            drift_policy=drift_policy,
+        )
+        action_state = copy.deepcopy(claim.state)
+        action = _next_action(action_state)
+        if action.get("type") != "call_tool":
+            raise ValueError("current fixed step is not a provider action")
+        current_action_id = str(action.get("action_id") or "")
+        if action_id and action_id != current_action_id:
+            raise ValueError("action_id does not match the authoritative next action")
+        action["expected_revision"] = claim.base_revision
+        return FixedActionClaim(
+            store_claim=claim,
+            action=action,
+            handoff_drift_policy=drift_policy,
+        )
+    except Exception:
+        try:
+            store.abort_claim(claim)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def resume_action_claim(
+    *,
+    run_id: str,
+    claim_token: str,
+    base_revision: int,
+    action_id: str,
+    handoff_drift_policy: str | None = None,
+) -> FixedActionClaim:
+    claim = store.resume_claim(
+        store.validate_run_id(run_id),
+        token=claim_token,
+        base_revision=base_revision,
+    )
+    try:
+        _validate_fixed_run_state(claim.state)
+        drift_policy = _handoff_policy(claim.state, handoff_drift_policy)
+        action = _next_action(copy.deepcopy(claim.state))
+        if action.get("type") != "call_tool" or action.get("action_id") != action_id:
+            raise ValueError("action_id does not match the claimed next action")
+        action["expected_revision"] = claim.base_revision
+        return FixedActionClaim(
+            store_claim=claim,
+            action=action,
+            handoff_drift_policy=drift_policy,
+        )
+    except Exception:
+        try:
+            store.abort_claim(claim)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def abort_action_claim(claim: FixedActionClaim) -> Dict[str, Any]:
+    released = store.abort_claim(claim.store_claim)
+    _RUNS[claim.store_claim.run_id] = released
+    return _public_state(released)
+
+
+def commit_claimed_action(
+    claim: FixedActionClaim,
+    *,
+    result_text: str = "",
+    leaf_result: Optional[Dict[str, Any]] = None,
+    success: bool = True,
+    error: str = "",
+    auto_local: bool = True,
+) -> Dict[str, Any]:
+    """Commit one provider result only while its action lease still matches."""
+
+    try:
+        working_state = copy.deepcopy(claim.store_claim.state)
+        current_action = _next_action(copy.deepcopy(working_state))
+        if (
+            current_action.get("type") != "call_tool"
+            or current_action.get("action_id") != claim.action.get("action_id")
+        ):
+            raise ValueError("claimed action no longer matches the run state")
+        _apply_handoff_drift_policy(
+            working_state,
+            drift_policy=claim.handoff_drift_policy,
+        )
+        advanced = _advance_run_state(
+            working_state,
+            stage_id=str(claim.action.get("stage_id") or ""),
+            result_text=result_text,
+            leaf_result=leaf_result,
+            success=success,
+            error=error,
+            auto_local=auto_local,
+        )
+        advanced["updated_at"] = time.time()
+        committed = store.commit_claim(claim.store_claim, advanced)
+    except Exception:
+        try:
+            store.abort_claim(claim.store_claim)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    _RUNS[claim.store_claim.run_id] = committed
+    _prune_runs()
+    return _public_state(committed)
+
+
 def continue_run(
     *,
     run_id: str = "",
@@ -830,10 +1014,41 @@ def continue_run(
     error: str = "",
     auto_local: bool = True,
     expected_revision: int | None = None,
+    action_id: str = "",
+    claim_token: str = "",
+    base_revision: int | None = None,
     handoff_drift_policy: str | None = None,
 ) -> Dict[str, Any]:
     if isinstance(state, dict) and "_handoff_snapshot" in state:
         raise ValueError("_handoff_snapshot is reserved for persisted internal state")
+    claim_fields = bool(action_id or claim_token or base_revision is not None)
+    if claim_fields:
+        if state is not None:
+            raise ValueError("claimed continuation cannot include echoed state")
+        if not action_id or not claim_token or base_revision is None:
+            raise ValueError(
+                "action_id, claim_token, and base_revision are required together"
+            )
+        if expected_revision is not None and expected_revision != base_revision:
+            raise ValueError("expected_revision does not match base_revision")
+        claimed = resume_action_claim(
+            run_id=run_id,
+            claim_token=claim_token,
+            base_revision=base_revision,
+            action_id=action_id,
+            handoff_drift_policy=handoff_drift_policy,
+        )
+        if stage_id and stage_id != claimed.action.get("stage_id"):
+            abort_action_claim(claimed)
+            raise ValueError("stage_id does not match the claimed action")
+        return commit_claimed_action(
+            claimed,
+            result_text=result_text,
+            leaf_result=leaf_result,
+            success=success,
+            error=error,
+            auto_local=auto_local,
+        )
     state_run_id = ""
     state_revision = None
     if state is not None:
@@ -881,32 +1096,12 @@ def continue_run(
             released = store.abort_claim(claim)
             _RUNS[persistent_run_id] = released
             return _public_state(released)
-        drift_policy = (
-            str(
-                handoff_drift_policy
-                or (claim.state.get("user_args") or {}).get("handoff_drift_policy")
-                or "pause"
-            )
-            .strip()
-            .lower()
-        )
-        if drift_policy not in {"pause", "use-snapshot"}:
-            raise ValueError("handoff_drift_policy must be pause or use-snapshot")
-        handoff_snapshot = claim.state.get("_handoff_snapshot")
-        drift = handoff_state.check_drift(
-            handoff_snapshot if isinstance(handoff_snapshot, dict) else None
-        )
-        if drift.get("drifted") and drift_policy == "pause":
-            store.abort_claim(claim)
-            raise handoff_state.HandoffDrift(drift)
+        drift_policy = _handoff_policy(claim.state, handoff_drift_policy)
         working_state = copy.deepcopy(claim.state)
-        if drift.get("drifted"):
-            working_state["handoff_drift"] = drift
-            warnings = working_state.setdefault("warnings", [])
-            if "handoff_drift_using_snapshot" not in warnings:
-                warnings.append("handoff_drift_using_snapshot")
-        else:
-            working_state.pop("handoff_drift", None)
+        _apply_handoff_drift_policy(
+            working_state,
+            drift_policy=drift_policy,
+        )
         advanced = _advance_run_state(
             working_state,
             stage_id=stage_id,

@@ -2217,6 +2217,8 @@ def _continue_adaptive_workflow(
 def _run_store_error_response(
     run_id: str,
     error: store.RunStoreError,
+    *,
+    operation: str = "continue_workflow",
 ) -> Dict[str, Any]:
     if isinstance(error, store.RunLeaseActive):
         error_type = "run_lease_active"
@@ -2250,7 +2252,7 @@ def _run_store_error_response(
         **details,
     }
     return envelope(
-        "continue_workflow",
+        operation,
         {
             "success": False,
             "text": str(error),
@@ -2362,6 +2364,9 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             error=str(args.get("error") or ""),
             auto_local=bool(args.get("auto_local", True)),
             expected_revision=expected_revision,
+            action_id=str(args.get("action_id") or ""),
+            claim_token=str(args.get("claim_token") or ""),
+            base_revision=args.get("base_revision"),
             handoff_drift_policy=args.get("handoff_drift_policy"),
         )
     except handoff_state.HandoffDrift as exc:
@@ -2384,6 +2389,33 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     return envelope(
         "continue_workflow",
         {"success": state.get("status") != "failed", "text": "Workflow advanced.", **state},
+    )
+
+
+def _claim_run_action(args: Dict[str, Any]) -> Dict[str, Any]:
+    run_id = store.validate_run_id(args.get("run_id"))
+    try:
+        claimed = runner.claim_next_action(
+            run_id=run_id,
+            expected_revision=args.get("expected_revision"),
+            action_id=str(args.get("action_id") or ""),
+            lease_seconds=max(5.0, min(float(args.get("lease_seconds") or 320), 600.0)),
+            handoff_drift_policy=args.get("handoff_drift_policy"),
+        )
+    except store.RunStoreError as exc:
+        return _run_store_error_response(
+            run_id,
+            exc,
+            operation="claim_run_action",
+        )
+    return envelope(
+        "claim_run_action",
+        {
+            "success": True,
+            "text": "Fixed workflow action claimed before provider dispatch.",
+            **claimed.public(),
+        },
+        success=True,
     )
 
 
@@ -3188,6 +3220,37 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         read_only=False,
     ),
     _spec(
+        "agent_hub_claim_run_action",
+        "Claim Run Action",
+        "Claim one fixed provider action before dispatch and return a fenced commit token.",
+        _object(
+            {
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                },
+                "expected_revision": {"type": "integer", "minimum": 0},
+                "action_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                },
+                "lease_seconds": {
+                    "type": "number",
+                    "minimum": 5,
+                    "maximum": 600,
+                    "default": 320,
+                },
+                "handoff_drift_policy": {
+                    "type": "string",
+                    "enum": ["pause", "use-snapshot"],
+                    "default": "pause",
+                },
+            },
+            required=("run_id", "expected_revision", "action_id"),
+        ),
+        read_only=False,
+    ),
+    _spec(
         "agent_hub_continue_workflow",
         "Continue Workflow",
         "Advance a fixed run with a leaf result or execute the next adaptive wave.",
@@ -3211,6 +3274,23 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                         "Optional CAS fence for persisted state. A stale revision is "
                         "rejected before any provider call."
                     ),
+                },
+                "action_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "Claimed fixed action id.",
+                },
+                "claim_token": {
+                    "type": "string",
+                    "pattern": store.CLAIM_TOKEN_PATTERN,
+                    "description": (
+                        "Capability returned by agent_hub_claim_run_action. "
+                        "Never persist it in HANDOFF or logs."
+                    ),
+                },
+                "base_revision": {
+                    "type": "integer",
+                    "minimum": 0,
                 },
                 "stage_id": {"type": "string"},
                 "result_text": {"type": "string"},
@@ -3397,6 +3477,7 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_get_workflow": _get_workflow,
     "agent_hub_plan_workflow": _plan_workflow,
     "agent_hub_start_workflow": _start_workflow,
+    "agent_hub_claim_run_action": _claim_run_action,
     "agent_hub_continue_workflow": _continue_workflow,
     "agent_hub_list_runs": _list_runs,
     "agent_hub_get_run": _get_run,

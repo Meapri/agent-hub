@@ -123,72 +123,101 @@ def run_auto(
                         {"stage": stage, "tool": tool, "ok": False, "error": "max_leaf_calls"}
                     )
                     continue
-                if client_resolver is not None:
-                    client = client_resolver(tool)
-                    err = "" if client is not None else f"no in-process provider for tool: {tool}"
-                else:
-                    client, err = _get_client(tool, reg, clients, per_call_timeout)
-                if client is None:
-                    # Unconfigured/unspawnable leaf → report as a leaf failure so the
-                    # runner rotates to the next fallback tool.
-                    state = runner.continue_run(
-                        run_id=state["run_id"],
-                        stage_id=stage,
-                        success=False,
-                        error=err,
-                        expected_revision=expected_revision,
-                    )
-                    trace.append({"stage": stage, "tool": tool, "ok": False, "error": err})
-                    continue
-                calls += 1
-                try:
-                    leaf_result = _call_result(
-                        client,
-                        tool, na.get("arguments") or {}, timeout=per_call_timeout
-                    )
-                except LeafError as exc:
-                    leaf_result = results.OperationResult.from_result(
-                        {},
-                        success=False,
-                        text=str(exc),
-                        error={"type": "leaf_transport_error", "message": str(exc)},
-                    )
-                ok, text = leaf_result.success, leaf_result.text
-                # A leaf may hand back a transport/backend error (HTTP 503, connection
-                # refused) as "successful" text — treat that as a failure so the runner
-                # rotates to a fallback instead of using the error string as content.
-                soft_error = ok and errors.looks_like_leaf_error(text)
-                if soft_error:
-                    leaf_result = results.OperationResult.from_result(
-                        leaf_result.as_dict(),
-                        success=False,
-                        text=text,
-                        error={"type": "soft_leaf_error", "message": text},
-                    )
-                    ok = False
-                trace.append(
-                    {
-                        "stage": stage,
-                        "tool": tool,
-                        "ok": ok,
-                        "provider": leaf_result.provider,
-                        "model": leaf_result.model,
-                        "usage": leaf_result.usage,
-                        "finish_reason": leaf_result.finish_reason,
-                        "warnings": list(leaf_result.warnings),
-                        "result_chars": len(text),
-                        "soft_error": soft_error,
-                    }
-                )
-                state = runner.continue_run(
+                claimed = runner.claim_next_action(
                     run_id=state["run_id"],
-                    stage_id=stage,
-                    result_text=text if ok else "",
-                    leaf_result=leaf_result.as_dict(),
-                    success=ok,
-                    error="" if ok else text,
                     expected_revision=expected_revision,
+                    action_id=str(na.get("action_id") or ""),
+                    lease_seconds=max(
+                        runner.RUN_LEASE_SECONDS,
+                        float(per_call_timeout) + 30.0,
+                    ),
                 )
+                committed = False
+                try:
+                    action = claimed.action
+                    stage = str(action.get("stage_id") or "")
+                    tool = str(action.get("tool") or "")
+                    if client_resolver is not None:
+                        client = client_resolver(tool)
+                        err = (
+                            ""
+                            if client is not None
+                            else f"no in-process provider for tool: {tool}"
+                        )
+                    else:
+                        client, err = _get_client(
+                            tool,
+                            reg,
+                            clients,
+                            per_call_timeout,
+                        )
+                    if client is None:
+                        leaf_result = results.OperationResult.from_result(
+                            {},
+                            success=False,
+                            text=err,
+                            error={"type": "leaf_unavailable", "message": err},
+                        )
+                    else:
+                        calls += 1
+                        try:
+                            leaf_result = _call_result(
+                                client,
+                                tool,
+                                action.get("arguments") or {},
+                                timeout=per_call_timeout,
+                            )
+                        except LeafError as exc:
+                            leaf_result = results.OperationResult.from_result(
+                                {},
+                                success=False,
+                                text=str(exc),
+                                error={
+                                    "type": "leaf_transport_error",
+                                    "message": str(exc),
+                                },
+                            )
+                    ok, text = leaf_result.success, leaf_result.text
+                    # A leaf may hand back a transport/backend error (HTTP 503,
+                    # connection refused) as successful text. Rotate instead.
+                    soft_error = ok and errors.looks_like_leaf_error(text)
+                    if soft_error:
+                        leaf_result = results.OperationResult.from_result(
+                            leaf_result.as_dict(),
+                            success=False,
+                            text=text,
+                            error={"type": "soft_leaf_error", "message": text},
+                        )
+                        ok = False
+                    trace.append(
+                        {
+                            "stage": stage,
+                            "tool": tool,
+                            "action_id": action.get("action_id"),
+                            "ok": ok,
+                            "provider": leaf_result.provider,
+                            "model": leaf_result.model,
+                            "usage": leaf_result.usage,
+                            "finish_reason": leaf_result.finish_reason,
+                            "warnings": list(leaf_result.warnings),
+                            "result_chars": len(text),
+                            "soft_error": soft_error,
+                        }
+                    )
+                    state = runner.commit_claimed_action(
+                        claimed,
+                        result_text=text if ok else "",
+                        leaf_result=leaf_result.as_dict(),
+                        success=ok,
+                        error="" if ok else text,
+                    )
+                    committed = True
+                finally:
+                    if not committed:
+                        try:
+                            runner.abort_action_claim(claimed)
+                        except Exception:  # noqa: BLE001
+                            pass
                 continue
             # local / continue: advance the state machine (local stages auto-run)
             state = runner.continue_run(

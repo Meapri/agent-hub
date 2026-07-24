@@ -119,6 +119,43 @@ def test_broker_accepts_legacy_tuple_only_client(tmp_path):
     assert out["state"]["steps"][0]["result"]["schema"] == results.RESULT_SCHEMA
 
 
+def test_broker_claims_action_before_provider_dispatch(tmp_path):
+    observed = []
+
+    class InspectingClient:
+        def call_tool_result(self, tool, arguments, *, timeout=None):
+            run_id = runner.store.list_run_ids()[0]
+            persisted = runner.store.load_strict(run_id)
+            observed.append(
+                {
+                    "tool": tool,
+                    "arguments": arguments,
+                    "lease": persisted.get("_lease"),
+                }
+            )
+            return results.OperationResult.from_result(
+                {
+                    "success": True,
+                    "text": "claimed answer",
+                    "provider": "mock",
+                    "model": "mock-model",
+                }
+            )
+
+    out = broker.run_auto(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(tmp_path),
+        client_resolver=lambda _tool: InspectingClient(),
+    )
+
+    assert out["ok"] is True
+    assert len(observed) == 1
+    assert observed[0]["lease"]["base_revision"] == 0
+    assert out["trace"][0]["action_id"]
+    assert "_lease" not in runner.store.load_strict(out["run_id"])
+
+
 def test_structured_result_redacts_secrets_and_bounds_metadata():
     raw = {
         "content": [{"type": "text", "text": "Bearer secret-token"}],
