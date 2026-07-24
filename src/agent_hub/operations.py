@@ -2351,6 +2351,9 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             state=supplied_state,
             stage_id=str(args.get("stage_id") or ""),
             result_text=str(args.get("result_text") or ""),
+            leaf_result=args.get("leaf_result")
+            if isinstance(args.get("leaf_result"), dict)
+            else None,
             success=bool(args.get("success", True)),
             error=str(args.get("error") or ""),
             auto_local=bool(args.get("auto_local", True)),
@@ -3185,6 +3188,14 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                 },
                 "stage_id": {"type": "string"},
                 "result_text": {"type": "string"},
+                "leaf_result": {
+                    "type": "object",
+                    "description": (
+                        "Optional provider-neutral result metadata. Unknown or sensitive "
+                        "fields are discarded before persistence."
+                    ),
+                    "additionalProperties": True,
+                },
                 "success": {"type": "boolean", "default": True},
                 "error": {"type": "string"},
                 "auto_local": {"type": "boolean", "default": True},

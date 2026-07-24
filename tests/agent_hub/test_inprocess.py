@@ -33,3 +33,30 @@ def test_inprocess_ok_result_interpreted():
     ok, text = InProcessLeafClient(grok_provider).call_tool("grok_codex_consent_status", {})
     assert ok is True
     assert text
+
+
+def test_inprocess_structured_result_is_preserved():
+    class Owner:
+        def call(self, _tool, _arguments):
+            return {
+                "content": [{"type": "text", "text": "answer"}],
+                "structuredContent": {
+                    "success": True,
+                    "text": "answer",
+                    "provider": "gemini",
+                    "model": "gemini-test",
+                    "usage": {"total_tokens": 7},
+                    "warnings": ["notice"],
+                    "diagnostics": {"session_id": "drop-me"},
+                },
+                "isError": False,
+            }
+
+    result = InProcessLeafClient(Owner()).call_tool_result("chat", {})
+
+    assert result.success is True
+    assert result.provider == "gemini"
+    assert result.model == "gemini-test"
+    assert result.usage == {"total_tokens": 7}
+    assert result.warnings == ("notice",)
+    assert "drop-me" not in str(result.as_dict())

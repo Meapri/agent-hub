@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from agent_hub import provider_registry
 from agent_hub.core import handoff as handoff_state
 
-from . import __version__, catalog, errors, gather, policy, recipes, store, verify
+from . import __version__, catalog, errors, gather, policy, recipes, results, store, verify
 
 # capability → ordered fallback tools (first is primary unless bindings override)
 FALLBACK_CHAINS: Dict[str, List[str]] = {
@@ -672,6 +672,7 @@ def _advance_run_state(
     *,
     stage_id: str,
     result_text: str,
+    leaf_result: Optional[Dict[str, Any]],
     success: bool,
     error: str,
     auto_local: bool,
@@ -698,6 +699,32 @@ def _advance_run_state(
         if st.get("cursor", 0) >= len(st["steps"]) and st.get("status") == "running":
             st["status"] = "completed"
         return st
+
+    if isinstance(leaf_result, dict) and isinstance(leaf_result.get("success"), bool):
+        if bool(leaf_result["success"]) != bool(success):
+            raise ValueError("leaf_result.success does not match success")
+    normalized_result = results.OperationResult.from_result(
+        leaf_result or {},
+        success=success,
+        text=result_text,
+        error=error or None,
+    )
+    result_text = normalized_result.text
+    success = normalized_result.success
+    state_result = normalized_result.as_state_dict()
+    step["result"] = state_result
+    attempt_results = step.setdefault("attempt_results", [])
+    if not isinstance(attempt_results, list):
+        attempt_results = []
+        step["attempt_results"] = attempt_results
+    attempt_results.append(
+        {
+            **state_result,
+            "tool": str(step.get("tool") or ""),
+            "attempt_index": int(step.get("tool_attempt_index") or 0),
+        }
+    )
+    del attempt_results[:-max(1, len(step.get("fallback_tools") or []) or 1)]
 
     if success:
         step["status"] = "completed"
@@ -762,6 +789,7 @@ def continue_run(
     state: Optional[Dict[str, Any]] = None,
     stage_id: str = "",
     result_text: str = "",
+    leaf_result: Optional[Dict[str, Any]] = None,
     success: bool = True,
     error: str = "",
     auto_local: bool = True,
@@ -847,6 +875,7 @@ def continue_run(
             working_state,
             stage_id=stage_id,
             result_text=result_text,
+            leaf_result=leaf_result,
             success=success,
             error=error,
             auto_local=auto_local,

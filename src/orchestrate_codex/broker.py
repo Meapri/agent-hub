@@ -13,11 +13,27 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import catalog, errors
 from . import leaves as leaves_mod
-from . import runner
+from . import results, runner
 from .leaf_client import LeafClient, LeafError
 
 DEFAULT_MAX_LEAF_CALLS = 24
 DEFAULT_PER_CALL_TIMEOUT = 180.0
+
+
+def _call_result(client: Any, tool: str, arguments: Dict[str, Any], timeout: float):
+    structured = getattr(client, "call_tool_result", None)
+    if callable(structured):
+        return structured(tool, arguments, timeout=timeout)
+    legacy = client.call_tool(tool, arguments, timeout=timeout)
+    if isinstance(legacy, results.OperationResult):
+        return legacy
+    ok, text = legacy
+    return results.OperationResult.from_result(
+        {},
+        success=bool(ok),
+        text=str(text or ""),
+        error=None if ok else str(text or "leaf failed"),
+    )
 
 
 def _matched_key(tool: str, reg: Dict[str, Dict[str, Any]]) -> Optional[str]:
@@ -126,22 +142,40 @@ def run_auto(
                     continue
                 calls += 1
                 try:
-                    ok, text = client.call_tool(
+                    leaf_result = _call_result(
+                        client,
                         tool, na.get("arguments") or {}, timeout=per_call_timeout
                     )
                 except LeafError as exc:
-                    ok, text = False, str(exc)
+                    leaf_result = results.OperationResult.from_result(
+                        {},
+                        success=False,
+                        text=str(exc),
+                        error={"type": "leaf_transport_error", "message": str(exc)},
+                    )
+                ok, text = leaf_result.success, leaf_result.text
                 # A leaf may hand back a transport/backend error (HTTP 503, connection
                 # refused) as "successful" text — treat that as a failure so the runner
                 # rotates to a fallback instead of using the error string as content.
                 soft_error = ok and errors.looks_like_leaf_error(text)
                 if soft_error:
+                    leaf_result = results.OperationResult.from_result(
+                        leaf_result.as_dict(),
+                        success=False,
+                        text=text,
+                        error={"type": "soft_leaf_error", "message": text},
+                    )
                     ok = False
                 trace.append(
                     {
                         "stage": stage,
                         "tool": tool,
                         "ok": ok,
+                        "provider": leaf_result.provider,
+                        "model": leaf_result.model,
+                        "usage": leaf_result.usage,
+                        "finish_reason": leaf_result.finish_reason,
+                        "warnings": list(leaf_result.warnings),
                         "result_chars": len(text),
                         "soft_error": soft_error,
                     }
@@ -150,6 +184,7 @@ def run_auto(
                     run_id=state["run_id"],
                     stage_id=stage,
                     result_text=text if ok else "",
+                    leaf_result=leaf_result.as_dict(),
                     success=ok,
                     error="" if ok else text,
                     expected_revision=expected_revision,

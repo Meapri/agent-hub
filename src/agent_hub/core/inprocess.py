@@ -2,7 +2,7 @@
 
 Replaces subprocess spawn + JSON-RPC with a direct call to the owning provider
 adapter, then reuses the leaf_client result interpretation so the broker sees an
-identical ``(ok, text)``. CRITICAL invariant: consent is enforced *inside* each
+identical structured result. CRITICAL invariant: consent is enforced *inside* each
 adapter/dispatch handler, so an in-process orchestrated call has NO privileged
 bypass — a revoked-consent leaf tool still fails.
 """
@@ -14,9 +14,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from agent_hub import provider_registry
 from orchestrate_codex.leaf_client import _interpret_result
+from orchestrate_codex.results import OperationResult
+
 
 class InProcessLeafClient:
-    """Same call_tool(name, args) -> (ok, text) contract as leaf_client.LeafClient."""
+    """Same legacy and structured contracts as ``leaf_client.LeafClient``."""
 
     def __init__(self, owner: Any) -> None:
         self._owner = owner
@@ -24,10 +26,21 @@ class InProcessLeafClient:
     def call_tool(
         self, tool: str, arguments: Dict[str, Any], *, timeout: Optional[float] = None
     ) -> Tuple[bool, str]:
+        result = self.call_tool_result(tool, arguments, timeout=timeout)
+        return result.success, result.text
+
+    def call_tool_result(
+        self, tool: str, arguments: Dict[str, Any], *, timeout: Optional[float] = None
+    ) -> OperationResult:
         try:
             result = self._owner.call(tool, arguments or {})
         except Exception as exc:  # noqa: BLE001 — a raised tool/consent error maps to (ok=False),
-            return False, str(exc)  # exactly as a subprocess leaf's JSON-RPC error would.
+            return OperationResult.from_result(
+                {},
+                success=False,
+                text=str(exc),
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
         return _interpret_result(result)
 
 

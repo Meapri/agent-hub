@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from .results import OperationResult
+
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
 
@@ -161,7 +163,14 @@ class LeafClient:
     def call_tool(
         self, tool: str, arguments: Dict[str, Any], *, timeout: Optional[float] = None
     ) -> Tuple[bool, str]:
-        """Return (ok, text). ok=False means a tool-level error (not transport)."""
+        """Compatibility API returning ``(ok, text)``."""
+        result = self.call_tool_result(tool, arguments, timeout=timeout)
+        return result.success, result.text
+
+    def call_tool_result(
+        self, tool: str, arguments: Dict[str, Any], *, timeout: Optional[float] = None
+    ) -> OperationResult:
+        """Return the bounded structured provider result."""
         resp = self._request(
             "tools/call",
             {"name": tool, "arguments": arguments or {}},
@@ -169,17 +178,23 @@ class LeafClient:
         )
         if "error" in resp:
             err = resp["error"] or {}
-            return False, str(err.get("message") or err)
+            message = str(err.get("message") or err)
+            return OperationResult.from_result(
+                {},
+                success=False,
+                text=message,
+                error={
+                    "type": "json_rpc_error",
+                    "code": err.get("code"),
+                    "message": message,
+                },
+            )
         result = resp.get("result")
         return _interpret_result(result)
 
 
-def _interpret_result(result: Any) -> Tuple[bool, str]:
-    if not isinstance(result, dict):
-        return True, str(result or "")
-    text = _extract_text(result)
-    is_error = bool(result.get("isError")) or result.get("success") is False
-    return (not is_error), text
+def _interpret_result(result: Any) -> OperationResult:
+    return OperationResult.from_result(result)
 
 
 def _extract_text(result: Dict[str, Any]) -> str:

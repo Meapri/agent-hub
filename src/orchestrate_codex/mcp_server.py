@@ -155,6 +155,14 @@ def tool_definitions() -> List[Dict[str, Any]]:
                     },
                     "stage_id": {"type": "string"},
                     "result_text": {"type": "string"},
+                    "leaf_result": {
+                        "type": "object",
+                        "description": (
+                            "Optional provider-neutral result metadata. Unknown or sensitive "
+                            "fields are discarded before persistence."
+                        ),
+                        "additionalProperties": True,
+                    },
                     "success": {"type": "boolean", "default": True},
                     "error": {"type": "string"},
                     "auto_local": {"type": "boolean", "default": True},
@@ -384,6 +392,7 @@ _CONTROL_KEYS = frozenset(
         "expected_revision",
         "stage_id",
         "result_text",
+        "leaf_result",
         "success",
         "error",
         "handoff_drift_policy",
@@ -438,6 +447,9 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     else None,
                     stage_id=str(arguments.get("stage_id") or ""),
                     result_text=str(arguments.get("result_text") or ""),
+                    leaf_result=arguments.get("leaf_result")
+                    if isinstance(arguments.get("leaf_result"), dict)
+                    else None,
                     success=bool(arguments.get("success", True)),
                     error=str(arguments.get("error") or ""),
                     auto_local=bool(arguments.get("auto_local", True)),

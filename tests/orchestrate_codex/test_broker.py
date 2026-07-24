@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from orchestrate_codex import broker, leaf_client, leaves
+from orchestrate_codex import broker, leaf_client, leaves, results, runner
 
 _MOCK = str(Path(__file__).resolve().parent / "mock_leaf.py")
 
@@ -26,6 +26,17 @@ def test_leaf_client_roundtrip():
         ok, text = c.call_tool("mock_chat", {"prompt": "hi"})
         assert ok is True
         assert "MOCK[mock_chat]" in text and "hi" in text
+        structured = c.call_tool_result("mock_chat", {"prompt": "again"})
+        assert structured.provider == "mock"
+        assert structured.model == "mock-model"
+        assert structured.usage == {"prompt_tokens": 3, "completion_tokens": 2}
+        assert structured.finish_reason == "stop"
+        assert structured.warnings == ("mock-warning",)
+        assert structured.artifacts == ({"name": "mock.txt", "sha256": "a" * 64},)
+        assert structured.provenance == {
+            "policy_mode": "auto",
+            "request_sha256": "b" * 64,
+        }
 
 
 def test_broker_runs_direct_chat_end_to_end(tmp_path):
@@ -39,6 +50,18 @@ def test_broker_runs_direct_chat_end_to_end(tmp_path):
     assert out["status"] == "completed"
     assert out["leaf_calls"] == 1
     assert "MOCK[claude_codex_chat]" in out["artifact"]
+    persisted = out["state"]["steps"][0]
+    assert persisted["result"]["schema"] == results.RESULT_SCHEMA
+    assert persisted["result"]["provider"] == "mock"
+    assert persisted["result"]["model"] == "mock-model"
+    assert persisted["result"]["text_ref"] == "result_text"
+    assert "text" not in persisted["result"]
+    assert "diagnostics" not in json.dumps(persisted)
+    assert "must-not-persist" not in json.dumps(persisted)
+    assert out["trace"][0]["usage"]["prompt_tokens"] == 3
+    runner._RUNS.clear()
+    restored = runner.get_run(out["run_id"])
+    assert restored["steps"][0]["result"]["usage"]["completion_tokens"] == 2
 
 
 def test_broker_rotates_on_leaf_failure(tmp_path):
@@ -75,6 +98,52 @@ def test_broker_treats_soft_error_as_failure(tmp_path):
     assert "grok_codex_chat" in tools  # tried grok
     assert any(t.get("soft_error") for t in out["trace"])  # detected the 503
     assert out["ok"] is True and "MOCK[claude_codex_chat]" in out["artifact"]  # rotated + succeeded
+    attempts = out["state"]["steps"][0]["attempt_results"]
+    assert [item["success"] for item in attempts] == [False, True]
+
+
+def test_broker_accepts_legacy_tuple_only_client(tmp_path):
+    class LegacyClient:
+        def call_tool(self, tool, arguments, *, timeout=None):
+            return True, f"legacy:{tool}:{arguments['prompt']}"
+
+    out = broker.run_auto(
+        "direct_chat",
+        args={"prompt": "hello"},
+        project_root=str(tmp_path),
+        client_resolver=lambda _tool: LegacyClient(),
+    )
+
+    assert out["ok"] is True
+    assert out["artifact"].startswith("legacy:claude_codex_chat:")
+    assert out["state"]["steps"][0]["result"]["schema"] == results.RESULT_SCHEMA
+
+
+def test_structured_result_redacts_secrets_and_bounds_metadata():
+    raw = {
+        "content": [{"type": "text", "text": "Bearer secret-token"}],
+        "structuredContent": {
+            "success": False,
+            "error_type": "auth",
+            "status_code": 401,
+            "text": "sk-super-secret-value",
+            "usage": {"prompt_tokens": 1, "label": "drop"},
+            "warnings": ["access_token=\"secret\""],
+            "artifacts": [{"name": "x", "uri": "data:text/plain;base64,c2VjcmV0"}],
+            "diagnostics": {"refresh_token": "secret"},
+        },
+        "isError": True,
+    }
+
+    normalized = leaf_client._interpret_result(raw).as_dict()
+
+    assert "secret-token" not in json.dumps(normalized)
+    assert "super-secret" not in json.dumps(normalized)
+    assert normalized["error"]["type"] == "auth"
+    assert normalized["error"]["code"] == 401
+    assert normalized["usage"] == {"prompt_tokens": 1}
+    assert normalized["artifacts"] == [{"name": "x"}]
+    assert "diagnostics" not in normalized
 
 
 def test_broker_no_leaves_configured(tmp_path, monkeypatch):

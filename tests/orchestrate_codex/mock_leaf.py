@@ -50,7 +50,35 @@ def main() -> int:
                 result = {"content": [{"type": "text", "text": msg}], "isError": False}
             else:
                 text = f"MOCK[{tool}] " + json.dumps(args, ensure_ascii=False)
-                result = {"content": [{"type": "text", "text": text}], "isError": False}
+                result = {
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": {
+                        "success": True,
+                        "text": text,
+                        "provider": "mock",
+                        "model": "mock-model",
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                        "finish_reason": "stop",
+                        "warnings": ["mock-warning"],
+                        "artifacts": [
+                            {
+                                "name": "mock.txt",
+                                "sha256": "a" * 64,
+                                "data": "must-not-persist",
+                            }
+                        ],
+                        "consistency": {
+                            "policy_mode": "auto",
+                            "request_sha256": "b" * 64,
+                            "raw_prompt": "must-not-persist",
+                        },
+                        "diagnostics": {
+                            "access_token": "must-not-persist",
+                            "session_id": "must-not-persist",
+                        },
+                    },
+                    "isError": False,
+                }
         else:
             sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": method}}) + "\n")
             sys.stdout.flush()
