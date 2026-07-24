@@ -49,7 +49,16 @@ from openai_codex import auth as openai_auth
 from openai_codex import models as openai_models
 from openai_codex import mcp_server as openai_mcp
 from openai_codex import security as openai_security
-from orchestrate_codex import broker, gather, policy, recipes, runner, store, verify
+from orchestrate_codex import (
+    broker,
+    events as run_events,
+    gather,
+    policy,
+    recipes,
+    runner,
+    store,
+    verify,
+)
 
 
 ProviderHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
@@ -1454,6 +1463,10 @@ def _load_workflow_handoff(args: Dict[str, Any]) -> Dict[str, Any]:
 def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
     out = deepcopy(state)
     lease = out.pop("_lease", None)
+    out["event_journal"] = run_events.event_summary(out)
+    out.pop("events", None)
+    out.pop("event_seq", None)
+    out.pop("events_dropped", None)
     handoff_snapshot = out.pop("_handoff_snapshot", None)
     if isinstance(handoff_snapshot, dict):
         out["handoff"] = handoff_state.public_snapshot(handoff_snapshot)
@@ -1528,6 +1541,20 @@ def _new_adaptive_state(
             else 0
         ),
     }
+    run_events.append_event(
+        state,
+        "run_created",
+        at=created_at,
+        base_revision=None,
+        resulting_revision=0,
+        run_kind="adaptive",
+        workflow_id="adaptive",
+        status="paused",
+        **run_events.text_identity(
+            args.get("prompt") or args.get("instruction") or "",
+            prefix="prompt",
+        ),
+    )
     return state
 
 
@@ -2114,6 +2141,11 @@ def _continue_adaptive_workflow(
     )
     started = time.monotonic()
     plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    completed_before = list(
+        (state.get("results") or {}).keys()
+        if isinstance(state.get("results"), dict)
+        else ()
+    )
     executable = {key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")}
     provider_budget = orchestrator.ProviderCallBudget(
         int(options["max_leaf_calls"]),
@@ -2196,6 +2228,39 @@ def _continue_adaptive_workflow(
     else:
         state.pop("text", None)
         state.pop("error", None)
+    committed_steps = run_events.completed_step_ids(
+        completed_before,
+        successful_results.keys(),
+    )
+    event_type = {
+        "completed": "workflow_completed",
+        "failed": "workflow_failed",
+    }.get(persisted_status, "wave_committed")
+    run_events.append_event(
+        state,
+        event_type,
+        at=float(state["updated_at"]),
+        base_revision=claim.base_revision,
+        resulting_revision=claim.base_revision + 1,
+        run_kind="adaptive",
+        workflow_id="adaptive",
+        status=persisted_status,
+        success=persisted_status != "failed",
+        error_type=(
+            result_status if persisted_status == "failed" else None
+        ),
+        retryable=persisted_status == "paused",
+        elapsed_ms=int(state["elapsed_ms_last_call"]),
+        wave_index=len(state["waves"]),
+        leaf_calls=int(state["leaf_calls"]),
+        pending_steps=max(0, len(plan.get("steps") or []) - len(successful_results)),
+        pause_reason=pause_reason,
+        completed_step_ids=committed_steps,
+        **run_events.text_identity(
+            state.get("text") or "",
+            prefix="result",
+        ),
+    )
     public = _adaptive_public_state(store.commit_claim(claim, state))
     return envelope(
         "continue_workflow",
@@ -2447,6 +2512,25 @@ def _list_runs(args: Dict[str, Any]) -> Dict[str, Any]:
             "text": f"{len(listed['runs'])} run summaries for {project_root}.",
             **listed,
             "warnings": warnings,
+        },
+        success=True,
+    )
+
+
+def _get_run_events(args: Dict[str, Any]) -> Dict[str, Any]:
+    project_root = str(gather.validate_project_root(args.get("project_root") or "."))
+    result = run_events.read_run_events(
+        store.validate_run_id(args.get("run_id")),
+        project_root=project_root,
+        after_seq=args.get("after_seq", 0),
+        limit=args.get("limit", 50),
+    )
+    return envelope(
+        "get_run_events",
+        {
+            "success": True,
+            "text": f"{len(result['events'])} committed run events loaded.",
+            **result,
         },
         success=True,
     )
@@ -3491,6 +3575,37 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         idempotent=True,
     ),
     _spec(
+        "agent_hub_get_run_events",
+        "Get Run Events",
+        (
+            "Load a bounded page of committed, redacted events for one "
+            "project-scoped workflow run."
+        ),
+        _object(
+            {
+                "project_root": {"type": "string"},
+                "run_id": {
+                    "type": "string",
+                    "pattern": store.RUN_ID_PATTERN,
+                },
+                "after_seq": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": run_events.MAX_EVENT_LIMIT,
+                    "default": 50,
+                },
+            },
+            required=("project_root", "run_id"),
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
+    _spec(
         "agent_hub_run_workflow",
         "Run Workflow",
         "Run a workflow end-to-end with in-process provider adapters.",
@@ -3599,6 +3714,7 @@ TOOL_HANDLERS: Dict[str, ProviderHandler] = {
     "agent_hub_resume_takeover": _resume_takeover,
     "agent_hub_list_runs": _list_runs,
     "agent_hub_get_run": _get_run,
+    "agent_hub_get_run_events": _get_run_events,
     "agent_hub_run_workflow": _run_workflow,
     "agent_hub_delegate": _delegate,
     "agent_hub_verify": _verify,

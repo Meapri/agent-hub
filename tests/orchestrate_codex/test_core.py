@@ -88,6 +88,12 @@ def test_cross_provider_fallback_fixes_model():
         )["model"]
         == "gemini-3.1-pro-high"
     )
+    assert (
+        runner._args_for_tool(
+            step, "openai_codex_chat", user_args=ua, pol={"doc_class": "direct"}, artifacts={}
+        )["model"]
+        == "gpt-5.6-sol"
+    )
 
 
 def test_step_can_force_leaf_and_model():

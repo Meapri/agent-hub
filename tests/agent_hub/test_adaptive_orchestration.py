@@ -1199,7 +1199,7 @@ def test_workflow_catalog_and_schema_expose_adaptive_mode():
     assert planned["annotations"]["readOnlyHint"] is False
     assert "planner_provider" in planned["inputSchema"]["properties"]
     assert "models" in planned["inputSchema"]["properties"]
-    assert len(operations.tool_definitions()) == 33
+    assert len(operations.tool_definitions()) == 34
 
 
 def test_adaptive_review_requires_a_completed_result(tmp_path, monkeypatch):

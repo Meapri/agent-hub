@@ -13,7 +13,18 @@ from typing import Any, Dict, List, Optional
 from agent_hub import provider_registry
 from agent_hub.core import handoff as handoff_state
 
-from . import __version__, catalog, errors, gather, policy, recipes, results, store, verify
+from . import (
+    __version__,
+    catalog,
+    errors,
+    events,
+    gather,
+    policy,
+    recipes,
+    results,
+    store,
+    verify,
+)
 
 # capability → ordered fallback tools (first is primary unless bindings override)
 FALLBACK_CHAINS: Dict[str, List[str]] = {
@@ -331,6 +342,7 @@ def _args_for_tool(
 _PROVIDER_MODEL_PREFIX = {
     "grok_codex": "grok",
     "claude_codex": "claude",
+    "openai_codex": "gpt",
     "google_antigravity": "gemini",
     "google_grounded": "gemini",
 }
@@ -447,6 +459,17 @@ def start_run(
         state.setdefault("warnings", []).append(
             "missing_prompt: recipe has a generative stage but no prompt/instruction"
         )
+    events.append_event(
+        state,
+        "run_created",
+        at=created_at,
+        base_revision=None,
+        resulting_revision=0,
+        run_kind="fixed",
+        workflow_id=recipe["id"],
+        status=str(state.get("status") or ""),
+        **events.text_identity(prompt_text, prefix="prompt"),
+    )
     if auto_local:
         _auto_local_forward(state)
     state = store.create(state)
@@ -485,6 +508,10 @@ def load_state(state_or_id: Any) -> Dict[str, Any]:
 def _public_state(state: Dict[str, Any]) -> Dict[str, Any]:
     out = copy.deepcopy(state)
     out.pop("_lease", None)
+    out["event_journal"] = events.event_summary(out)
+    out.pop("events", None)
+    out.pop("event_seq", None)
+    out.pop("events_dropped", None)
     out["current_step"] = _current_step(out)
     out["next_action"] = _next_action(out)
     snapshot = out.pop("_handoff_snapshot", None)
@@ -958,6 +985,63 @@ def abort_action_claim(claim: FixedActionClaim) -> Dict[str, Any]:
     return _public_state(released)
 
 
+def _append_fixed_commit_event(
+    state: Dict[str, Any],
+    *,
+    action: Dict[str, Any],
+    base_revision: int,
+) -> None:
+    stage_id = str(action.get("stage_id") or "")
+    step = next(
+        (
+            item
+            for item in state.get("steps") or []
+            if isinstance(item, dict) and str(item.get("id") or "") == stage_id
+        ),
+        {},
+    )
+    metadata = step.get("result") if isinstance(step.get("result"), dict) else {}
+    is_provider_action = action.get("type") == "call_tool"
+    if is_provider_action:
+        succeeded = bool(metadata.get("success"))
+        event_type = "action_completed" if succeeded else "action_failed"
+    else:
+        succeeded = step.get("status") == "completed"
+        event_type = "local_step_completed" if succeeded else "local_step_failed"
+    raw_error = metadata.get("error")
+    error_type = ""
+    if isinstance(raw_error, dict):
+        error_type = str(raw_error.get("type") or raw_error.get("code") or "")
+    error_type = error_type or str(step.get("error_category") or "")
+    result_fields: Dict[str, Any] = {}
+    if isinstance(metadata.get("text_chars"), int):
+        result_fields["result_chars"] = metadata["text_chars"]
+    if isinstance(metadata.get("text_sha256"), str):
+        result_fields["result_sha256"] = metadata["text_sha256"]
+    if not result_fields and isinstance(step.get("result_text"), str):
+        result_fields = events.text_identity(step["result_text"], prefix="result")
+    events.append_event(
+        state,
+        event_type,
+        at=float(state.get("updated_at") or time.time()),
+        base_revision=base_revision,
+        resulting_revision=base_revision + 1,
+        run_kind="fixed",
+        workflow_id=str(state.get("recipe_id") or ""),
+        status=str(state.get("status") or ""),
+        stage_id=stage_id,
+        action_id=str(action.get("action_id") or ""),
+        tool=str(action.get("tool") or ""),
+        provider=metadata.get("provider"),
+        model=metadata.get("model"),
+        success=succeeded,
+        error_type=error_type or None,
+        retryable=bool(not succeeded and state.get("status") not in {"failed", "cancelled"}),
+        usage=metadata.get("usage"),
+        **result_fields,
+    )
+
+
 def commit_claimed_action(
     claim: FixedActionClaim,
     *,
@@ -991,6 +1075,11 @@ def commit_claimed_action(
             auto_local=auto_local,
         )
         advanced["updated_at"] = time.time()
+        _append_fixed_commit_event(
+            advanced,
+            action=current_action,
+            base_revision=claim.store_claim.base_revision,
+        )
         committed = store.commit_claim(claim.store_claim, advanced)
     except Exception:
         try:
@@ -1102,6 +1191,7 @@ def continue_run(
             working_state,
             drift_policy=drift_policy,
         )
+        current_action = _next_action(copy.deepcopy(working_state))
         advanced = _advance_run_state(
             working_state,
             stage_id=stage_id,
@@ -1112,6 +1202,11 @@ def continue_run(
             auto_local=auto_local,
         )
         advanced["updated_at"] = time.time()
+        _append_fixed_commit_event(
+            advanced,
+            action=current_action,
+            base_revision=claim.base_revision,
+        )
         committed = store.commit_claim(claim, advanced)
     except Exception:
         try:
