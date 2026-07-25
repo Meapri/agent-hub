@@ -6,6 +6,8 @@ import json
 import sys
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import __version__, broker, catalog, gather, policy, recipes, runner, store, verify
 
 SERVER_NAME = "orchestrate-codex"
@@ -364,14 +366,14 @@ def tool_definitions() -> List[Dict[str, Any]]:
                     "max_leaf_calls": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 100,
-                        "default": 24,
+                        "maximum": limits.MAX_LEAF_CALLS,
+                        "default": limits.MAX_LEAF_CALLS,
                     },
                     "per_call_timeout": {
                         "type": "number",
                         "minimum": 5,
-                        "maximum": 600,
-                        "default": 180,
+                        "maximum": limits.MAX_ADAPTIVE_TIMEOUT_SECONDS,
+                        "default": limits.MAX_ADAPTIVE_TIMEOUT_SECONDS,
                     },
                 },
                 "required": ["recipe_id"],
@@ -420,7 +422,9 @@ def _ok(payload: Dict[str, Any]) -> Dict[str, Any]:
         "backend": "supervised-local",
         **payload,
         "warnings": payload.get("warnings") if isinstance(payload.get("warnings"), list) else [],
-        "text": json.dumps(payload, ensure_ascii=False, indent=2)[:120000],
+        "text": json.dumps(payload, ensure_ascii=False, indent=2)[
+            : limits.MAX_ADAPTIVE_RESULT_CHARS
+        ],
     }
 
 

@@ -9,6 +9,8 @@ from urllib.parse import urlparse
 import urllib.request
 import uuid
 
+from agent_hub.core import limits
+
 from . import api, models, paths, response, security
 
 
@@ -71,7 +73,12 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
         }.get(str(arguments["aspect_ratio"]), str(arguments["aspect_ratio"]))
     if arguments.get("resolution") or arguments.get("image_size"):
         body["resolution"] = str(arguments.get("resolution") or arguments.get("image_size"))
-    payload = api.images_generate(body, timeout=float(arguments.get("timeout_sec") or 180))
+    payload = api.images_generate(
+        body,
+        timeout=float(
+            arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+        ),
+    )
     items = payload.get("data") if isinstance(payload.get("data"), list) else []
     if not items or not isinstance(items[0], dict):
         raise ValueError("xAI image response contained no image")

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import api, auth, chat, models, response, security
 
 SEARCH_COMPLETE_MARKER = "<agent_hub_search_complete/>"
@@ -105,10 +107,24 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
             x_tool["to_date"] = str(arguments["to_date"])
         tools.append(x_tool)
     language = str(arguments.get("language") or "ko")
-    max_sources = max(1, min(int(arguments.get("max_sources") or 5), 10))
+    max_sources = max(
+        1,
+        min(
+            int(arguments.get("max_sources") or limits.MAX_SEARCH_SOURCES),
+            limits.MAX_SEARCH_SOURCES,
+        ),
+    )
     max_output_tokens = max(1, int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS))
-    retry_count = max(0, min(int(arguments.get("retry_count", 1)), 5))
-    timeout = float(arguments.get("timeout_sec") or 180)
+    retry_count = max(
+        0,
+        min(
+            int(arguments.get("retry_count", limits.MAX_PROVIDER_RETRIES)),
+            limits.MAX_PROVIDER_RETRIES,
+        ),
+    )
+    timeout = float(
+        arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+    )
     payloads: List[Dict[str, Any]] = []
     raw_text = ""
     status = "incomplete"

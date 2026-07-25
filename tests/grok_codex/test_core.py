@@ -100,7 +100,7 @@ def test_chat_builds_and_parses(monkeypatch, tmp_path):
         result = chat.run_chat({"prompt": "hello", "model": models.DEFAULT_MODEL})
     assert result["success"] is True
     assert "hello" in result["text"]
-    assert seen["max_tokens"] == chat.DEFAULT_MAX_TOKENS == 65536
+    assert seen["max_tokens"] == chat.DEFAULT_MAX_TOKENS == 131072
 
 
 def test_chat_marks_length_response_incomplete(monkeypatch, tmp_path):

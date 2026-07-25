@@ -20,7 +20,7 @@ from agent_hub import (
     provider_settings,
 )
 from agent_hub.core import handoff as handoff_state
-from agent_hub.core import media, parallel
+from agent_hub.core import limits, media, parallel
 from agent_hub.core import run_lifecycle
 from agent_hub.core import takeover as takeover_state
 from claude_codex import auth as claude_auth
@@ -74,31 +74,40 @@ def _positive_float_env(name: str, default: float) -> float:
 PROVIDERS = provider_registry.AVAILABLE_PROVIDERS
 DEFAULT_COMPARE_PROVIDERS = provider_registry.DEFAULT_COMPARE_PROVIDERS
 ADAPTIVE_WORKFLOW_TIMEOUT_MIN = 30.0
-ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env("AGENT_HUB_MCP_CALL_TIMEOUT", 1800.0)
-ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env("AGENT_HUB_TIMEOUT_RETURN_MARGIN", 10.0)
+ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env(
+    "AGENT_HUB_MCP_CALL_TIMEOUT",
+    limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+)
+ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env(
+    "AGENT_HUB_TIMEOUT_RETURN_MARGIN",
+    limits.MCP_RETURN_MARGIN_SECONDS,
+)
 ADAPTIVE_WORKFLOW_TIMEOUT_MAX = max(
     ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
     ADAPTIVE_MCP_CALL_TIMEOUT - ADAPTIVE_TIMEOUT_RETURN_MARGIN,
 )
 ADAPTIVE_WORKFLOW_TIMEOUT_DEFAULT = min(
-    _positive_float_env("AGENT_HUB_WORKFLOW_TIMEOUT", 1740.0),
+    _positive_float_env(
+        "AGENT_HUB_WORKFLOW_TIMEOUT",
+        limits.MAX_ADAPTIVE_TIMEOUT_SECONDS,
+    ),
     ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
 )
 ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT = _positive_float_env(
     "AGENT_HUB_PER_CALL_TIMEOUT",
-    900.0,
+    limits.MAX_ADAPTIVE_TIMEOUT_SECONDS,
 )
 ADAPTIVE_PER_CALL_TIMEOUT_MAX = min(
-    1800.0,
+    limits.MAX_PROVIDER_TIMEOUT_SECONDS,
     ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
 )
-ADAPTIVE_MAX_WAVES_PER_CALL = 8
+ADAPTIVE_MAX_WAVES_PER_CALL = limits.MAX_WAVES_PER_CALL
 ADAPTIVE_STATE_SCHEMA_VERSION = 2
 ADAPTIVE_CALL_ACCOUNTING_VERSION = 2
 ADAPTIVE_LEASE_GRACE_SECONDS = 30.0
-ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS = 24_000
-ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS = 48_000
-COMPARE_PARTICIPANT_MAX_CHARS = 4_000
+ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS = 250_000
+ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS = 1_000_000
+COMPARE_PARTICIPANT_MAX_CHARS = 250_000
 _PROVIDER_CALL_INTERNAL_KEYS = {
     "_provider_call_budget",
     "_provider_call_reservation",
@@ -858,7 +867,9 @@ def _write_call(
             "temperature": args.get("temperature", 0.35),
             "max_tokens": args.get("max_tokens"),
             "reasoning_effort": args.get("reasoning_effort"),
-            "timeout_sec": args.get("timeout_sec") or 180,
+            "timeout_sec": (
+                args.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
             "project_root": args.get("project_root"),
             "policy_mode": args.get("policy_mode"),
             "policy_file": args.get("policy_file"),
@@ -900,7 +911,7 @@ def _write(args: Dict[str, Any]) -> Dict[str, Any]:
     raw_chat = _write_call(provider, args, built, prompt=str(built["prompt"]))
     text = str(raw_chat.get("text") or "").strip()
     verification = _write_verification(text, built)
-    rewrite_limit = max(0, min(int(args.get("quality_rewrite_attempts", 1)), 2))
+    rewrite_limit = max(0, min(int(args.get("quality_rewrite_attempts", 2)), 2))
     rewrite_attempts = 0
     while (
         bool(raw_chat.get("success", not raw_chat.get("error")))
@@ -1058,7 +1069,10 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
                 "temperature": args.get("temperature", 0.2),
                 "max_tokens": args.get("max_tokens"),
                 "reasoning_effort": args.get("reasoning_effort"),
-                "timeout_sec": args.get("timeout_sec") or 180,
+                "timeout_sec": (
+                    args.get("timeout_sec")
+                    or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+                ),
                 "project_root": project_root
                 if (gate_enabled or args.get("project_root"))
                 else None,
@@ -1072,7 +1086,7 @@ def _compare_models(args: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     execution = str(args.get("execution") or "parallel")
-    max_concurrency = int(args.get("max_concurrency") or 3)
+    max_concurrency = int(args.get("max_concurrency") or len(PROVIDERS))
     active_reservation = args.get("_provider_call_reservation")
     owned_reservation = None
     if active_reservation is None and args.get("_provider_call_budget") is not None:
@@ -1292,7 +1306,9 @@ def _review_diff(args: Dict[str, Any]) -> Dict[str, Any]:
             "temperature": args.get("temperature", 0.2),
             "max_tokens": args.get("max_tokens"),
             "reasoning_effort": args.get("reasoning_effort"),
-            "timeout_sec": args.get("timeout_sec") or 180,
+            "timeout_sec": (
+                args.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
             "project_root": str(repo),
             "policy_mode": args.get("policy_mode") or "auto",
             "policy_file": args.get("policy_file"),
@@ -1369,7 +1385,9 @@ def _release_draft(args: Dict[str, Any]) -> Dict[str, Any]:
             "model": args.get("model"),
             "max_tokens": args.get("max_tokens"),
             "reasoning_effort": args.get("reasoning_effort"),
-            "timeout_sec": args.get("timeout_sec") or 180,
+            "timeout_sec": (
+                args.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
             "project_root": str(args.get("repo") or "."),
             "policy_mode": args.get("policy_mode") or "auto",
             "policy_file": args.get("policy_file"),
@@ -1792,7 +1810,10 @@ def _adaptive_run_options(
             ADAPTIVE_PER_CALL_TIMEOUT_MAX,
         ),
     )
-    options["max_concurrency"] = max(1, min(int(options.get("max_concurrency") or 3), 3))
+    options["max_concurrency"] = max(
+        1,
+        min(int(options.get("max_concurrency") or len(PROVIDERS)), len(PROVIDERS)),
+    )
     options["max_leaf_calls"] = max(
         1,
         min(
@@ -1968,7 +1989,13 @@ def _adaptive_plan(
     operational_handoff = handoff_state.render_context(snapshot)
     if operational_handoff:
         initial_prompt = f"{initial_prompt}\n\n{operational_handoff}"
-    repairs = max(0, min(int(args.get("planner_repair_attempts", 3)), 5))
+    repairs = max(
+        0,
+        min(
+            int(args.get("planner_repair_attempts", limits.MAX_PLANNER_REPAIRS)),
+            limits.MAX_PLANNER_REPAIRS,
+        ),
+    )
     attempts: List[Dict[str, Any]] = []
     previous_text = ""
     validation_error = ""
@@ -1994,7 +2021,9 @@ def _adaptive_plan(
                 "prompt": planner_input,
                 "model": args.get("planner_model"),
                 "temperature": 0.1,
-                "max_tokens": int(args.get("planner_max_tokens") or 12000),
+                "max_tokens": int(
+                    args.get("planner_max_tokens") or limits.MAX_OUTPUT_TOKENS
+                ),
                 "timeout_sec": int(planner_timeout),
                 "project_root": root,
                 "policy_mode": policy_mode,
@@ -2238,7 +2267,7 @@ def _adaptive_step_call(
                 "task": "auto",
                 "instruction": context,
                 "source_text": source or None,
-                "quality_rewrite_attempts": step.get("quality_rewrite_attempts", 1),
+                "quality_rewrite_attempts": step.get("quality_rewrite_attempts", 2),
             }
         )
     if capability == "review_diff":
@@ -2274,7 +2303,7 @@ def _adaptive_step_call(
                 "models": participant_models if any(participant_models) else None,
                 "project_root": root,
                 "execution": "parallel",
-                "max_concurrency": args.get("max_concurrency") or 3,
+                "max_concurrency": args.get("max_concurrency") or len(PROVIDERS),
                 "min_successes": step.get("min_successes", min(2, len(participants))),
                 "consistency": gate,
                 "max_tokens": args.get("max_tokens"),
@@ -2511,7 +2540,10 @@ def _continue_adaptive_workflow(
     max_waves = max(
         1,
         min(
-            int(args.get("max_waves_per_call") or 1),
+            int(
+                args.get("max_waves_per_call")
+                or limits.MAX_WAVES_PER_CALL
+            ),
             ADAPTIVE_MAX_WAVES_PER_CALL,
         ),
     )
@@ -3117,7 +3149,7 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
         plan = _adaptive_plan(planning_args, handoff_snapshot)
         executable = {key: plan.get(key) for key in ("schema", "goal", "rationale", "steps")}
         max_leaf_calls = int(args.get("max_leaf_calls") or broker.DEFAULT_MAX_LEAF_CALLS)
-        max_concurrency = int(args.get("max_concurrency") or 3)
+        max_concurrency = int(args.get("max_concurrency") or len(PROVIDERS))
         provider_budget = orchestrator.ProviderCallBudget(
             max_leaf_calls,
             max_concurrency=max_concurrency,
@@ -3339,6 +3371,12 @@ CHAT_SCHEMA = _operation_schema(
         **POLICY_CONTROL_SCHEMA,
     },
 )
+CHAT_SCHEMA["properties"]["max_tokens"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": limits.MAX_OUTPUT_TOKENS,
+    "default": limits.MAX_OUTPUT_TOKENS,
+}
 SEARCH_SCHEMA = _operation_schema(
     google_mcp.GROUNDING_SCHEMA,
     {
@@ -3348,7 +3386,12 @@ SEARCH_SCHEMA = _operation_schema(
         "allowed_x_handles": {"type": "array", "items": {"type": "string"}},
         "from_date": {"type": "string"},
         "to_date": {"type": "string"},
-        "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072},
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": limits.MAX_OUTPUT_TOKENS,
+            "default": limits.MAX_OUTPUT_TOKENS,
+        },
     },
 )
 WRITING_SCHEMA = _operation_schema(
@@ -3360,7 +3403,7 @@ WRITING_SCHEMA = _operation_schema(
             "type": "integer",
             "minimum": 0,
             "maximum": 2,
-            "default": 1,
+            "default": 2,
             "description": (
                 "Bounded full-document rewrites after the mandatory local quality gate fails. "
                 "Zero disables rewriting but not verification or fail-closed behavior."
@@ -3368,6 +3411,12 @@ WRITING_SCHEMA = _operation_schema(
         },
     },
 )
+WRITING_SCHEMA["properties"]["max_tokens"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": limits.MAX_OUTPUT_TOKENS,
+    "default": limits.MAX_OUTPUT_TOKENS,
+}
 IMAGE_SCHEMA = _operation_schema(
     google_mcp.IMAGE_SCHEMA,
     {
@@ -3398,7 +3447,7 @@ COMPARE_SCHEMA = _operation_schema(
             "type": "integer",
             "minimum": 1,
             "maximum": len(PROVIDERS),
-            "default": 3,
+            "default": len(PROVIDERS),
         },
         "min_successes": {
             "type": "integer",
@@ -3439,10 +3488,22 @@ COMPARE_SCHEMA = _operation_schema(
         },
     },
 )
+COMPARE_SCHEMA["properties"]["max_tokens"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": limits.MAX_OUTPUT_TOKENS,
+    "default": limits.MAX_OUTPUT_TOKENS,
+}
 REVIEW_DIFF_SCHEMA = _operation_schema(
     google_mcp.REVIEW_DIFF_SCHEMA,
     {**REASONING_EFFORT_SCHEMA, **POLICY_CONTROL_SCHEMA},
 )
+REVIEW_DIFF_SCHEMA["properties"]["max_tokens"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": limits.MAX_OUTPUT_TOKENS,
+    "default": limits.MAX_OUTPUT_TOKENS,
+}
 REVIEW_DIFF_SCHEMA["properties"]["require_complete"] = {
     "type": "boolean",
     "default": False,
@@ -3459,6 +3520,12 @@ RELEASE_DRAFT_SCHEMA = _operation_schema(
     google_mcp.RELEASE_DRAFT_SCHEMA,
     {**REASONING_EFFORT_SCHEMA, **POLICY_CONTROL_SCHEMA},
 )
+RELEASE_DRAFT_SCHEMA["properties"]["max_tokens"] = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": limits.MAX_OUTPUT_TOKENS,
+    "default": limits.MAX_OUTPUT_TOKENS,
+}
 WORKFLOW_BASE = {
     "workflow_id": {"type": "string"},
     "preset": {"type": "string"},
@@ -3497,14 +3564,14 @@ WORKFLOW_BASE = {
     "planner_repair_attempts": {
         "type": "integer",
         "minimum": 0,
-        "maximum": 5,
-        "default": 3,
+        "maximum": limits.MAX_PLANNER_REPAIRS,
+        "default": limits.MAX_PLANNER_REPAIRS,
     },
     "planner_max_tokens": {
         "type": "integer",
         "minimum": 256,
-        "maximum": 131072,
-        "default": 12000,
+        "maximum": limits.MAX_OUTPUT_TOKENS,
+        "default": limits.MAX_OUTPUT_TOKENS,
     },
     "max_steps": {
         "type": "integer",
@@ -3516,7 +3583,7 @@ WORKFLOW_BASE = {
         "type": "integer",
         "minimum": 1,
         "maximum": len(PROVIDERS),
-        "default": 3,
+        "default": len(PROVIDERS),
     },
     **POLICY_CONTROL_SCHEMA,
     "handoff_mode": {
@@ -3547,7 +3614,7 @@ ADAPTIVE_EXECUTION_CONTROL_SCHEMA = {
     "max_leaf_calls": {
         "type": "integer",
         "minimum": 1,
-        "maximum": 100,
+        "maximum": limits.MAX_LEAF_CALLS,
         "default": broker.DEFAULT_MAX_LEAF_CALLS,
     },
     "per_call_timeout": {
@@ -3960,7 +4027,7 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                     "type": "integer",
                     "minimum": 1,
                     "maximum": ADAPTIVE_MAX_WAVES_PER_CALL,
-                    "default": 1,
+                    "default": ADAPTIVE_MAX_WAVES_PER_CALL,
                     "description": (
                         "Dependency-ready adaptive waves to execute before persisting and returning."
                     ),

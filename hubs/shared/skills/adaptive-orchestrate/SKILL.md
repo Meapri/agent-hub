@@ -32,8 +32,8 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
    `workflow_timeout`은 작업 규모와 MCP 클라이언트의 호출 제한 안에서 정한다. dependency wave가 여러 개인
    긴 plan은 검토한 plan을 `agent_hub_start_workflow`에 넘기고, 반환된 `run_id`로
    `agent_hub_continue_workflow`를 반복한다. 반환된 `next_action.arguments.expected_revision`을 다음
-   continue에 그대로 넘긴다. continue는 기본 한 wave를 실행하고 상태를 파일에 저장한다. 장문 조사와
-   문서 작성은 기본 `per_call_timeout=900`, `workflow_timeout=1740`을 임의로 낮추지 않는다.
+   continue에 그대로 넘긴다. continue는 기본 최대 8개 wave를 실행하고 상태를 파일에 저장한다. 장문
+   조사와 문서 작성은 기본 `per_call_timeout=1790`, `workflow_timeout=1790`을 임의로 낮추지 않는다.
 6. 실행기는 현재 dependency frontier의 ready step을 병렬로 호출한다. 배열 순서나 provider 이름 순서를
    작업 순서로 해석하지 않는다.
 7. `human_review=true`, `consistency_gate_human_review`, 실패 step 또는 blocked step이 있으면 성공으로

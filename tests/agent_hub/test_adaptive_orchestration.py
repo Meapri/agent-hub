@@ -92,8 +92,8 @@ def _policy_root(tmp_path):
 def test_validator_accepts_llm_chosen_dag():
     plan = orchestrator.validate_plan(_plan())
     assert plan["final_step"] == "synthesize"
-    assert plan["expected_max_calls"] == 8
-    assert plan["expected_max_provider_calls"] == 8
+    assert plan["expected_max_calls"] == 10
+    assert plan["expected_max_provider_calls"] == 10
     assert plan["plan_sha256"]
     assert all(step["reasoning_effort"] == "medium" for step in plan["steps"])
 
@@ -636,13 +636,16 @@ def test_adaptive_write_source_preserves_compare_participant_answers(tmp_path, m
     assert "provider unavailable" in captured["source_text"]
 
 
-def test_dependency_context_has_one_total_character_limit():
+def test_dependency_context_has_one_total_character_limit(monkeypatch):
+    monkeypatch.setattr(operations, "ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS", 100)
+    monkeypatch.setattr(operations, "ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS", 200)
     rendered = operations._render_dependency_outputs(
         {
-            "first": {"text": "a" * 30_000},
-            "second": {"text": "b" * 30_000},
-            "third": {"text": "c" * 30_000},
-        }
+            "first": {"text": "a" * 150},
+            "second": {"text": "b" * 150},
+            "third": {"text": "c" * 150},
+        },
+        max_chars=200,
     )
 
     assert rendered.endswith("[dependency context truncated]")
@@ -799,15 +802,15 @@ def test_adaptive_run_schema_exposes_end_to_end_timeout():
     repairs = specs["agent_hub_plan_workflow"]["inputSchema"]["properties"][
         "planner_repair_attempts"
     ]
-    assert timeout["default"] == 1740
+    assert timeout["default"] == 1790
     assert timeout["maximum"] == 1790
-    assert per_call["default"] == 900
+    assert per_call["default"] == 1790
     assert per_call["maximum"] == 1790
-    assert repairs["default"] == 3
+    assert repairs["default"] == 5
     assert repairs["maximum"] == 5
     assert (
         specs["agent_hub_plan_workflow"]["inputSchema"]["properties"]["max_leaf_calls"]["default"]
-        == 24
+        == 100
     )
 
 
@@ -845,7 +848,7 @@ def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(tmp_path
     loaded_before_continue = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
     first = operations.dispatch_tool(
         "agent_hub_continue_workflow",
-        {"state": loaded_before_continue["data"]},
+        {"state": loaded_before_continue["data"], "max_waves_per_call": 1},
     )
     assert first["success"] is True
     assert first["text"] == ("Adaptive workflow paused safely; call continue for the next wave.")
@@ -1111,9 +1114,9 @@ def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     continue_props = specs["agent_hub_continue_workflow"]["inputSchema"]["properties"]
     get_props = specs["agent_hub_get_run"]["inputSchema"]["properties"]
 
-    assert start_props["workflow_timeout"]["default"] == 1740
+    assert start_props["workflow_timeout"]["default"] == 1790
     assert continue_props["workflow_timeout"]["maximum"] == 1790
-    assert continue_props["max_waves_per_call"]["default"] == 1
+    assert continue_props["max_waves_per_call"]["default"] == 8
     assert continue_props["expected_revision"]["minimum"] == 0
     assert claim_props["action_id"]["pattern"] == "^[0-9a-f]{64}$"
     assert continue_props["claim_token"]["pattern"] == "^[0-9a-f]{32}$"

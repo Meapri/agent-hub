@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile
 from typing import Any, Dict, Iterable, List, Tuple
 
+from agent_hub.core import limits
+
 from . import auth, client, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
@@ -106,7 +108,7 @@ def _materialize_images(urls: Iterable[str], directory: Path) -> List[str]:
 
 def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     security.require_consent()
-    timeout = float(arguments.get("timeout_sec") or 180)
+    timeout = float(arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS)
     auth_state = auth.require_subscription(timeout=min(timeout, 30.0))
     model = str(arguments.get("model") or DEFAULT_MODEL).strip()
     reasoning_effort = str(arguments.get("reasoning_effort") or "").strip().lower()

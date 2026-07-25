@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_hub.core import limits
 from agent_hub.core.http import http_json  # noqa: F401
 
 import os
@@ -50,7 +51,12 @@ def list_models_live(timeout: float = 30.0) -> List[Dict[str, Any]]:
     return out
 
 
-def chat_completions(body: Dict[str, Any], *, timeout: float = 120.0, session_id: str = "") -> Dict[str, Any]:
+def chat_completions(
+    body: Dict[str, Any],
+    *,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+    session_id: str = "",
+) -> Dict[str, Any]:
     url = f"{base_url()}/chat/completions"
     body = dict(body)
     body.pop("reasoningEffort", None)
@@ -58,7 +64,12 @@ def chat_completions(body: Dict[str, Any], *, timeout: float = 120.0, session_id
     return http_json("POST", url, auth_headers(session_id=session_id), body, timeout)
 
 
-def responses_create(body: Dict[str, Any], *, timeout: float = 120.0, session_id: str = "") -> Dict[str, Any]:
+def responses_create(
+    body: Dict[str, Any],
+    *,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+    session_id: str = "",
+) -> Dict[str, Any]:
     url = f"{base_url()}/responses"
     body = dict(body)
     body.pop("reasoningEffort", None)
@@ -66,5 +77,9 @@ def responses_create(body: Dict[str, Any], *, timeout: float = 120.0, session_id
     return http_json("POST", url, auth_headers(session_id=session_id), body, timeout)
 
 
-def images_generate(body: Dict[str, Any], *, timeout: float = 180.0) -> Dict[str, Any]:
+def images_generate(
+    body: Dict[str, Any],
+    *,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
     return http_json("POST", f"{base_url()}/images/generations", auth_headers(), body, timeout)

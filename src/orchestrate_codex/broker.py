@@ -11,13 +11,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_hub.core import limits
+
 from . import catalog, errors
 from . import leaves as leaves_mod
 from . import results, runner
 from .leaf_client import LeafClient, LeafError
 
-DEFAULT_MAX_LEAF_CALLS = 24
-DEFAULT_PER_CALL_TIMEOUT = 180.0
+DEFAULT_MAX_LEAF_CALLS = limits.MAX_LEAF_CALLS
+DEFAULT_PER_CALL_TIMEOUT = limits.MAX_ADAPTIVE_TIMEOUT_SECONDS
 
 
 def _call_result(client: Any, tool: str, arguments: Dict[str, Any], timeout: float):

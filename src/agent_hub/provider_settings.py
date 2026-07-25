@@ -12,6 +12,8 @@ import tempfile
 import threading
 from typing import Any, Dict
 
+from agent_hub.core import limits
+
 
 ALLOWED = {
     "claude": {"model", "temperature", "max_tokens"},
@@ -45,8 +47,12 @@ def _validate_provider_value(provider: str, value: Dict[str, Any]) -> None:
             isinstance(max_tokens, bool)
             or not isinstance(max_tokens, int)
             or max_tokens < 1
+            or max_tokens > limits.MAX_OUTPUT_TOKENS
         ):
-            raise ValueError(f"{provider} max_tokens must be an integer of at least 1")
+            raise ValueError(
+                f"{provider} max_tokens must be an integer within "
+                f"1..{limits.MAX_OUTPUT_TOKENS}"
+            )
     if "api_mode" in value:
         api_mode = value["api_mode"]
         if not isinstance(api_mode, str) or api_mode not in {"chat", "responses"}:

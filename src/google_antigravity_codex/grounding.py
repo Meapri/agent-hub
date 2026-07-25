@@ -8,6 +8,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import chat, network, provider, response as response_schema
 
 URL_RE = re.compile(r"https?://[^\s)>\]}\"']+")
@@ -165,7 +167,13 @@ def recover_direct_sources(arguments: Dict[str, Any], answer: str, existing: Lis
         return existing
     if arguments.get("direct_source_retry") is False:
         return existing
-    max_sources = max(1, min(int(arguments.get("max_sources") or 5), 10))
+    max_sources = max(
+        1,
+        min(
+            int(arguments.get("max_sources") or limits.MAX_SEARCH_SOURCES),
+            limits.MAX_SEARCH_SOURCES,
+        ),
+    )
     retry_response = chat.run_chat(
         {
             "prompt": _direct_source_retry_prompt(
@@ -176,8 +184,13 @@ def recover_direct_sources(arguments: Dict[str, Any], answer: str, existing: Lis
             ),
             "model": str(arguments.get("model") or chat.DEFAULT_MODEL),
             "grounding": "always",
-            "timeout_sec": arguments.get("timeout_sec") or 180,
-            "retry_count": arguments.get("retry_count", 1),
+            "timeout_sec": (
+                arguments.get("timeout_sec")
+                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
+            "retry_count": arguments.get(
+                "retry_count", limits.MAX_PROVIDER_RETRIES
+            ),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
         }
     )
@@ -203,7 +216,13 @@ def build_prompt(arguments: Dict[str, Any]) -> str:
     query = str(arguments.get("query") or "").strip()
     if not query:
         raise ValueError("query is required")
-    max_sources = max(1, min(int(arguments.get("max_sources") or 5), 10))
+    max_sources = max(
+        1,
+        min(
+            int(arguments.get("max_sources") or limits.MAX_SEARCH_SOURCES),
+            limits.MAX_SEARCH_SOURCES,
+        ),
+    )
     freshness = str(arguments.get("freshness") or "auto").strip() or "auto"
     language = str(arguments.get("language") or "ko").strip() or "ko"
     return (
@@ -232,8 +251,13 @@ def run_grounded_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "model": model,
             "task": "grounded-search",
             "grounding": "always",
-            "timeout_sec": arguments.get("timeout_sec") or 180,
-            "retry_count": arguments.get("retry_count", 1),
+            "timeout_sec": (
+                arguments.get("timeout_sec")
+                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
+            "retry_count": arguments.get(
+                "retry_count", limits.MAX_PROVIDER_RETRIES
+            ),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
         }
     )

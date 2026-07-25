@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import urllib.request
 import uuid
 
+from agent_hub.core import limits
+
 from . import network, paths, provider, response
 
 DEFAULT_MODEL = "gemini-3.1-flash-image"
@@ -257,8 +259,14 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
             )
     image_size = resolve_image_size(arguments.get("image_size") or arguments.get("resolution") or "")
     aspect = resolve_aspect_ratio(arguments.get("aspect_ratio") or DEFAULT_ASPECT_RATIO)
-    timeout = float(arguments.get("timeout_sec") or 180.0)
-    retries = int(arguments.get("retry_count") if arguments.get("retry_count") is not None else 1)
+    timeout = float(
+        arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+    )
+    retries = int(
+        arguments.get("retry_count")
+        if arguments.get("retry_count") is not None
+        else limits.MAX_PROVIDER_RETRIES
+    )
     retry_cap = float(arguments.get("retry_sleep_cap_sec") or 8.0)
     payload = provider.generate_image(
         model=requested,

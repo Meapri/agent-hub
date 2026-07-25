@@ -6,6 +6,8 @@ import json
 import sys
 from typing import Any, Callable, Dict, List
 
+from agent_hub.core import limits
+
 from . import __version__, auth, chat, models, response, security, subscription_auth
 
 SERVER_NAME = "claude-codex"
@@ -35,14 +37,24 @@ CHAT_SCHEMA: Dict[str, Any] = {
         "prompt": {"type": "string"},
         "system": {"type": "string"},
         "model": {"type": "string"},
-        "max_tokens": {"type": "integer", "minimum": 1, "default": chat.DEFAULT_MAX_TOKENS},
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": limits.CLAUDE_MAX_OUTPUT_TOKENS,
+            "default": chat.DEFAULT_MAX_TOKENS,
+        },
         "temperature": {"type": "number"},
         "reasoning_effort": {
             "type": "string",
             "enum": ["low", "medium", "high"],
             "description": "Provider-neutral reasoning depth; unsupported models fail closed.",
         },
-        "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 1800, "default": 120},
+        "timeout_sec": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+            "default": limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+        },
         "messages": {
             "type": "array",
             "items": {"type": "object"},

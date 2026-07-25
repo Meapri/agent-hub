@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import antigravity_api, security
 
 PROVIDERS = {"agy-oauth"}
@@ -149,8 +151,8 @@ def generate_image(**kwargs: Any) -> Dict[str, Any]:
     return antigravity_api.generate_content(
         model=kwargs["model"],
         request=request,
-        timeout=kwargs.get("timeout", 180.0),
-        max_retries=kwargs.get("max_retries", 1),
+        timeout=kwargs.get("timeout", limits.MAX_PROVIDER_TIMEOUT_SECONDS),
+        max_retries=kwargs.get("max_retries", limits.MAX_PROVIDER_RETRIES),
         retry_sleep_cap_seconds=kwargs.get("retry_sleep_cap_seconds", 8.0),
     )
 

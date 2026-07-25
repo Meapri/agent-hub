@@ -21,8 +21,8 @@ description: >
    wave가 적은 plan은 `agent_hub_run_workflow`에 그대로 넘긴다. 여러 wave가 필요한 plan은
    `agent_hub_start_workflow`에 넘긴 뒤 반환된 `run_id`로 `agent_hub_continue_workflow`를 반복한다.
    end-to-end 실행 결과가 `timed_out` 또는 `provider_call_timeout`이더라도 `resumable=true`이면
-   새로 시작하지 말고 그 `run_id`를 이어간다. 장문 조사의 기본 `per_call_timeout=900`,
-   `workflow_timeout=1740`을 임의로 낮추지 않는다. 중간 상태의 문서 텍스트는 최종 파일로 저장하지
+   새로 시작하지 말고 그 `run_id`를 이어간다. 장문 조사의 기본 `per_call_timeout=1790`,
+   `workflow_timeout=1790`을 임의로 낮추지 않는다. 중간 상태의 문서 텍스트는 최종 파일로 저장하지
    않는다.
 3. 작은 문서나 일부 문단 수정은 `agent_hub_write`를 직접 사용할 수 있다. README에는 `task=readme`,
    절대 `project_root`, `policy_mode=required`를 넘긴다. `source_file`은 절대경로로 주거나,

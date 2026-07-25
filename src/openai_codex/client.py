@@ -20,6 +20,8 @@ from threading import Thread
 import time
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+from agent_hub.core import limits
+
 from agent_hub import __version__ as AGENT_HUB_VERSION
 
 from .errors import (
@@ -33,7 +35,7 @@ from .errors import (
 MAX_STDOUT_BYTES = 8 * 1024 * 1024
 MAX_STDERR_BYTES = 512 * 1024
 MAX_EVENT_COUNT = 10_000
-MAX_PROMPT_CHARS = 240_000
+MAX_PROMPT_CHARS = 2_000_000
 SIDE_EFFECT_ITEM_TYPES = {
     "command_execution",
     "file_change",
@@ -442,7 +444,7 @@ def run_exec_chat(
     model: str = "",
     reasoning_effort: str = "",
     image_paths: Iterable[str] = (),
-    timeout: float = 180.0,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
 ) -> Dict[str, Any]:
     stdout, stderr, returncode = run_bounded(
         exec_argv(

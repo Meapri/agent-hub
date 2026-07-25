@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import api, auth, chat, models, response, security
 
 
@@ -37,7 +39,13 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if not query:
         raise ValueError("query is required")
     model = str(arguments.get("model") or models.DEFAULT_MODEL)
-    max_sources = max(1, min(int(arguments.get("max_sources") or 5), 10))
+    max_sources = max(
+        1,
+        min(
+            int(arguments.get("max_sources") or limits.MAX_SEARCH_SOURCES),
+            limits.MAX_SEARCH_SOURCES,
+        ),
+    )
     language = str(arguments.get("language") or "ko")
     tool: Dict[str, Any] = {
         "type": "web_search_20250305",
@@ -64,7 +72,12 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "tools": [tool],
     }
-    payload = api.messages_create(body, timeout=float(arguments.get("timeout_sec") or 180))
+    payload = api.messages_create(
+        body,
+        timeout=float(
+            arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+        ),
+    )
     text = chat.extract_text(payload)
     sources = _sources(payload)[:max_sources]
     stop_reason = str(payload.get("stop_reason") or "end_turn")

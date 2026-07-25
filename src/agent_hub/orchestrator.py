@@ -275,7 +275,7 @@ Contract:
       "instruction": "specific task for this step",
       "reasoning_effort": "low | medium | high",
       "investigation_depth": "shallow | standard | deep (inspect_codebase only)",
-      "quality_rewrite_attempts": 1,
+      "quality_rewrite_attempts": 2,
       "final": false,
       "participants": ["only for compare: 2-3 model providers"],
       "min_successes": 2,
@@ -449,7 +449,7 @@ def validate_plan(
 
         quality_rewrite_attempts: int | None = None
         if capability == "write":
-            raw_rewrites = raw.get("quality_rewrite_attempts", 1)
+            raw_rewrites = raw.get("quality_rewrite_attempts", 2)
             if isinstance(raw_rewrites, bool) or not isinstance(raw_rewrites, int):
                 raise ValueError(f"{step_id}.quality_rewrite_attempts must be an integer")
             quality_rewrite_attempts = raw_rewrites

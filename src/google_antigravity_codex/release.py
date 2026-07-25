@@ -13,6 +13,8 @@ import time
 from typing import Any, Dict, List
 import urllib.parse
 
+from agent_hub.core import limits
+
 from . import chat, response, security, writing
 
 VERSION_FILE_PATTERNS = (
@@ -299,7 +301,7 @@ def collect_snapshot(arguments: Dict[str, Any]) -> ReleaseSnapshot:
     if len(check_commands) > 10:
         raise ValueError("at most 10 release check commands are allowed")
     checks = [
-        run_check(repo, str(command), int(arguments.get("check_timeout_sec") or 600))
+        run_check(repo, str(command), int(arguments.get("check_timeout_sec") or 3600))
         for command in check_commands
     ]
     return ReleaseSnapshot(
@@ -451,7 +453,10 @@ def release_draft(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "instruction": "Polish this release draft without inventing facts.",
                 "source_text": draft,
                 "model": arguments.get("model"),
-                "timeout_sec": arguments.get("timeout_sec") or 180,
+                "timeout_sec": (
+                    arguments.get("timeout_sec")
+                    or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+                ),
                 "max_tokens": arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS,
             }
         )

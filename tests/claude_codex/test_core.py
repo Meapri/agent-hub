@@ -59,7 +59,30 @@ def test_chat_builds_and_parses(monkeypatch, tmp_path):
         result = chat.run_chat({"prompt": "hello", "model": models.DEFAULT_MODEL})
     assert result["success"] is True
     assert "hello" in result["text"]
-    assert seen["max_tokens"] == chat.DEFAULT_MAX_TOKENS == 65536
+    assert seen["max_tokens"] == chat.DEFAULT_MAX_TOKENS == 128000
+
+
+def test_chat_clamps_haiku_output_to_model_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
+    seen = {}
+
+    def fake_request(method, url, headers, body, timeout):
+        seen.update(body)
+        return chat_fake_response(body)
+
+    with patch.object(chat.api, "http_json", side_effect=fake_request):
+        result = chat.run_chat(
+            {
+                "prompt": "hello",
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 131072,
+            }
+        )
+
+    assert seen["max_tokens"] == 65536
+    assert "max_tokens_clamped_for_model:131072->65536" in result["warnings"]
 
 
 def test_chat_marks_max_token_response_incomplete(monkeypatch, tmp_path):

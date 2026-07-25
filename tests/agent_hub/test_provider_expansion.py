@@ -59,7 +59,7 @@ def test_public_schemas_expose_real_provider_capabilities():
     ] == ["low", "medium", "high", "xhigh", "max", "ultra"]
     assert _spec("agent_hub_write")["inputSchema"]["properties"][
         "quality_rewrite_attempts"
-    ]["default"] == 1
+    ]["default"] == 2
 
 
 @pytest.mark.parametrize(

@@ -1018,6 +1018,7 @@ def test_invalid_nested_provider_setting_values_are_not_overwritten(
         {"temperature": float("inf")},
         {"max_tokens": False},
         {"max_tokens": 0},
+        {"max_tokens": 131073},
     ],
 )
 def test_provider_setting_updates_reject_invalid_types_and_ranges(

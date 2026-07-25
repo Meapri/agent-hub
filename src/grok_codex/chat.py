@@ -14,11 +14,13 @@ from typing import Any, Dict, List
 from uuid import uuid4
 
 from agent_hub.core import media
+from agent_hub.core import limits
 
 from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
-DEFAULT_MAX_TOKENS = 65536
+DEFAULT_MAX_TOKENS = limits.MAX_OUTPUT_TOKENS
+DEFAULT_TIMEOUT_SECONDS = limits.MAX_PROVIDER_TIMEOUT_SECONDS
 REASONING_EFFORTS = {"low", "medium", "high"}
 
 
@@ -191,7 +193,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("reasoning_effort must be low, medium, or high")
     if reasoning_effort and not supports_reasoning_effort(model):
         raise ValueError(f"reasoning_effort is not supported by Grok model: {model}")
-    timeout = float(arguments.get("timeout_sec") or 120)
+    timeout = float(arguments.get("timeout_sec") or DEFAULT_TIMEOUT_SECONDS)
     session_id = str(arguments.get("session_id") or "").strip() or str(uuid4())
     api_mode = str(arguments.get("api_mode") or os.getenv("GROK_CODEX_API_MODE") or "chat").strip().lower()
     messages = _normalize_messages(arguments)

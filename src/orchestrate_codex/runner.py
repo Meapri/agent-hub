@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from agent_hub import capabilities as agent_capabilities
 from agent_hub import provider_registry
 from agent_hub.core import handoff as handoff_state
+from agent_hub.core import limits
 
 from . import (
     __version__,
@@ -51,10 +52,10 @@ RUN_LEASE_SECONDS = 60.0
 FIXED_ACTION_SCHEMA = "fixed_action_v1"
 
 # Default output budget for a structured write (README/PR/etc.); leaf defaults truncate.
-DEFAULT_WRITE_MAX_TOKENS = 65536
+DEFAULT_WRITE_MAX_TOKENS = limits.MAX_OUTPUT_TOKENS
 # Keep enough headroom for long synthesis and for providers whose reasoning tokens share
 # the output budget (notably Gemini high-thinking models).
-DEFAULT_CHAT_MAX_TOKENS = 65536
+DEFAULT_CHAT_MAX_TOKENS = limits.MAX_OUTPUT_TOKENS
 
 _RUNS: Dict[str, Dict[str, Any]] = {}
 

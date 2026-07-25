@@ -20,6 +20,8 @@ import re
 import subprocess
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import chat, doc_facts, model_prefs, response as response_schema, security
 
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
@@ -281,7 +283,13 @@ def collect_project_context(arguments: Dict[str, Any], task: str) -> str:
     root = _git_root(requested_root)
     if root is None:
         return ""
-    max_chars = max(1000, min(int(arguments.get("max_project_context_chars") or 8000), 50000))
+    max_chars = max(
+        1000,
+        min(
+            int(arguments.get("max_project_context_chars") or 1_000_000),
+            1_000_000,
+        ),
+    )
     sections = [
         f"Repository: {root}",
         f"Branch: {_run_git(root, ['branch', '--show-current']) or '[detached]'}",
@@ -421,8 +429,13 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "temperature": arguments.get("temperature", 0.35),
             "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
             "thinking_level": arguments.get("reasoning_effort"),
-            "timeout_sec": arguments.get("timeout_sec") or 180,
-            "retry_count": arguments.get("retry_count", 1),
+            "timeout_sec": (
+                arguments.get("timeout_sec")
+                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
+            "retry_count": arguments.get(
+                "retry_count", limits.MAX_PROVIDER_RETRIES
+            ),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
         }
     )

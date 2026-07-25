@@ -94,7 +94,7 @@ def stainless_headers() -> Dict[str, str]:
         "x-stainless-retry-count": "0",
         "x-stainless-runtime": "node",
         "x-stainless-runtime-version": _STAINLESS_NODE_VERSION,
-        "x-stainless-timeout": "600",
+        "x-stainless-timeout": "1800",
     }
 
 

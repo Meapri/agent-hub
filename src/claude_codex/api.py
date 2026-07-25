@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_hub.core import limits
 from agent_hub.core.http import http_json  # noqa: F401
 
 import os
@@ -50,7 +51,11 @@ def list_models_live(timeout: float = 30.0) -> List[Dict[str, Any]]:
     return out
 
 
-def messages_create(body: Dict[str, Any], *, timeout: float = 120.0) -> Dict[str, Any]:
+def messages_create(
+    body: Dict[str, Any],
+    *,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
     auth_ctx = auth.resolve_auth()
     request_body = dict(body)
     extra_headers: Dict[str, str] = {}

@@ -7,9 +7,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from agent_hub.core import limits
+
 from . import chat, model_prefs, response, security
 
-MAX_DIFF_CHARS = 80_000
+MAX_DIFF_CHARS = 1_000_000
 MAX_UNTRACKED_FILES = 100
 MAX_UNTRACKED_FILE_BYTES = 1_000_000
 DEFAULT_REVIEW_PROMPT = (
@@ -178,8 +180,13 @@ def review_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "task": "code",
             "temperature": arguments.get("temperature", 0.2),
             "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
-            "timeout_sec": arguments.get("timeout_sec") or 180,
-            "retry_count": arguments.get("retry_count", 1),
+            "timeout_sec": (
+                arguments.get("timeout_sec")
+                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+            ),
+            "retry_count": arguments.get(
+                "retry_count", limits.MAX_PROVIDER_RETRIES
+            ),
             "thinking_level": str(arguments.get("thinking_level") or "high"),
         }
     )

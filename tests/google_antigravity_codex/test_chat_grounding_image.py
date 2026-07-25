@@ -97,6 +97,20 @@ def test_chat_uses_grounding_env_default():
     assert seen["request"]["generationConfig"]["maxOutputTokens"] == chat.DEFAULT_MAX_TOKENS == 65536
 
 
+def test_chat_clamps_output_to_gemini_limit():
+    seen = {}
+
+    def fake_generate_content(**kwargs):
+        seen.update(kwargs)
+        return {"response": {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}}
+
+    with patch.object(chat.provider, "generate_content", fake_generate_content):
+        result = chat.run_chat({"prompt": "latest", "max_tokens": 131072})
+
+    assert seen["request"]["generationConfig"]["maxOutputTokens"] == 65536
+    assert "max_tokens_clamped_for_model:131072->65536" in result["warnings"]
+
+
 def test_chat_marks_max_token_response_incomplete():
     payload = {
         "response": {

@@ -231,6 +231,8 @@ def test_raw_compare_stays_unscored(monkeypatch):
 def test_raw_compare_requires_two_responses_and_reports_participants(
     monkeypatch, failed_providers, expected_success, expected_status
 ):
+    monkeypatch.setattr(operations, "COMPARE_PARTICIPANT_MAX_CHARS", 4_000)
+
     def fake_chat(provider, _arguments):
         if provider in failed_providers:
             return {

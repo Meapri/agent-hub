@@ -9,10 +9,14 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from agent_hub.core import limits
+
 from . import model_prefs, provider, response as response_schema
 
 DEFAULT_MODEL = "gemini-3.5-flash"
-DEFAULT_MAX_TOKENS = 65536
+DEFAULT_MAX_TOKENS = limits.GEMINI_MAX_OUTPUT_TOKENS
+DEFAULT_TIMEOUT_SECONDS = limits.MAX_PROVIDER_TIMEOUT_SECONDS
+DEFAULT_RETRY_COUNT = limits.MAX_PROVIDER_RETRIES
 MIN_REASONING_MODEL_OUTPUT_TOKENS = 256
 MIN_OUTPUT_TOKEN_MODEL_MARKERS = (
     "gemini-3.6-flash",
@@ -270,9 +274,10 @@ def _effective_max_tokens(model: str, max_tokens: Optional[int]) -> Optional[int
     if not isinstance(max_tokens, int) or max_tokens <= 0:
         return None
     normalized = str(model or "").strip().removeprefix("models/").lower()
+    requested = min(int(max_tokens), limits.GEMINI_MAX_OUTPUT_TOKENS)
     if any(marker in normalized for marker in MIN_OUTPUT_TOKEN_MODEL_MARKERS):
-        return max(int(max_tokens), MIN_REASONING_MODEL_OUTPUT_TOKENS)
-    return int(max_tokens)
+        return max(requested, MIN_REASONING_MODEL_OUTPUT_TOKENS)
+    return requested
 
 
 def build_request(
@@ -498,18 +503,23 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
     if grounding not in {"off", "auto", "always"}:
         grounding = "off"
     tools = arguments.get("tools") if isinstance(arguments.get("tools"), list) else None
+    requested_max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
     request = build_request(
         messages=messages,
         model=model,
         temperature=arguments.get("temperature"),
-        max_tokens=arguments.get("max_tokens") or DEFAULT_MAX_TOKENS,
+        max_tokens=requested_max_tokens,
         top_p=arguments.get("top_p"),
         thinking_level=requested_thinking,
         grounding=grounding,
         tools=tools,
     )
-    timeout = float(arguments.get("timeout_sec") or 180.0)
-    retries = int(arguments.get("retry_count") if arguments.get("retry_count") is not None else 1)
+    timeout = float(arguments.get("timeout_sec") or DEFAULT_TIMEOUT_SECONDS)
+    retries = int(
+        arguments.get("retry_count")
+        if arguments.get("retry_count") is not None
+        else DEFAULT_RETRY_COUNT
+    )
     retry_cap = float(arguments.get("retry_sleep_cap_sec") or 8.0)
     want_stream = bool(arguments.get("stream"))
 
@@ -583,6 +593,11 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
     backend = str(diagnostics.get("backend") or "agy-session")
     extracted = extract_response_text(payload)
     warnings: List[str] = []
+    if requested_max_tokens > limits.GEMINI_MAX_OUTPUT_TOKENS:
+        warnings.append(
+            "max_tokens_clamped_for_model:"
+            f"{requested_max_tokens}->{limits.GEMINI_MAX_OUTPUT_TOKENS}"
+        )
     if not (extracted["text"] or extracted.get("tool_calls")):
         warnings.append("empty_model_text")
     if diagnostics.get("capacity_fallback"):

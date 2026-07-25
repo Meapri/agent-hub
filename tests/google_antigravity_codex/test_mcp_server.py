@@ -47,6 +47,15 @@ def test_initialize_and_tools_list():
     assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
     assert by_name["google_antigravity_write"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
     assert by_name["google_antigravity_compare_models"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
+    assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["timeout_sec"][
+        "default"
+    ] == 1800
+    assert by_name["google_grounded_search"]["inputSchema"]["properties"]["max_sources"][
+        "default"
+    ] == 10
+    assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["retry_count"][
+        "default"
+    ] == 5
     for name in (
         "google_antigravity_agy_auth_refresh",
         "google_antigravity_login_start",

@@ -19,6 +19,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent_hub.core import limits
+
 from .results import OperationResult
 
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -37,7 +39,7 @@ class LeafClient:
         *,
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        default_timeout: float = 120.0,
+        default_timeout: float = limits.MAX_ADAPTIVE_TIMEOUT_SECONDS,
     ) -> None:
         self.name = name
         self._default_timeout = default_timeout

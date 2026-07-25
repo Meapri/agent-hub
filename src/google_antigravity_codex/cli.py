@@ -17,11 +17,13 @@ import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from agent_hub.core import limits
+
 from . import __version__, security
 
 MIN_SUPPORTED_CLI_VERSION = "1.1.1"
 TESTED_CLI_VERSION = "1.1.2"
-DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_TIMEOUT_SECONDS = limits.MAX_PROVIDER_TIMEOUT_SECONDS
 SENSITIVE_CHILD_ENV_RE = re.compile(
     r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?)(?:_|$)"
 )
@@ -291,7 +293,7 @@ def run_prompt(arguments: Dict[str, Any], *, allow_agy_session: bool = False) ->
     timeout = float(arguments.get("timeout_sec") or DEFAULT_TIMEOUT_SECONDS)
     if not math.isfinite(timeout):
         raise CliError("timeout_sec must be finite", code="agy_cli_timeout_invalid")
-    timeout = max(20.0, min(timeout, 1800.0))
+    timeout = max(20.0, min(timeout, limits.MAX_PROVIDER_TIMEOUT_SECONDS))
     command.extend(["--print-timeout", f"{timeout:g}s"])
     try:
         cwd = (

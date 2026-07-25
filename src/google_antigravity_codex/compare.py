@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List
 
+from agent_hub.core import limits
+
 from . import chat, model_prefs, response
 
 
@@ -31,7 +33,9 @@ def compare_models(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     max_tokens = int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature", 0.2)
-    timeout = int(arguments.get("timeout_sec") or 90)
+    timeout = int(
+        arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+    )
     results: List[Dict[str, Any]] = []
     for model in models:
         started = time.time()
@@ -44,7 +48,7 @@ def compare_models(arguments: Dict[str, Any]) -> Dict[str, Any]:
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "timeout_sec": timeout,
-                    "retry_count": 0,
+                    "retry_count": limits.MAX_PROVIDER_RETRIES,
                     "grounding": str(arguments.get("grounding") or "off"),
                 }
             )
@@ -52,7 +56,7 @@ def compare_models(arguments: Dict[str, Any]) -> Dict[str, Any]:
             entry.update(
                 {
                     "success": True,
-                    "text": str(out.get("text") or "")[:4000],
+                    "text": str(out.get("text") or "")[:250_000],
                     "elapsed_ms": elapsed_ms,
                     "usage": out.get("usage") or {},
                     "backend": out.get("backend"),

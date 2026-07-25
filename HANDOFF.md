@@ -11,7 +11,74 @@
 
 - **현재 단계**
 
-  **[2026-07-25 Grok X·웹 검색 최종 답변 완결성 복구 — 이 블록이 최신]**
+  **[2026-07-25 provider·workflow 최대 실행 예산 통합 — 이 블록이 최신]**
+
+  - **원래 목표**: Agent Hub 전체의 token, timeout, retry, 검색·workflow 예산을 provider와 MCP가
+    실제로 받아들이는 최대 안전 상한까지 올리고, 직접 leaf와 통합 workflow 사이의 서로 다른 기본값을
+    제거합니다.
+  - **현재 단계**: 공통 실행 상한을 `agent_hub.core.limits`에 모으고 채팅·검색·이미지·문서 작성·
+    review·release·compare·adaptive·standalone orchestrator가 같은 정책을 사용하도록 구현했습니다.
+    마지막 선행 커밋은 `233a5dd`이며, 이번 변경은 아직 원격에 push하지 않았습니다.
+  - **완료**:
+    - 출력 기본값은 Claude Sonnet 계열 128,000 token, Grok 131,072 token, Gemini 65,536 token으로
+      설정했습니다. Claude Haiku와 Gemini는 더 큰 공통 요청을 모델 상한으로 clamp하고
+      `max_tokens_clamped_for_model` 경고를 반환합니다. GPT는 공식 Codex CLI가 출력량을 관리하며
+      `max_tokens_managed_by_codex`를 유지합니다.
+    - provider 생성·검색·이미지·문서·review·release·compare 기본 timeout을 1,800초로 맞췄습니다.
+      adaptive workflow와 per-call 기본값은 MCP 결과 반환을 위한 10초를 남긴 1,790초입니다.
+      로그인 상태 조회, catalog probe, GUI의 실제 연결 테스트는 빠르게 실패해야 하는 bounded health
+      check이므로 기존 짧은 제한을 유지했습니다.
+    - provider retry 5회, 검색 source 10개, planner repair 5회, write 품질 재작성 2회,
+      `max_leaf_calls=100`, `max_concurrency=4`, continue당 최대 8 wave를 기본값으로 올렸습니다.
+    - adaptive dependency context는 항목당 250,000자·전체 1,000,000자, compare participant는
+      250,000자, standalone 결과와 GPT 격리 prompt는 2,000,000자까지 보존합니다. HANDOFF 기본
+      읽기는 기존 최대값인 100,000자, review diff와 writing project context는 1,000,000자입니다.
+    - 저장된 non-Gemini `max_tokens`는 공통 공개 상한 131,072를 넘으면 거부합니다. direct provider
+      MCP schema는 Claude 128,000, Gemini 65,536의 실제 상한을 노출하고, unified schema는 provider
+      adapter clamp를 전제로 131,072까지 받습니다.
+    - 실제 연결된 provider에서 Grok 131,072, Claude 128,000 요청이 각각 정상 완료됐습니다.
+      Claude 131,072는 HTTP 400으로 거부되는 것을 먼저 재현해 정확한 128,000으로 수정했습니다.
+      Gemini 131,072 공통 요청은 65,536으로 clamp된 뒤 정상 완료됐고, GPT는 공식 Codex CLI 관리
+      경고와 함께 정상 완료됐습니다.
+  - **미완**:
+    - 이미 실행 중인 Codex Desktop·Claude Code MCP process는 적재된 Python module과 tool schema를
+      hot reload하지 않습니다. 새 기본값을 UI/host에서 확실히 사용하려면 host 또는 MCP process를
+      재시작해야 합니다.
+    - 이번 요청에는 release·원격 push가 포함되지 않아 package/plugin version은 1.4.3을 유지하고
+      원격에는 반영하지 않았습니다.
+  - **변경 파일**:
+    - 공통 정책·workflow: `src/agent_hub/core/{limits.py,handoff.py}`,
+      `src/agent_hub/{operations.py,orchestrator.py,provider_settings.py}`,
+      `src/orchestrate_codex/{broker.py,leaf_client.py,mcp_server.py,runner.py}`
+    - provider: `src/{claude_codex,grok_codex,google_antigravity_codex,openai_codex}/`
+      chat·API·MCP schema·검색/이미지/문서 관련 모듈
+    - 문서·skill: `README.md`,
+      `hubs/{shared,codex,claude-code}/skills/{adaptive-orchestrate,document-write}/SKILL.md`
+    - 회귀 테스트: Claude/Grok/Gemini, provider settings, adaptive orchestration,
+      consistency gate, standalone orchestrator 관련 suite
+  - **검증 실행 결과**:
+    - 관련 suite → `403 passed`
+    - provider credential 경로를 임시 디렉터리로 격리한 전체 pytest →
+      `712 passed, 2 skipped`
+    - `./.venv/bin/python -m ruff check .`, `git diff --check` → 통과
+    - `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`,
+      `./scripts/test-phase1.sh` → 통과
+    - `./.venv/bin/python -m orchestrate_codex.document_quality README.md` → 통과
+    - `agent_hub_verify(user_facing=true)` README → 경고 0건
+    - 실제 provider 호출 → Grok 131,072 성공, Claude 128,000 성공, Gemini 65,536 clamp 후 성공,
+      GPT Codex CLI 관리 경고 후 성공
+  - **현재 리스크**: 최대 기본값은 긴 실패를 더 오래 기다리고 retry·품질 재작성·다중 wave로 provider
+    사용량을 늘릴 수 있습니다. 호출자가 작은 `timeout_sec`, `retry_count`, `max_tokens`,
+    `max_leaf_calls`, `max_waves_per_call`을 명시하면 계속 낮출 수 있습니다.
+  - **Do-Not-Repeat**: Claude의 128K를 131,072로 환산하지 마세요. 현재 API는 정확히 128,000을
+    상한으로 검증합니다. health check와 OAuth TTL을 장문 생성 timeout에 맞춰 늘리지 마세요.
+    provider별 실제 출력 상한을 무시하고 unified schema 값만 그대로 보내지 마세요.
+  - **다음 한 걸음**: Codex Desktop을 재시작한 뒤 `agent_hub_chat(provider="claude")`의 tool schema에서
+    `max_tokens.maximum=131072`인 unified 입력과 실제 응답 경고가 없는지 확인하세요.
+
+  ---
+
+  **[2026-07-25 Grok X·웹 검색 최종 답변 완결성 복구 — 이전 기록]**
 
   - **원래 목표**: `agent_hub_search(provider="grok")`가 X 검색을 실제로 사용하는지 확인하고,
     xAI Responses API가 검색 도중 문장과 잘린 최종 답변을 `completed`로 반환해도 Agent Hub가

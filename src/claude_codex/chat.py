@@ -11,11 +11,14 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent_hub.core import media
+from agent_hub.core import limits
 
 from . import api, auth, models, response, security
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
-DEFAULT_MAX_TOKENS = 65536
+DEFAULT_MAX_TOKENS = limits.CLAUDE_MAX_OUTPUT_TOKENS
+DEFAULT_TIMEOUT_SECONDS = limits.MAX_PROVIDER_TIMEOUT_SECONDS
+_MAX_64K_MODEL_MARKERS = ("haiku",)
 REASONING_EFFORTS = {"low", "medium", "high"}
 _EFFORT_MODEL_MARKERS = (
     "claude-fable-5",
@@ -57,6 +60,14 @@ def supports_reasoning_effort(model: str) -> bool:
 def uses_explicit_adaptive_thinking(model: str) -> bool:
     lowered = str(model or "").strip().lower()
     return any(marker in lowered for marker in _ADAPTIVE_THINKING_MODEL_MARKERS)
+
+
+def max_output_tokens_for_model(model: str) -> int:
+    """Return the conservative documented output cap for a Claude model."""
+    lowered = str(model or "").strip().lower()
+    if any(marker in lowered for marker in _MAX_64K_MODEL_MARKERS):
+        return 65_536
+    return DEFAULT_MAX_TOKENS
 
 
 def _content_to_text(content: Any) -> str:
@@ -234,14 +245,16 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(arguments.get("prompt") or "").strip()
     system = str(arguments.get("system") or "").strip()
     model = str(arguments.get("model") or os.getenv("CLAUDE_CODEX_MODEL") or DEFAULT_MODEL).strip()
-    max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
+    requested_max_tokens = int(arguments.get("max_tokens") or DEFAULT_MAX_TOKENS)
+    model_max_tokens = max_output_tokens_for_model(model)
+    max_tokens = min(max(1, requested_max_tokens), model_max_tokens)
     temperature = arguments.get("temperature")
     reasoning_effort = str(arguments.get("reasoning_effort") or "").strip().lower()
     if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
         raise ValueError("reasoning_effort must be low, medium, or high")
     if reasoning_effort and not supports_reasoning_effort(model):
         raise ValueError(f"reasoning_effort is not supported by Claude model: {model}")
-    timeout = float(arguments.get("timeout_sec") or 120)
+    timeout = float(arguments.get("timeout_sec") or DEFAULT_TIMEOUT_SECONDS)
     messages = arguments.get("messages")
     if isinstance(messages, list) and messages:
         oai = [m for m in messages if isinstance(m, dict)]
@@ -289,6 +302,10 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     stop_reason = str(payload.get("stop_reason") or "end_turn").lower()
     incomplete = stop_reason in {"max_tokens", "tool_use"}
     warnings = [f"incomplete_finish_reason:{stop_reason}"] if incomplete else []
+    if requested_max_tokens > model_max_tokens:
+        warnings.append(
+            f"max_tokens_clamped_for_model:{requested_max_tokens}->{model_max_tokens}"
+        )
     if temperature_ignored:
         warnings.append("temperature_ignored_by_model")
     return {

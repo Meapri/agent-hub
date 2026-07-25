@@ -252,8 +252,8 @@ Agent Hub가 공개하는 도구는 다음 37개입니다.
   "policy_mode": "required",
   "handoff_mode": "auto",
   "handoff_search": "nearest",
-  "max_steps": 6,
-  "max_leaf_calls": 12
+  "max_steps": 12,
+  "max_leaf_calls": 100
 }
 ```
 
@@ -264,7 +264,7 @@ Agent Hub가 공개하는 도구는 다음 37개입니다.
 {
   "run_id": "<start가 반환한 run_id>",
   "expected_revision": 1,
-  "max_waves_per_call": 1
+  "max_waves_per_call": 8
 }
 ```
 
@@ -280,15 +280,23 @@ Agent Hub가 공개하는 도구는 다음 37개입니다.
 |---|---:|---|
 | `AGENT_HUB_MCP_CALL_TIMEOUT` | `1800` | MCP 호출 전체 제한 |
 | `AGENT_HUB_TIMEOUT_RETURN_MARGIN` | `10` | 상태를 저장하고 응답할 여유 |
-| `AGENT_HUB_WORKFLOW_TIMEOUT` | `1740` | 한 번의 adaptive 실행·재개 제한 |
-| `AGENT_HUB_PER_CALL_TIMEOUT` | `900` | provider 한 번의 호출 제한 |
+| `AGENT_HUB_WORKFLOW_TIMEOUT` | `1790` | 한 번의 adaptive 실행·재개 제한 |
+| `AGENT_HUB_PER_CALL_TIMEOUT` | `1790` | provider 한 번의 호출 제한 |
 
 환경변수는 MCP 서버를 시작할 때 읽습니다. 값을 바꾼 뒤에는 Codex나 Claude Code의 Agent Hub
 MCP를 다시 시작해야 합니다.
 
 workflow 제한은 MCP 제한에서 반환 여유를 뺀 값을 넘을 수 없으며, provider 호출도 남은
-workflow 시간 안으로 자동 조정됩니다. planner가 잘못된 JSON을 반환하면 기본 3회, 최대
-5회까지 validator 오류를 포함해 교정을 요청합니다.
+workflow 시간 안으로 자동 조정됩니다. planner가 잘못된 JSON을 반환하면 기본 5회까지
+validator 오류를 포함해 교정을 요청합니다.
+
+텍스트 출력은 provider가 실제 지원하는 범위에서 가장 큰 기본값을 사용합니다. Claude Sonnet
+계열은 128,000 token, Grok은 131,072 token, Gemini는 65,536 token입니다. Claude Haiku처럼
+출력 상한이 더 작은 모델은 adapter가 안전하게 clamp하고 `max_tokens_clamped_for_model` 경고를 남깁니다.
+GPT는 `max_tokens`를 직접 받지 않고 공식 Codex CLI가 출력량을 관리합니다. provider retry는
+기본 5회, 검색 source는 최대 10개, adaptive 실행은 최대 100번의 provider 호출과 한 번의
+continue당 최대 8개 wave를 사용할 수 있습니다. 이 값들은 실패 복구 여유를 크게 만드는 대신
+provider 사용량과 대기 시간이 늘어날 수 있습니다.
 
 전체 workflow 시간이 끝나거나 provider가 `TimeoutError`, `codex_timeout` 같은 timeout을
 반환하면 완료된 단계는 버리지 않습니다. run을 `paused`로 저장하고 `resumable=true`,

@@ -6,6 +6,8 @@ import json
 import sys
 from typing import Any, Callable, Dict, List
 
+from agent_hub.core import limits
+
 from . import __version__, auth, chat, models, response, security
 
 SERVER_NAME = "openai-codex"
@@ -29,13 +31,22 @@ CHAT_SCHEMA: Dict[str, Any] = {
         "prompt": {"type": "string"},
         "system": {"type": "string"},
         "model": {"type": "string"},
-        "max_tokens": {"type": "integer", "minimum": 1},
+        "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": limits.MAX_OUTPUT_TOKENS,
+        },
         "temperature": {"type": "number"},
         "reasoning_effort": {
             "type": "string",
             "enum": ["low", "medium", "high", "xhigh", "max", "ultra"],
         },
-        "timeout_sec": {"type": "number", "minimum": 5, "maximum": 1800, "default": 180},
+        "timeout_sec": {
+            "type": "number",
+            "minimum": 5,
+            "maximum": limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+            "default": limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+        },
         "messages": {"type": "array", "items": {"type": "object"}},
         "images": {"type": "array", "items": {"type": ["string", "object"]}},
         "workspace_root": {"type": "string"},

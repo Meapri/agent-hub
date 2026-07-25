@@ -10,6 +10,8 @@ import urllib.request
 import uuid
 from typing import Any, Dict, Generator, List, Optional
 
+from agent_hub.core import limits
+
 from . import __version__, agy_auth
 
 ENDPOINT = "https://cloudcode-pa.googleapis.com"
@@ -214,8 +216,8 @@ def generate_content(
     *,
     model: str,
     request: Dict[str, Any],
-    timeout: float = 180.0,
-    max_retries: int = 1,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+    max_retries: int = limits.MAX_PROVIDER_RETRIES,
     retry_sleep_cap_seconds: float = 8.0,
 ) -> Dict[str, Any]:
     credentials, project = _credentials_and_project()
@@ -291,8 +293,8 @@ def generate_content_stream(
     *,
     model: str,
     request: Dict[str, Any],
-    timeout: float = 180.0,
-    max_retries: int = 1,
+    timeout: float = limits.MAX_PROVIDER_TIMEOUT_SECONDS,
+    max_retries: int = limits.MAX_PROVIDER_RETRIES,
     retry_sleep_cap_seconds: float = 8.0,
 ) -> Generator[Dict[str, Any], None, None]:
     """Stream Code Assist chunks; yields dicts and a final diagnostics dict.
