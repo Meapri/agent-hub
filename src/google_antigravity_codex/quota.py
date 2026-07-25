@@ -31,7 +31,10 @@ def quota_status(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
         "text": text,
         "provider_status": state,
         "buckets": [],
-        "quota_available": False,
+        "quota_state": "unknown",
+        "quota_telemetry_available": False,
+        "quota_available": None,
+        "quota_exhausted": None,
         **response.standard_fields(
             success=state.get("healthy") is True,
             backend=str(state.get("backend") or "agy-session"),

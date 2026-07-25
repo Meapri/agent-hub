@@ -20,7 +20,10 @@ def test_quota_status_reports_provider_health_without_inventing_buckets():
         result = quota.quota_status({})
 
     assert result["success"] is True
-    assert result["quota_available"] is False
+    assert result["quota_state"] == "unknown"
+    assert result["quota_telemetry_available"] is False
+    assert result["quota_available"] is None
+    assert result["quota_exhausted"] is None
     assert result["buckets"] == []
     assert result["provider_status"]["model_count"] == 4
     assert result["warnings"] == ["quota_not_exposed_by_agy_provider"]
@@ -35,5 +38,8 @@ def test_quota_status_reports_unconfigured_provider_truthfully():
         result = quota.quota_status({})
 
     assert result["success"] is False
-    assert result["quota_available"] is False
+    assert result["quota_state"] == "unknown"
+    assert result["quota_telemetry_available"] is False
+    assert result["quota_available"] is None
+    assert result["quota_exhausted"] is None
     assert "agy_provider_not_configured" in result["warnings"]

@@ -38,6 +38,7 @@ def test_provider_registry_is_the_ordered_metadata_source():
     )
     manifest = orchestrator.capability_manifest()
     assert manifest["chat"]["providers"] == ["claude", "grok", "gemini", "gpt"]
+    assert manifest["review_text"]["providers"] == ["claude", "grok", "gemini", "gpt"]
     assert manifest["search"]["providers"] == ["claude", "grok", "gemini"]
 
 

@@ -147,6 +147,89 @@ def test_validator_accepts_codebase_depth_and_rejects_invalid_effort():
         orchestrator.validate_plan(plan)
 
 
+def test_validator_uses_review_text_for_generated_write_output():
+    plan = {
+        "schema": "agent_hub_plan_v1",
+        "goal": "Draft and review a document",
+        "steps": [
+            {
+                "id": "draft",
+                "capability": "write",
+                "provider": "claude",
+                "depends_on": [],
+                "fallback_providers": [],
+                "instruction": "Draft the document.",
+                "quality_rewrite_attempts": 0,
+                "final": False,
+            },
+            {
+                "id": "review",
+                "capability": "review_diff",
+                "provider": "gpt",
+                "depends_on": ["draft"],
+                "fallback_providers": [],
+                "instruction": "Review the generated draft.",
+                "final": True,
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="use review_text"):
+        orchestrator.validate_plan(plan)
+
+    plan["steps"][1]["capability"] = "review_text"
+    normalized = orchestrator.validate_plan(plan)
+    assert normalized["final_step"] == "review"
+    assert normalized["steps"][1]["provider_calls_per_attempt"] == 1
+
+
+def test_validator_requires_dependency_for_review_text():
+    plan = _single_chat_plan()
+    plan["steps"][0]["capability"] = "review_text"
+
+    with pytest.raises(ValueError, match="requires at least one dependency"):
+        orchestrator.validate_plan(plan)
+
+
+def test_validator_rejects_review_diff_with_transitive_write_ancestor():
+    plan = _plan()
+    plan["steps"][0].update(
+        {
+            "id": "draft",
+            "capability": "write",
+            "provider": "claude",
+            "depends_on": [],
+        }
+    )
+    plan["steps"][1].update(
+        {
+            "id": "summarize",
+            "capability": "chat",
+            "provider": "grok",
+            "depends_on": ["draft"],
+        }
+    )
+    plan["steps"][2].update(
+        {
+            "id": "review",
+            "capability": "review_diff",
+            "provider": "gpt",
+            "depends_on": ["summarize"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="use review_text"):
+        orchestrator.validate_plan(plan)
+
+
+def test_planner_prompt_distinguishes_generated_text_from_worktree_diff():
+    prompt = orchestrator.planner_prompt("Draft and review a README.")
+
+    assert '"review_text"' in prompt
+    assert "review_diff reads only" in prompt
+    assert "empty Git diff is not" in prompt
+
+
 def test_validator_rejects_hallucinated_capability_from_planner():
     plan = _plan()
     plan["steps"][0]["capability"] = "security_scan"
@@ -868,6 +951,111 @@ def test_adaptive_supervised_run_persists_and_resumes_one_wave_per_call(tmp_path
     assert loaded["data"]["status"] == "completed"
 
 
+def test_background_adaptive_continue_returns_before_provider_finishes(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+    provider_started = Event()
+    release_provider = Event()
+
+    def slow_step(_step, provider, _dependencies, **_kwargs):
+        provider_started.set()
+        assert release_provider.wait(timeout=2)
+        return {"success": True, "provider": provider, "text": "done", "data": {}}
+
+    monkeypatch.setattr(operations, "_adaptive_step_call", slow_step)
+    started = operations.dispatch_tool(
+        "agent_hub_start_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": _single_chat_plan(),
+            "project_root": root,
+        },
+    )
+    run_id = started["data"]["run_id"]
+
+    accepted = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {
+            "run_id": run_id,
+            "expected_revision": 0,
+            "background": True,
+            "max_waves_per_call": 1,
+        },
+    )
+
+    assert accepted["success"] is True
+    assert accepted["data"]["accepted"] is True
+    assert accepted["data"]["execution"] == "background"
+    assert accepted["data"]["status"] == "running"
+    assert accepted["data"]["next_action"]["tool"] == "agent_hub_get_run"
+    assert provider_started.wait(timeout=1)
+    observed = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+    assert observed["success"] is True
+    assert observed["data"]["lease_active"] is True
+    assert observed["data"]["continuation_status"] == "running"
+    assert observed["data"]["next_action"]["tool"] == "agent_hub_get_run"
+
+    release_provider.set()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        completed = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+        if completed["data"]["store_revision"] == 1:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("background continuation did not commit")
+
+    assert completed["data"]["status"] == "completed"
+    assert completed["data"]["lease_active"] is False
+    assert completed["data"]["continuation_status"] == "idle"
+
+
+def test_background_adaptive_continue_redacts_worker_crash(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(tmp_path / "runs"))
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("secret provider response")
+
+    monkeypatch.setattr(operations, "_continue_adaptive_workflow", crash)
+    started = operations.dispatch_tool(
+        "agent_hub_start_workflow",
+        {
+            "workflow_id": "adaptive",
+            "plan": _single_chat_plan(),
+            "project_root": root,
+        },
+    )
+    run_id = started["data"]["run_id"]
+    accepted = operations.dispatch_tool(
+        "agent_hub_continue_workflow",
+        {
+            "run_id": run_id,
+            "expected_revision": 0,
+            "background": True,
+        },
+    )
+    assert accepted["success"] is True
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        observed = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+        if observed["data"]["store_revision"] == 1:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("background failure was not committed")
+
+    assert observed["data"]["status"] == "paused"
+    assert observed["data"]["pause_reason"] == "background_worker_failed"
+    assert observed["data"]["error"] == "background_worker_failed"
+    assert "secret provider response" not in json.dumps(observed, ensure_ascii=False)
+
+
 def test_concurrent_adaptive_continue_calls_only_one_provider(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1117,6 +1305,7 @@ def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     assert start_props["workflow_timeout"]["default"] == 1790
     assert continue_props["workflow_timeout"]["maximum"] == 1790
     assert continue_props["max_waves_per_call"]["default"] == 8
+    assert continue_props["background"]["default"] is False
     assert continue_props["expected_revision"]["minimum"] == 0
     assert claim_props["action_id"]["pattern"] == "^[0-9a-f]{64}$"
     assert continue_props["claim_token"]["pattern"] == "^[0-9a-f]{32}$"
@@ -1378,6 +1567,82 @@ def test_adaptive_step_uses_explicit_provider_model_map(tmp_path, monkeypatch):
     assert captured["model"] == "claude-opus-4-8"
     assert captured["max_tokens"] == 65536
     assert captured["reasoning_effort"] == "medium"
+
+
+def test_adaptive_review_text_receives_dependency_output(tmp_path, monkeypatch):
+    root = _policy_root(tmp_path)
+    captured = {}
+
+    def fake_chat(arguments):
+        captured.update(arguments)
+        return operations.envelope(
+            "chat",
+            {"success": True, "text": "review complete"},
+            provider=arguments["provider"],
+        )
+
+    monkeypatch.setattr(operations, "_chat", fake_chat)
+    result = operations._adaptive_step_call(
+        {
+            "id": "review_draft",
+            "capability": "review_text",
+            "provider": "gpt",
+            "depends_on": ["draft"],
+            "fallback_providers": [],
+            "instruction": "Review the generated draft for accuracy.",
+            "reasoning_effort": "high",
+            "final": True,
+        },
+        "gpt",
+        {"draft": {"success": True, "text": "generated README body"}},
+        args={"project_root": root, "models": {"gpt": "gpt-test"}},
+        goal="Write and review a README.",
+    )
+
+    assert result["success"] is True
+    assert captured["model"] == "gpt-test"
+    assert captured["reasoning_effort"] == "high"
+    assert "generated README body" in captured["prompt"]
+
+
+def test_adaptive_review_diff_fails_closed_on_empty_worktree(tmp_path):
+    root = _policy_root(tmp_path)
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "AGENTS.md"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True, capture_output=True)
+
+    result = operations._adaptive_step_call(
+        {
+            "id": "review_changes",
+            "capability": "review_diff",
+            "provider": "gpt",
+            "depends_on": [],
+            "fallback_providers": [],
+            "instruction": "Review the working tree.",
+            "reasoning_effort": "high",
+            "final": True,
+        },
+        "gpt",
+        {},
+        args={"project_root": root},
+        goal="Review repository changes.",
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "adaptive_review_diff_empty"
+    assert "empty_diff" in result["warnings"]
 
 
 def test_adaptive_inspection_uses_bounded_local_code_evidence(tmp_path, monkeypatch):

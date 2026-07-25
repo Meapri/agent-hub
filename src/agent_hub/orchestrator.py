@@ -26,6 +26,7 @@ CAPABILITY_PROVIDERS: Dict[str, Sequence[str]] = {
     "inspect_codebase": provider_registry.providers_supporting("chat", planner_only=True),
     "search": provider_registry.providers_supporting("search", planner_only=True),
     "write": provider_registry.providers_supporting("write", planner_only=True),
+    "review_text": provider_registry.providers_supporting("chat", planner_only=True),
     "review_diff": provider_registry.providers_supporting("review_diff", planner_only=True),
     "compare": ("multiple",),
     "verify": ("local",),
@@ -39,6 +40,7 @@ _PROVIDER_CAPABILITY = {
     "inspect_codebase": "chat",
     "search": "search",
     "write": "write",
+    "review_text": "chat",
     "review_diff": "review_diff",
     "release_draft": "release_draft",
 }
@@ -288,6 +290,9 @@ Rules:
 - Create at most {max_steps} steps, usually 2-6. Do not add ceremonial steps.
 - Do not invent capabilities, providers, tools, files, or facts.
 - Use inspect_codebase for local repository understanding. Use search only for external/web facts.
+- Use review_text to review a generated draft or another dependency output. review_diff reads only
+  the repository working-tree diff; it never reviews dependency text and an empty Git diff is not
+  evidence that a generated artifact was reviewed.
 - Choose reasoning_effort per step. Use low for mechanical work, medium for normal analysis, and high
   for ambiguous architecture, broad codebase investigation, difficult review, or final synthesis.
 - Choose investigation_depth only for inspect_codebase. Use deep when a durable repository document
@@ -494,6 +499,7 @@ def validate_plan(
         ids.append(step_id)
 
     id_set = set(ids)
+    steps_by_id = {step["id"]: step for step in normalized_steps}
     graph: Dict[str, set[str]] = {}
     for step in normalized_steps:
         deps = set(step["depends_on"])
@@ -502,11 +508,28 @@ def validate_plan(
             raise ValueError(f"{step['id']} depends on unknown steps: {sorted(unknown)}")
         if step["id"] in deps:
             raise ValueError(f"{step['id']} cannot depend on itself")
+        if step["capability"] == "review_text" and not deps:
+            raise ValueError(f"{step['id']}.review_text requires at least one dependency")
         graph[step["id"]] = deps
     try:
         tuple(TopologicalSorter(graph).static_order())
     except CycleError as exc:
         raise ValueError("adaptive plan contains a dependency cycle") from exc
+    for step in normalized_steps:
+        if step["capability"] != "review_diff":
+            continue
+        ancestors: set[str] = set()
+        frontier = list(graph[step["id"]])
+        while frontier:
+            dependency = frontier.pop()
+            if dependency in ancestors:
+                continue
+            ancestors.add(dependency)
+            frontier.extend(graph[dependency])
+        if any(steps_by_id[dependency]["capability"] == "write" for dependency in ancestors):
+            raise ValueError(
+                f"{step['id']}.review_diff cannot review generated write output; use review_text"
+            )
 
     finals = [step for step in normalized_steps if step["final"]]
     if len(finals) != 1:
@@ -514,7 +537,13 @@ def validate_plan(
     final_id = finals[0]["id"]
     if any(final_id in step["depends_on"] for step in normalized_steps):
         raise ValueError("the final step must be a DAG sink")
-    if finals[0]["capability"] not in {"chat", "write", "compare", "release_draft"}:
+    if finals[0]["capability"] not in {
+        "chat",
+        "write",
+        "review_text",
+        "compare",
+        "release_draft",
+    }:
         raise ValueError("the final step must produce a user-facing answer")
 
     downstream: Dict[str, set[str]] = {step_id: set() for step_id in ids}

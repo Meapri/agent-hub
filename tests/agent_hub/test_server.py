@@ -350,6 +350,10 @@ def test_gemini_status_treats_unprobed_configured_session_as_ready(monkeypatch):
     state = result["data"]["providers"]["gemini"]
     assert state["authenticated"] is True
     assert state["ready"] is True
+    assert state["quota_state"] == "unknown"
+    assert state["quota_telemetry_available"] is False
+    assert state["quota_available"] is None
+    assert state["quota_exhausted"] is None
     assert state["warnings"] == []
     assert state["local_credentials_present"] is True
     assert state["pending_login_present"] is True

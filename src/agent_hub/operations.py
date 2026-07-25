@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from threading import BoundedSemaphore, Lock, Thread
 import time
 from typing import Any, Callable, Dict, Iterable, List
 import uuid
@@ -114,6 +115,9 @@ _PROVIDER_CALL_INTERNAL_KEYS = {
     "_reasoning_effort_implicit",
 }
 PROVIDER_ALIASES = dict(provider_registry.ALIASES)
+_BACKGROUND_CONTINUE_SLOTS = BoundedSemaphore(value=len(PROVIDERS))
+_BACKGROUND_CONTINUE_LOCK = Lock()
+_BACKGROUND_CONTINUE_THREADS: Dict[str, Thread] = {}
 
 COMMON_OUTPUT_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -579,7 +583,10 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "local_credentials_present": bool(login.get("token_file_present")),
                 "pending_login_present": bool(login.get("pending_login")),
                 **model_state,
-                "quota_available": False,
+                "quota_state": "unknown",
+                "quota_telemetry_available": False,
+                "quota_available": None,
+                "quota_exhausted": None,
                 "capabilities": capabilities.provider_capabilities("gemini"),
                 "warnings": (
                     []
@@ -1854,6 +1861,7 @@ def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         lease_expires_at = 0.0
     out["lease_active"] = lease_expires_at > time.time()
+    out["continuation_status"] = "running" if out["lease_active"] else "idle"
     plan = out.get("plan") if isinstance(out.get("plan"), dict) else {}
     completed = set((out.get("results") or {}).keys())
     out["pending_steps"] = [
@@ -1867,6 +1875,12 @@ def _adaptive_public_state(state: Dict[str, Any]) -> Dict[str, Any]:
             "type": "done" if out.get("status") == "completed" else "failed",
             "message": out.get("error")
             or f"Adaptive workflow is {out.get('status')}.",
+        }
+    elif out["lease_active"]:
+        out["next_action"] = {
+            "type": "call_tool",
+            "tool": "agent_hub_get_run",
+            "arguments": {"run_id": str(out.get("run_id") or "")},
         }
     else:
         out["next_action"] = {
@@ -2187,6 +2201,8 @@ def _adaptive_step_call(
     }
     if capability == "chat":
         return _chat({**common, "prompt": context})
+    if capability == "review_text":
+        return _chat({**common, "prompt": context})
     if capability == "inspect_codebase":
         depth = str(step.get("investigation_depth") or "standard")
         code_context = gather.gather_code_context(
@@ -2271,7 +2287,7 @@ def _adaptive_step_call(
             }
         )
     if capability == "review_diff":
-        return _review_diff(
+        reviewed = _review_diff(
             {
                 **common,
                 "cwd": root,
@@ -2281,6 +2297,16 @@ def _adaptive_step_call(
                 "include_untracked": True,
             }
         )
+        if "empty_diff" in reviewed.get("warnings", []):
+            reviewed["success"] = False
+            reviewed["error"] = "adaptive_review_diff_empty"
+            reviewed["error_type"] = "adaptive_review_diff_empty"
+            data = reviewed.get("data")
+            if isinstance(data, dict):
+                data["success"] = False
+                data["error"] = "adaptive_review_diff_empty"
+                data["error_type"] = "adaptive_review_diff_empty"
+        return reviewed
     if capability == "compare":
         participants = step.get("participants") or list(DEFAULT_COMPARE_PROVIDERS)
         participant_models = [
@@ -2757,6 +2783,121 @@ def _run_store_error_response(
     )
 
 
+def _commit_background_failure(claim: store.RunClaim) -> None:
+    """Persist a redacted, resumable failure when a detached continuation crashes."""
+
+    state = deepcopy(claim.state)
+    state["status"] = "paused"
+    state["pause_reason"] = "background_worker_failed"
+    state["error"] = "background_worker_failed"
+    state["updated_at"] = time.time()
+    warnings = state.setdefault("warnings", [])
+    if "background_worker_failed" not in warnings:
+        warnings.append("background_worker_failed")
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    results = state.get("results") if isinstance(state.get("results"), dict) else {}
+    run_events.append_event(
+        state,
+        "workflow_paused",
+        at=float(state["updated_at"]),
+        base_revision=claim.base_revision,
+        resulting_revision=claim.base_revision + 1,
+        run_kind="adaptive",
+        workflow_id="adaptive",
+        status="paused",
+        success=False,
+        error_type="background_worker_failed",
+        retryable=True,
+        elapsed_ms=0,
+        wave_index=len(state.get("waves") or []),
+        leaf_calls=int(state.get("leaf_calls") or 0),
+        pending_steps=max(0, len(plan.get("steps") or []) - len(results)),
+        pause_reason="background_worker_failed",
+    )
+    try:
+        store.commit_claim(claim, state)
+    except store.RunStoreError:
+        try:
+            store.abort_claim(claim)
+        except store.RunStoreError:
+            pass
+
+
+def _run_background_adaptive_continue(args: Dict[str, Any], claim: store.RunClaim) -> None:
+    try:
+        _continue_adaptive_workflow(args, claim.state, claim)
+    except Exception:  # noqa: BLE001
+        _commit_background_failure(claim)
+    finally:
+        with _BACKGROUND_CONTINUE_LOCK:
+            _BACKGROUND_CONTINUE_THREADS.pop(claim.run_id, None)
+        _BACKGROUND_CONTINUE_SLOTS.release()
+
+
+def _start_background_adaptive_continue(
+    args: Dict[str, Any],
+    claim: store.RunClaim,
+) -> Dict[str, Any]:
+    if not _BACKGROUND_CONTINUE_SLOTS.acquire(blocking=False):
+        released = _adaptive_public_state(store.abort_claim(claim))
+        return envelope(
+            "continue_workflow",
+            {
+                "success": False,
+                "text": "Background continuation capacity is currently full.",
+                "error": {
+                    "type": "background_capacity_exhausted",
+                    "message": "Retry after another background continuation finishes.",
+                    "retryable": True,
+                },
+                **released,
+            },
+        )
+    worker_args = {key: value for key, value in args.items() if key != "background"}
+    worker = Thread(
+        target=_run_background_adaptive_continue,
+        args=(worker_args, claim),
+        name=f"agent-hub-continue-{claim.run_id}",
+        daemon=True,
+    )
+    try:
+        with _BACKGROUND_CONTINUE_LOCK:
+            _BACKGROUND_CONTINUE_THREADS[claim.run_id] = worker
+        worker.start()
+    except Exception:
+        with _BACKGROUND_CONTINUE_LOCK:
+            _BACKGROUND_CONTINUE_THREADS.pop(claim.run_id, None)
+        _BACKGROUND_CONTINUE_SLOTS.release()
+        try:
+            store.abort_claim(claim)
+        except store.RunStoreError:
+            pass
+        raise
+    return envelope(
+        "continue_workflow",
+        {
+            "success": True,
+            "text": (
+                "Adaptive continuation accepted in the background. "
+                "Poll agent_hub_get_run for the committed revision."
+            ),
+            "accepted": True,
+            "execution": "background",
+            "run_id": claim.run_id,
+            "workflow_id": "adaptive",
+            "run_kind": "adaptive",
+            "status": "running",
+            "base_revision": claim.base_revision,
+            "lease_active": True,
+            "next_action": {
+                "type": "call_tool",
+                "tool": "agent_hub_get_run",
+                "arguments": {"run_id": claim.run_id},
+            },
+        },
+    )
+
+
 def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
     run_id = args.get("run_id")
     supplied_state = args.get("state") if isinstance(args.get("state"), dict) else None
@@ -2831,6 +2972,8 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             except Exception:  # noqa: BLE001
                 pass
             raise ValueError("persisted run is not adaptive")
+        if bool(args.get("background")):
+            return _start_background_adaptive_continue(args, claim)
         try:
             return _continue_adaptive_workflow(args, claim.state, claim)
         except store.RunStoreError as exc:
@@ -2845,6 +2988,8 @@ def _continue_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             except Exception:  # noqa: BLE001
                 pass
             raise
+    if bool(args.get("background")):
+        raise ValueError("background continuation is supported only for adaptive runs")
     try:
         state = runner.continue_run(
             run_id=run_id,
@@ -4017,6 +4162,15 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                 "success": {"type": "boolean", "default": True},
                 "error": {"type": "string"},
                 "auto_local": {"type": "boolean", "default": True},
+                "background": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "For adaptive runs, claim the revision and return immediately while "
+                        "the wave executes in a bounded background worker. Poll "
+                        "agent_hub_get_run until lease_active is false."
+                    ),
+                },
                 "handoff_drift_policy": {
                     "type": "string",
                     "enum": ["pause", "use-snapshot"],

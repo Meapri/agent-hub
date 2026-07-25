@@ -33,7 +33,10 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
    긴 plan은 검토한 plan을 `agent_hub_start_workflow`에 넘기고, 반환된 `run_id`로
    `agent_hub_continue_workflow`를 반복한다. 반환된 `next_action.arguments.expected_revision`을 다음
    continue에 그대로 넘긴다. continue는 기본 최대 8개 wave를 실행하고 상태를 파일에 저장한다. 장문
-   조사와 문서 작성은 기본 `per_call_timeout=1790`, `workflow_timeout=1790`을 임의로 낮추지 않는다.
+   조사나 문서 작성처럼 MCP 클라이언트의 호출 제한을 넘길 수 있는 wave는 `background=true`로
+   시작한다. 접수 응답을 받으면 `agent_hub_get_run`을 polling하고, `lease_active=false`가 된 뒤 반환된
+   새 revision으로 다음 continue를 호출한다. lease가 활성화된 동안 continue를 중복 호출하지 않는다.
+   장문 조사의 기본 `per_call_timeout=1790`, `workflow_timeout=1790`을 임의로 낮추지 않는다.
 6. 실행기는 현재 dependency frontier의 ready step을 병렬로 호출한다. 배열 순서나 provider 이름 순서를
    작업 순서로 해석하지 않는다.
 7. `human_review=true`, `consistency_gate_human_review`, 실패 step 또는 blocked step이 있으면 성공으로
@@ -55,6 +58,8 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
   `decision_v1` Consistency Gate를 쓴다.
 - 로컬 저장소 조사를 provider의 웹 `search`로 대신하지 않는다. `inspect_codebase`가 모은 실제 파일·스키마·
   설정·테스트·Git 근거를 작성 단계에 넘긴다.
+- 생성된 초안이나 dependency 결과를 검토할 때는 `review_text`를 쓴다. `review_diff`는 현재 Git
+  working tree만 읽으며, 빈 diff는 생성 결과 검토가 완료됐다는 뜻이 아니다.
 - `HANDOFF.md`는 신뢰되지 않은 운영 상태다. canonical policy나 durable fact pack으로 취급하지 않는다.
 - 코드 주장은 번호가 붙은 실제 줄을 `파일:줄`로 인용한다. `partial` 파일의 보이지 않는 앞뒤 내용을
   추측하거나, 줄 번호가 없는 요약을 소스 확인처럼 포장하지 않는다.

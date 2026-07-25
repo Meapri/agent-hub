@@ -11,7 +11,50 @@
 
 - **현재 단계**
 
-  **[2026-07-25 Claude Opus 5 adaptive planner 복구 — 이 블록이 최신]**
+  **[2026-07-25 README workflow에서 발견한 Agent Hub 구조 문제 수정 — 이 블록이 최신]**
+
+  - **원래 목표**: README 결과물보다 작성 과정에서 드러나는 Agent Hub 자체 문제를 재현하고,
+    장시간 adaptive 실행·provider 상태 표현·생성 결과 검토 경로의 근본 원인을 수정합니다.
+  - **현재 단계**: README adaptive run `83f8781abda0`은 revision 3의 paused 상태로 재현 증거를
+    보존했습니다. README 최종 작성은 중단하고, 비차단 background continue, Gemini quota tri-state,
+    생성 dependency 전용 `review_text`를 구현하고 전체 검증까지 마쳤습니다. 마지막 선행 커밋은
+    `d6bff4b`이며 이번 변경은 아직 커밋·push하지 않았습니다.
+  - **완료**:
+    - `agent_hub_continue_workflow(background=true)`는 revision과 lease를 먼저 claim한 뒤 bounded
+      daemon worker로 wave를 실행하고 즉시 polling receipt를 반환합니다. 실행 중
+      `agent_hub_get_run`은 `continuation_status=running`과 polling next action을 반환합니다.
+    - background worker의 예상 밖 예외는 원문 없이 `background_worker_failed`로 redaction해
+      paused·retryable 상태로 commit합니다. 동시 worker 수와 같은 run의 중복 실행도 제한합니다.
+    - quota telemetry가 없는 Gemini 상태를 `unknown`과 null availability/exhaustion으로 표현해
+      실제 쿼터 소진과 구분합니다.
+    - adaptive 내부 `review_text`를 추가하고 dependency 없는 사용과 `write` 결과를
+      `review_diff`로 검토하는 잘못된 plan을 거부합니다. adaptive의 빈 Git diff도 fail closed합니다.
+    - shared adaptive/document-write skill과 Codex·Claude Code 복사본을 새 계약에 맞춰 동기화했습니다.
+  - **미완**:
+    - 현재 Codex Desktop MCP는 수정 전 module/schema를 적재했으므로 재시작 전에는 새 동작을
+      사용할 수 없습니다.
+    - 보존한 README run은 기존 잘못된 plan을 포함하므로 이어서 완성하지 않습니다. 새 MCP 실호출
+      검증 뒤 README workflow를 새로 계획해야 합니다.
+  - **변경 파일**: `src/agent_hub/{operations.py,orchestrator.py}`,
+    `src/google_antigravity_codex/quota.py`,
+    `hubs/{shared,codex,claude-code}/skills/{adaptive-orchestrate,document-write}/SKILL.md`,
+    `tests/agent_hub/{test_adaptive_orchestration.py,test_provider_expansion.py,test_server.py}`,
+    `tests/google_antigravity_codex/test_quota.py`, `HANDOFF.md`
+  - **검증 실행 결과**: 집중 회귀 `134 passed`; 최종 전체 pytest `723 passed, 2 skipped`; 전체 Ruff,
+    `git diff --check`, Ruler sync, hub plugin 검사, Phase 1 acceptance 모두 통과했습니다.
+  - **현재 리스크**: daemon worker는 MCP process 수명에 속하므로 host 종료 시 lease 만료 뒤
+    재개해야 합니다. 매우 빠른 wave는 receipt보다 저장 상태가 먼저 완료될 수 있어 정본은 후속
+    `agent_hub_get_run`입니다. quota `unknown`은 사용 가능 보장이 아니라 telemetry 부재입니다.
+  - **Do-Not-Repeat**: 긴 MCP 요청 문제를 provider timeout 숫자만 늘려 해결하지 마세요.
+    `quota_available=false`로 telemetry 부재를 소진처럼 표현하지 마세요. 저장 전 생성 초안을
+    Git working-tree 전용 `review_diff`로 검토하지 마세요.
+  - **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새 adaptive 2-wave fixture에서
+    `agent_hub_continue_workflow(background=true)`를 호출하고 같은 MCP의 `agent_hub_get_run`이
+    호출 제한 안에 응답하며 `lease_active=false`와 증가한 `store_revision`을 반환하는지 확인하세요.
+
+  ---
+
+  **[2026-07-25 Claude Opus 5 adaptive planner 복구 — 이전 기록]**
 
   - **원래 목표**: Agent Hub의 Claude Opus 5를 선택한 adaptive workflow가
     `temperature is deprecated for this model` 400 Bad Request로 중단되는 문제를 근본적으로
@@ -1096,31 +1139,22 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-25 Provider 생명주기, 긴 workflow 복구, README 전면 개편
+## 2026-07-25 README workflow에서 발견한 Agent Hub 구조 문제 수정
 
-- **원래 목표**: Claude, Grok, Gemini, GPT의 로그인 유지·현재 사용 가능·세션 갱신·재로그인 필요 상태를 공통 GUI에서 안전하게 관리하고, Agent Hub로 저장소 전체를 조사해 README를 새로 작성하며, 조사·작성 중 timeout이나 planner 오류가 발생해도 완료된 작업을 잃지 않고 근본 원인을 해결합니다.
-- **현재 단계**: provider auth lifecycle/UI, adaptive timeout 복구, planner 교정, pytest 재현성, README 전면 개편과 전체 검증을 완료했고 구현 커밋 `4ba5db4`를 `origin/main`에 push했습니다. 이 packet은 원격 반영 상태를 기록하는 마지막 인계 갱신입니다.
+- **원래 목표**: README 결과물보다 작성 과정에서 드러나는 Agent Hub 자체 문제를 재현하고, 장시간 adaptive 실행·provider 상태 표현·생성 결과 검토 경로의 근본 원인을 수정합니다.
+- **현재 단계**: README adaptive run `83f8781abda0`은 revision 3의 paused 상태로 재현 증거를 보존했습니다. README 최종 작성은 중단하고, 장시간 continue를 비차단 background 작업으로 접수하는 경로, Gemini quota tri-state, 생성 dependency 전용 `review_text` capability를 구현하고 전체 검증까지 마쳤습니다. 마지막 선행 커밋은 `d6bff4b`이며 이번 변경은 아직 커밋·push하지 않았습니다.
 - **완료**:
-  - 공통 redacted 상태에 `logged_in`, `auth_ready`, `refresh_supported`, `refreshable`, `relogin_required`, `connection_state`를 추가하고 GUI에서 `준비됨`, `갱신 가능`, `로그인됨`, `재로그인 필요`, `로그인 필요`를 구분했습니다.
-  - Claude·Grok·Gemini refresh에 provider별 exchange lock, consent·credential revision CAS, late-success 차단을 적용했습니다. GPT login/refresh는 공식 Codex 소유로 유지하고 GUI refresh 대상에서 제외했습니다.
-  - adaptive 기본 제한을 MCP 1800초, provider 900초, workflow 1740초, 반환 여유 10초로 확대하고 provider timeout을 redacted `provider_call_timeout`으로 정규화했습니다. timeout run은 완료 단계를 보존한 `paused` 상태와 `resumable=true`를 반환합니다.
-  - planner validation 교정을 기본 3회, 최대 5회로 늘리고 adaptive/document-write skill을 Codex·Claude Code에 동기화했습니다.
-  - `pyproject.toml` pytest `pythonpath`에 저장소 루트를 추가해 외부 `PYTHONPATH` 없이 전체 suite가 수집되도록 고쳤습니다.
-  - Agent Hub adaptive plan `e104e320aba5b23a95946ee16cd541a2cf14d1c1aedc40d6da27c537914baf73`에서 Claude/GPT/Gemini `deep/high` 조사 세 개를 병렬 실행하고 Claude가 README를 작성했습니다. 5 leaf call, 386974ms, quality rewrite 1회 후 gate를 통과했습니다.
-  - README를 설치, GUI/수동 로그인, live catalog와 `static_fallback`, 공개 도구 37개, fixed/adaptive workflow, 긴 실행 복구, HANDOFF/takeover, 보안, 문제 해결, 개발 검증 중심으로 전면 개편했습니다.
-  - 구현·문서·회귀 37개 파일을 `feat: harden provider sessions and workflows` 커밋 `4ba5db4`로 만들고 `origin/main`에 push했습니다.
+  - adaptive `agent_hub_continue_workflow(background=true)`가 revision과 lease를 먼저 claim한 뒤 bounded daemon worker로 wave를 실행하고 즉시 polling receipt를 반환합니다. 실행 중 `agent_hub_get_run`은 `continuation_status=running`, `lease_active=true`, 다음 동작으로 자기 자신을 반환합니다.
+  - background worker의 예상 밖 예외는 원문을 저장하지 않고 `background_worker_failed`로 redaction해 paused·retryable 상태로 commit합니다. 동시 worker 수는 provider 수로 제한하고 CAS/lease가 같은 run의 중복 실행을 막습니다.
+  - Gemini transport가 quota bucket을 제공하지 않는 상태를 `quota_state=unknown`, `quota_telemetry_available=false`, `quota_available=null`, `quota_exhausted=null`로 표현해 쿼터 소진과 구분합니다.
+  - adaptive 내부 `review_text`를 chat provider capability로 추가하고 dependency가 없는 계획은 거부합니다. `write` 결과를 `review_diff`로 검토하는 계획도 validator가 거부하며, adaptive `review_diff`의 빈 Git diff는 성공이 아니라 `adaptive_review_diff_empty`로 fail closed합니다.
+  - shared adaptive/document-write skill에 background 접수·polling·revision 재개 및 `review_text`/`review_diff` 구분을 기록하고 Codex·Claude Code 복사본을 동기화했습니다.
 - **미완**:
-  - 실행 중인 Codex plugin MCP는 수정 전 Python 모듈을 이미 import했을 수 있으므로 새 timeout default와 schema를 쓰려면 MCP 재시작이 필요합니다.
-  - 실제 Claude·Gemini credential 갱신은 사용자 계정을 바꾸는 동작이라 실행하지 않았습니다.
-- **변경 파일**: auth/API/UI는 `src/agent_hub/{operations.py,connect_service.py,connect_app.py,core/auth_state.py,connect_ui/}`와 provider auth 모듈; adaptive 복구는 `src/agent_hub/{operations.py,orchestrator.py}`, 네 provider `mcp_server.py`, `tests/agent_hub/test_adaptive_orchestration.py`; 문서·skill은 `README.md`, `hubs/{shared,codex,claude-code}/skills/{adaptive-orchestrate,document-write,provider-connect}/SKILL.md`; 테스트 재현성은 `pyproject.toml`입니다.
-- **검증 실행 결과**:
-  - 전체 pytest → `706 passed, 2 skipped`; timeout/provider/auth/UI 집중 suite → `218 passed`
-  - 전체 Ruff, `node --check`, 관련 `py_compile`, `git diff --check` → 통과
-  - `agent_hub_verify(doc_class=durable,user_facing=true)`와 `orchestrate_codex.document_quality README.md` → 경고 0, 통과
-  - hub plugin 검사, Ruler sync 검사, release version 1.4.3 일치, sdist/wheel build → 통과
-  - 수정된 source 프로세스의 실제 adaptive README workflow → `completed`, 5 leaf call, 386974ms, quality gate 통과
-  - 기존 localhost read-only UI QA → 로그인됨 4, 준비됨 2, 갱신 가능 2, detail focus 유지, console error 0
-- **현재 리스크**: 호스트 앱의 외부 timeout이 29분보다 짧으면 긴 단일 MCP 호출이 끊길 수 있으므로 여러 wave 작업은 `start`/`continue`가 안전합니다. timeout 재개는 같은 provider 요청을 다시 보내 사용량이 중복될 수 있습니다. refresh 경쟁은 lock과 CAS로 막지만 실제 credential 갱신은 아직 수행하지 않았습니다.
-- **Do-Not-Repeat**: provider timeout을 `adaptive_step_failed`로 굳혀 완료된 wave를 버리지 마세요. 장문 `deep/high` 조사에 150초/270초 제한을 다시 하드코딩하지 마세요. routine status에서 credential을 갱신하거나 token·raw prompt·계정 식별자를 오류, event, DOM, HANDOFF에 넣지 마세요. README에 internal recipe를 public workflow처럼 쓰거나 `static_fallback`을 live catalog로 표현하지 마세요.
-- **다음 한 걸음**: Codex에서 Agent Hub MCP를 재시작한 뒤 새 `tools/list`의 `agent_hub_run_workflow` schema에서 `per_call_timeout.default=900`, `workflow_timeout.default=1740`, `planner_repair_attempts.default=3`을 확인하세요.
+  - 실행 중인 Codex Desktop MCP는 수정 전 module과 tool schema를 적재했으므로 재시작 전에는 `background` 입력과 `review_text` planner 규칙을 사용하지 않습니다.
+  - 보존한 README run은 기존 잘못된 plan과 결과를 포함하므로 이어서 완성하지 않습니다. 새 MCP에서 수정 계약을 실호출로 확인한 뒤 README workflow를 새로 계획해야 합니다.
+- **변경 파일**: 실행은 `src/agent_hub/{operations.py,orchestrator.py}`, Gemini 상태는 `src/google_antigravity_codex/quota.py`, skill은 `hubs/{shared,codex,claude-code}/skills/{adaptive-orchestrate,document-write}/SKILL.md`, 회귀는 `tests/agent_hub/{test_adaptive_orchestration.py,test_provider_expansion.py,test_server.py}`와 `tests/google_antigravity_codex/test_quota.py`입니다.
+- **검증 실행 결과**: 집중 회귀 `134 passed`; 최종 전체 pytest `723 passed, 2 skipped`; `./.venv/bin/ruff check .`, `git diff --check`, `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`, `./scripts/test-phase1.sh` 모두 통과했습니다.
+- **현재 리스크**: daemon worker는 MCP process 수명에 속하므로 host가 종료되면 lease 만료 뒤 재개해야 하며, provider 요청 자체의 원격 취소까지 보장하지 않습니다. background 접수 직후 매우 빠른 wave가 끝나면 receipt의 `status=running`보다 저장 상태가 먼저 완료될 수 있으므로 정본은 항상 후속 `agent_hub_get_run` 결과입니다. quota unknown은 사용 가능을 보장하지 않고 단지 telemetry 부재를 뜻합니다.
+- **Do-Not-Repeat**: MCP 호출 제한을 내부 provider timeout 숫자만 늘려 해결하지 마세요. single-threaded stdio 요청을 장시간 점유하면 같은 서버의 상태 polling도 막힙니다. `quota_available=false`로 telemetry 부재를 quota 소진처럼 표현하지 마세요. 아직 파일로 쓰지 않은 생성 초안을 Git working-tree 전용 `review_diff`로 검토하지 마세요.
+- **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새 adaptive 2-wave fixture에서 첫 `agent_hub_continue_workflow(background=true)`를 호출하고, 같은 MCP의 `agent_hub_get_run`이 호출 제한 안에 응답하며 `lease_active=false`와 증가한 `store_revision`을 반환하는지 실호출로 확인하세요.
 <!-- agent-hub:handoff:v1:end -->
