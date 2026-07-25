@@ -20,17 +20,27 @@ def _state(
     consent: bool = False,
     authenticated: bool = False,
     ready: bool = False,
+    logged_in: bool | None = None,
+    refreshable: bool = False,
+    relogin_required: bool = False,
     default_model: str = "test-model",
     model_overridden: bool = False,
     model_source: str = "provider_default",
     model_override_scope: str | None = None,
 ):
+    logged_in = authenticated if logged_in is None else logged_in
     return {
         "consent": consent,
-        "configured": authenticated,
+        "configured": logged_in,
         "authenticated": authenticated,
+        "logged_in": logged_in,
+        "auth_ready": authenticated,
+        "account_present": logged_in,
+        "refresh_supported": refreshable,
+        "refreshable": refreshable,
+        "relogin_required": relogin_required,
         "ready": ready,
-        "auth_mode": "subscription_oauth" if authenticated else None,
+        "auth_mode": "subscription_oauth" if logged_in else None,
         "default_model": default_model,
         "base_default_model": "test-model",
         "model_overridden": model_overridden,
@@ -68,6 +78,9 @@ def test_status_is_redacted_and_summarized():
     assert result["summary"] == {
         "ready": 0,
         "authenticated": 2,
+        "connected": 2,
+        "refreshable": 0,
+        "relogin_required": 0,
         "consent_required": 2,
         "total": 4,
     }
@@ -79,6 +92,89 @@ def test_status_is_redacted_and_summarized():
     assert result["providers"]["grok"]["login_transport"] == "browser"
     assert "identity" not in claude
     assert "email" not in str(result)
+
+
+def test_status_distinguishes_expired_refreshable_and_relogin_required_accounts():
+    refreshable = _state(
+        consent=True,
+        authenticated=False,
+        logged_in=True,
+        refreshable=True,
+    )
+    relogin = _state(
+        consent=True,
+        authenticated=False,
+        logged_in=True,
+        relogin_required=True,
+    )
+    manager = ConnectionManager(
+        status_reader=_reader({"claude": refreshable, "gemini": relogin})
+    )
+
+    result = manager.status()
+
+    claude = result["providers"]["claude"]
+    gemini = result["providers"]["gemini"]
+    assert claude["logged_in"] is True
+    assert claude["auth_ready"] is False
+    assert claude["refreshable"] is True
+    assert claude["connection_state"] == "refreshable"
+    assert gemini["logged_in"] is True
+    assert gemini["refreshable"] is False
+    assert gemini["relogin_required"] is True
+    assert gemini["connection_state"] == "relogin_required"
+    assert result["summary"]["connected"] == 2
+    assert result["summary"]["refreshable"] == 1
+    assert result["summary"]["relogin_required"] == 1
+
+
+def test_auth_connection_state_remains_independent_from_consent():
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "claude": _state(
+                    consent=False,
+                    authenticated=False,
+                    logged_in=True,
+                    refreshable=True,
+                ),
+                "grok": _state(
+                    consent=False,
+                    authenticated=False,
+                    logged_in=True,
+                    relogin_required=True,
+                ),
+            }
+        )
+    )
+
+    result = manager.status()
+
+    assert result["providers"]["claude"]["connection_state"] == "refreshable"
+    assert result["providers"]["grok"]["connection_state"] == "relogin_required"
+
+
+def test_status_normalizes_lifecycle_invariants_from_provider_state():
+    inconsistent = _state(
+        consent=True,
+        authenticated=True,
+        logged_in=False,
+        refreshable=True,
+        relogin_required=True,
+        ready=True,
+    )
+    manager = ConnectionManager(
+        status_reader=_reader({"gpt": inconsistent})
+    )
+
+    provider = manager.status("gpt")["providers"]["gpt"]
+
+    assert provider["auth_ready"] is True
+    assert provider["logged_in"] is True
+    assert provider["account_present"] is True
+    assert provider["refreshable"] is False
+    assert provider["relogin_required"] is False
+    assert provider["connection_state"] == "ready"
 
 
 def test_status_redacts_unsafe_provider_warning():
@@ -124,6 +220,24 @@ def test_local_logout_capability_is_separate_from_current_auth_mode():
     assert key_status["providers"]["grok"]["local_credentials_present"] is False
     assert oauth_status["providers"]["grok"]["supports_local_logout"] is True
     assert oauth_status["providers"]["grok"]["local_credentials_present"] is True
+
+
+def test_gpt_api_key_state_identifies_official_chatgpt_relogin_boundary():
+    api_key = _state(
+        consent=True,
+        authenticated=False,
+        logged_in=True,
+        relogin_required=True,
+    )
+    api_key["auth_mode"] = "apiKey"
+    api_key["warnings"] = ["codex_api_key_mode_not_subscription"]
+    manager = ConnectionManager(status_reader=_reader({"gpt": api_key}))
+
+    provider = manager.status("gpt")["providers"]["gpt"]
+
+    assert provider["session_label"] == "Codex API key"
+    assert provider["connection_state"] == "relogin_required"
+    assert provider["refresh_supported"] is False
 
 
 @pytest.mark.parametrize("provider", ["grok", "gemini"])
@@ -420,7 +534,153 @@ def test_login_start_invalidates_existing_model_catalog(monkeypatch):
     assert error.value.code == "model_catalog_stale"
 
 
-def test_login_completion_invalidates_catalog_loaded_during_job():
+def test_duplicate_refresh_reuses_job_and_never_exposes_provider_payload(monkeypatch):
+    state = _state(
+        consent=True,
+        authenticated=False,
+        logged_in=True,
+        refreshable=True,
+        default_model="claude-sonnet-5",
+    )
+    manager = ConnectionManager(status_reader=_reader({"claude": state}))
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def refresh_provider(provider, *, cancel_event, commit_guard):
+        calls.append(provider)
+        entered.set()
+        assert release.wait(timeout=5)
+        with commit_guard():
+            assert cancel_event.is_set() is False
+            state.update(
+                {
+                    "authenticated": True,
+                    "auth_ready": True,
+                    "refreshable": False,
+                    "ready": True,
+                }
+            )
+        return {
+            "access_token": "secret-access-token",
+            "refresh_token": "secret-refresh-token",
+        }
+
+    monkeypatch.setattr(manager, "_refresh_provider", refresh_provider)
+
+    first = manager.start_refresh("claude")
+    assert entered.wait(timeout=5)
+    second = manager.start_refresh("claude")
+    release.set()
+    deadline = time.time() + 5
+    while manager.job(first["id"])["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+    finished = manager.job(first["id"])
+
+    assert second["id"] == first["id"]
+    assert calls == ["claude"]
+    assert finished["state"] == "complete"
+    assert "secret" not in str(first)
+    assert "secret" not in str(finished)
+
+
+def test_refresh_requires_consent_and_refreshable_session():
+    missing_consent = ConnectionManager(
+        status_reader=_reader(
+            {
+                "grok": _state(
+                    authenticated=False,
+                    logged_in=True,
+                    refreshable=True,
+                )
+            }
+        )
+    )
+    relogin = ConnectionManager(
+        status_reader=_reader(
+            {
+                "grok": _state(
+                    consent=True,
+                    authenticated=False,
+                    logged_in=True,
+                    relogin_required=True,
+                )
+            }
+        )
+    )
+
+    with pytest.raises(ConnectionError) as consent_error:
+        missing_consent.start_refresh("grok")
+    with pytest.raises(ConnectionError) as refresh_error:
+        relogin.start_refresh("grok")
+
+    assert consent_error.value.code == "consent_required"
+    assert refresh_error.value.code == "refresh_unavailable"
+
+
+def test_refresh_failure_is_redacted_and_keeps_relogin_available(monkeypatch):
+    state = _state(
+        consent=True,
+        authenticated=False,
+        logged_in=True,
+        refreshable=True,
+    )
+    manager = ConnectionManager(status_reader=_reader({"gemini": state}))
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("access_token=secret refresh_token=private")
+
+    monkeypatch.setattr(manager, "_refresh_provider", fail_refresh)
+
+    started = manager.start_refresh("gemini")
+    deadline = time.time() + 5
+    job = manager.job(started["id"])
+    while job["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+        job = manager.job(started["id"])
+
+    assert job["state"] == "failed"
+    assert "secret" not in str(job)
+    assert "private" not in str(job)
+    assert manager.status("gemini")["providers"]["gemini"]["refreshable"] is True
+
+
+def test_manager_close_cancels_refresh_before_provider_commit(monkeypatch):
+    state = _state(
+        consent=True,
+        authenticated=False,
+        logged_in=True,
+        refreshable=True,
+    )
+    manager = ConnectionManager(status_reader=_reader({"grok": state}))
+    entered = threading.Event()
+    release = threading.Event()
+    committed = threading.Event()
+
+    def refresh_provider(_provider, *, cancel_event, commit_guard):
+        entered.set()
+        assert release.wait(timeout=5)
+        with commit_guard():
+            assert cancel_event.is_set() is False
+            committed.set()
+        return {"success": True}
+
+    monkeypatch.setattr(manager, "_refresh_provider", refresh_provider)
+
+    started = manager.start_refresh("grok")
+    assert entered.wait(timeout=5)
+    manager.close()
+    release.set()
+    deadline = time.time() + 5
+    while manager.job(started["id"])["state"] != "cancelled" and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert manager.job(started["id"])["state"] == "cancelled"
+    assert committed.is_set() is False
+
+
+@pytest.mark.parametrize("kind", ["login", "refresh"])
+def test_auth_job_completion_invalidates_catalog_loaded_during_job(kind):
     manager = ConnectionManager(
         status_reader=_reader(
             {
@@ -435,7 +695,7 @@ def test_login_completion_invalidates_catalog_loaded_during_job():
     )
     job = manager._create_job(  # noqa: SLF001 - auth generation regression boundary
         "grok",
-        kind="login",
+        kind=kind,
         state="working",
         message="working",
     )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import stat
 from unittest.mock import patch
 
 import pytest
@@ -209,3 +211,82 @@ def test_auth_status_never_resolves_or_refreshes_credentials(monkeypatch, tmp_pa
     assert state["configured"] is True
     assert state["ready"] is False
     assert state["active_mode"] is None
+
+
+def test_strict_refresh_writes_atomically_and_keeps_credentials_private(
+    monkeypatch,
+    tmp_path,
+):
+    from claude_codex import subscription_auth
+
+    credential_path = tmp_path / ".claude" / ".credentials.json"
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setattr(
+        subscription_auth,
+        "credentials_file_path",
+        lambda: credential_path,
+    )
+    monkeypatch.setattr(subscription_auth, "read_from_keychain", lambda: None)
+    subscription_auth.write_credentials("old-access", "old-refresh", 1)
+    monkeypatch.setattr(
+        subscription_auth,
+        "refresh_token_pure",
+        lambda refresh_token: {
+            "access_token": "fresh-access",
+            "refresh_token": f"{refresh_token}-rotated",
+            "expires_at_ms": 4_102_444_800_000,
+        },
+    )
+
+    result = subscription_auth.refresh_access_token()
+
+    stored = json.loads(credential_path.read_text(encoding="utf-8"))["claudeAiOauth"]
+    assert result["access_token"] == "fresh-access"
+    assert stored["accessToken"] == "fresh-access"
+    assert stored["refreshToken"] == "old-refresh-rotated"
+    assert stat.S_IMODE(credential_path.stat().st_mode) == 0o600
+    assert list(credential_path.parent.glob("*.tmp")) == []
+
+
+def test_strict_refresh_does_not_overwrite_newer_claude_login(
+    monkeypatch,
+    tmp_path,
+):
+    from claude_codex import subscription_auth
+
+    credential_path = tmp_path / ".claude" / ".credentials.json"
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setattr(
+        subscription_auth,
+        "credentials_file_path",
+        lambda: credential_path,
+    )
+    monkeypatch.setattr(subscription_auth, "read_from_keychain", lambda: None)
+    subscription_auth.write_credentials("old-access", "old-refresh", 1)
+
+    def refresh_then_relogin(_refresh_token):
+        subscription_auth.write_credentials(
+            "new-login-access",
+            "new-login-refresh",
+            4_102_444_800_000,
+        )
+        return {
+            "access_token": "must-not-win",
+            "refresh_token": "must-not-win",
+            "expires_at_ms": 4_102_444_800_000,
+        }
+
+    monkeypatch.setattr(
+        subscription_auth,
+        "refresh_token_pure",
+        refresh_then_relogin,
+    )
+
+    result = subscription_auth.refresh_access_token()
+
+    stored = json.loads(credential_path.read_text(encoding="utf-8"))["claudeAiOauth"]
+    assert result["access_token"] == "new-login-access"
+    assert stored["accessToken"] == "new-login-access"
+    assert "must-not-win" not in str(stored)

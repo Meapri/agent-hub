@@ -35,7 +35,7 @@ CHAT_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "enum": ["low", "medium", "high", "xhigh", "max", "ultra"],
         },
-        "timeout_sec": {"type": "number", "minimum": 5, "maximum": 600, "default": 180},
+        "timeout_sec": {"type": "number", "minimum": 5, "maximum": 1800, "default": 180},
         "messages": {"type": "array", "items": {"type": "object"}},
         "images": {"type": "array", "items": {"type": ["string", "object"]}},
         "workspace_root": {"type": "string"},

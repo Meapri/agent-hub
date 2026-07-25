@@ -7,15 +7,25 @@ browser PKCE client — users log in with Claude Code CLI.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import hashlib
 import json
+import os
 import platform
+import secrets
 import subprocess
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, ContextManager, Dict, Optional
+
+from agent_hub.core.auth_state import file_revision, refresh_operation_lock
+
+from . import paths, security
 
 # Public Claude Code OAuth client (same as Hermes / Claude Code).
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -30,6 +40,16 @@ OAUTH_BETAS = (
     "prompt-caching-scope-2026-01-05",
     "advisor-tool-2026-03-01",
 )
+
+
+class ClaudeRefreshError(RuntimeError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def credentials_file_path() -> Path:
+    return Path.home() / ".claude" / ".credentials.json"
 
 
 def _parse_oauth_blob(data: Any, *, source: str) -> Optional[Dict[str, Any]]:
@@ -50,7 +70,7 @@ def _parse_oauth_blob(data: Any, *, source: str) -> Optional[Dict[str, Any]]:
 
 
 def read_from_file() -> Optional[Dict[str, Any]]:
-    path = Path.home() / ".claude" / ".credentials.json"
+    path = credentials_file_path()
     if not path.is_file():
         return None
     try:
@@ -105,9 +125,25 @@ def read_credentials() -> Optional[Dict[str, Any]]:
     return kc or file_creds
 
 
-def write_credentials(access_token: str, refresh_token: str, expires_at_ms: int) -> Path:
-    path = Path.home() / ".claude" / ".credentials.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+def write_credentials(
+    access_token: str,
+    refresh_token: str,
+    expires_at_ms: int,
+    *,
+    expected_revision: str | None = None,
+) -> Path:
+    path = credentials_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.is_symlink():
+        raise OSError("Claude credentials path must not be a symlink")
+    if expected_revision is not None and not secrets.compare_digest(
+        file_revision(path),
+        expected_revision,
+    ):
+        raise ClaudeRefreshError(
+            "Claude credentials changed before commit.",
+            code="credentials_changed",
+        )
     existing: Dict[str, Any] = {}
     if path.is_file():
         try:
@@ -121,11 +157,35 @@ def write_credentials(access_token: str, refresh_token: str, expires_at_ms: int)
         "refreshToken": refresh_token,
         "expiresAt": expires_at_ms,
     }
-    path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    descriptor_open = True
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor_open = False
+        with handle:
+            json.dump(existing, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if expected_revision is not None and not secrets.compare_digest(
+            file_revision(path),
+            expected_revision,
+        ):
+            raise ClaudeRefreshError(
+                "Claude credentials changed before commit.",
+                code="credentials_changed",
+            )
+        os.replace(temporary, path)
+    finally:
+        if descriptor_open:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
     return path
 
 
@@ -188,6 +248,115 @@ def refresh_token_pure(refresh_token: str) -> Dict[str, Any]:
     raise ValueError("Anthropic token refresh failed")
 
 
+def _credential_identity(credentials: Dict[str, Any] | None) -> str:
+    if not credentials:
+        return "missing"
+    material = json.dumps(
+        {
+            "accessToken": credentials.get("accessToken"),
+            "refreshToken": credentials.get("refreshToken"),
+            "expiresAt": credentials.get("expiresAt"),
+            "source": credentials.get("source"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+def refresh_access_token(
+    *,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
+) -> Dict[str, Any]:
+    """Strictly refresh Claude OAuth with consent, revision, and commit fences."""
+
+    with refresh_operation_lock(paths.config_dir()):
+        with security.auth_state_lock():
+            security.require_consent()
+            consent_revision = security.consent_revision()
+            credential_path = credentials_file_path()
+            credential_revision = file_revision(credential_path)
+            credentials = read_credentials()
+            if not credentials:
+                raise ClaudeRefreshError(
+                    "Claude login credentials are unavailable.",
+                    code="credentials_missing",
+                )
+            if is_token_valid(credentials):
+                return {
+                    "access_token": credentials["accessToken"],
+                    "source": credentials.get("source"),
+                }
+            refresh_token = str(credentials.get("refreshToken") or "")
+            if not refresh_token:
+                raise ClaudeRefreshError(
+                    "Claude login must be completed again.",
+                    code="refresh_token_missing",
+                )
+            credential_identity = _credential_identity(credentials)
+        if cancel_event is not None and cancel_event.is_set():
+            raise ClaudeRefreshError(
+                "Claude login refresh was cancelled.",
+                code="refresh_cancelled",
+            )
+        try:
+            refreshed = refresh_token_pure(refresh_token)
+        except Exception as exc:  # noqa: BLE001
+            raise ClaudeRefreshError(
+                "Claude login refresh failed.",
+                code="refresh_failed",
+            ) from exc
+        with security.auth_state_lock():
+            if (
+                not security.user_consent_enabled()
+                or not secrets.compare_digest(
+                    security.consent_revision(),
+                    consent_revision,
+                )
+            ):
+                raise ClaudeRefreshError(
+                    "Claude consent changed during refresh.",
+                    code="consent_changed",
+                )
+            current = read_credentials()
+            current_revision = file_revision(credential_path)
+            credentials_changed = bool(
+                not secrets.compare_digest(current_revision, credential_revision)
+                or not secrets.compare_digest(
+                    _credential_identity(current),
+                    credential_identity,
+                )
+            )
+            if credentials_changed:
+                if current and is_token_valid(current):
+                    return {
+                        "access_token": current["accessToken"],
+                        "source": current.get("source"),
+                    }
+                raise ClaudeRefreshError(
+                    "Claude credentials changed during refresh.",
+                    code="credentials_changed",
+                )
+            guard = commit_guard() if commit_guard is not None else nullcontext()
+            with guard:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ClaudeRefreshError(
+                        "Claude login refresh was cancelled.",
+                        code="refresh_cancelled",
+                    )
+                write_credentials(
+                    refreshed["access_token"],
+                    refreshed["refresh_token"],
+                    refreshed["expires_at_ms"],
+                    expected_revision=credential_revision,
+                )
+        return {
+            "access_token": refreshed["access_token"],
+            "source": "refreshed",
+        }
+
+
 def resolve_access_token() -> Optional[Dict[str, Any]]:
     """Return ``{access_token, mode, source}`` for subscription OAuth, or None."""
     creds = read_credentials()
@@ -207,21 +376,9 @@ def resolve_access_token() -> Optional[Dict[str, Any]]:
             "mode": "subscription_oauth",
             "source": again.get("source"),
         }
-    refresh = (again or creds).get("refreshToken") or ""
-    if not refresh:
-        return None
     try:
-        refreshed = refresh_token_pure(refresh)
-        write_credentials(
-            refreshed["access_token"],
-            refreshed["refresh_token"],
-            refreshed["expires_at_ms"],
-        )
-        return {
-            "access_token": refreshed["access_token"],
-            "mode": "subscription_oauth",
-            "source": "refreshed",
-        }
+        refreshed = refresh_access_token()
+        return {**refreshed, "mode": "subscription_oauth"}
     except Exception:
         return None
 

@@ -32,13 +32,15 @@ Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 �
    `workflow_timeout`은 작업 규모와 MCP 클라이언트의 호출 제한 안에서 정한다. dependency wave가 여러 개인
    긴 plan은 검토한 plan을 `agent_hub_start_workflow`에 넘기고, 반환된 `run_id`로
    `agent_hub_continue_workflow`를 반복한다. 반환된 `next_action.arguments.expected_revision`을 다음
-   continue에 그대로 넘긴다. continue는 기본 한 wave를 실행하고 상태를 파일에 저장한다.
+   continue에 그대로 넘긴다. continue는 기본 한 wave를 실행하고 상태를 파일에 저장한다. 장문 조사와
+   문서 작성은 기본 `per_call_timeout=900`, `workflow_timeout=1740`을 임의로 낮추지 않는다.
 6. 실행기는 현재 dependency frontier의 ready step을 병렬로 호출한다. 배열 순서나 provider 이름 순서를
    작업 순서로 해석하지 않는다.
 7. `human_review=true`, `consistency_gate_human_review`, 실패 step 또는 blocked step이 있으면 성공으로
-   포장하지 않는다. end-to-end run의 `timed_out`과 `workflow_timeout_exceeded`도 완성은 아니지만,
-   `resumable=true`와 `run_id`가 있으면 완료된 앞 단계를 버리지 말고 continue로 이어간다. 재개 상태가
-   없을 때만 새 plan을 만든다. 합의된 내용과 이견, 미실행 단계를 사용자에게 분리해 보여 준다.
+   포장하지 않는다. end-to-end run의 `timed_out`, `workflow_timeout_exceeded`,
+   `provider_call_timeout`도 완성은 아니지만, `resumable=true`와 `run_id`가 있으면 완료된 앞 단계를
+   버리지 말고 continue로 이어간다. 재개 상태가 없을 때만 새 plan을 만든다. 합의된 내용과 이견,
+   미실행 단계를 사용자에게 분리해 보여 준다.
    `handoff_drift`가 발생하면 provider 호출 전에 멈춘 것이다. 변경된 프로젝트 HANDOFF를 검토하고 새
    계획이 필요한지 판단한다. 기존 스냅샷을 의도적으로 유지할 때만
    `handoff_drift_policy="use-snapshot"`으로 재개한다.

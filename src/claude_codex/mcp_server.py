@@ -42,7 +42,7 @@ CHAT_SCHEMA: Dict[str, Any] = {
             "enum": ["low", "medium", "high"],
             "description": "Provider-neutral reasoning depth; unsupported models fail closed.",
         },
-        "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 600, "default": 120},
+        "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 1800, "default": 120},
         "messages": {
             "type": "array",
             "items": {"type": "object"},
@@ -153,14 +153,8 @@ def _login_status(_args):
 
 def _login_refresh(_args):
     security.require_consent()
-    creds = subscription_auth.read_credentials()
-    if not creds or not creds.get("refreshToken"):
-        raise RuntimeError("No refresh token. Run: claude auth login --claudeai")
-    refreshed = subscription_auth.refresh_token_pure(creds["refreshToken"])
-    subscription_auth.write_credentials(
-        refreshed["access_token"], refreshed["refresh_token"], refreshed["expires_at_ms"]
-    )
-    out = {"success": True, "expires_at_ms": refreshed["expires_at_ms"]}
+    subscription_auth.refresh_access_token()
+    out = {"success": True}
     return {"text": json.dumps(out, indent=2), **out, **response.standard_fields(provider="anthropic", backend="subscription-oauth")}
 
 

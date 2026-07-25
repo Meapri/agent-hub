@@ -64,6 +64,45 @@ REASONING_EFFORTS = ("low", "medium", "high")
 INVESTIGATION_DEPTHS = ("shallow", "standard", "deep")
 PROVIDER_CALL_BUDGET_ERROR = "provider_call_budget_exhausted"
 PROVIDER_CALL_DEADLINE_ERROR = "workflow_timeout_exceeded"
+PROVIDER_CALL_TIMEOUT_ERROR = "provider_call_timeout"
+_TIMEOUT_ERROR_TYPES = {
+    "codex_timeout",
+    "connect_timeout",
+    "http_timeout",
+    "provider_call_timeout",
+    "read_timeout",
+    "request_timeout",
+    "timeout",
+    "timeouterror",
+    "workflow_timeout_exceeded",
+}
+
+
+def _is_timeout_error(value: Any) -> bool:
+    """Recognize provider timeout envelopes without persisting raw error text."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _is_timeout_error(value.get(key))
+            for key in ("type", "code", "error_type", "message")
+            if value.get(key) is not None
+        )
+    if isinstance(value, BaseException):
+        if isinstance(value, TimeoutError):
+            return True
+        code = getattr(value, "code", None)
+        if code and _is_timeout_error(code):
+            return True
+        value = type(value).__name__
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in _TIMEOUT_ERROR_TYPES:
+        return True
+    return (
+        "timed_out" in normalized
+        or normalized.endswith("_timeout")
+        or normalized.endswith("timeouterror")
+        or ("exceeded" in normalized and "seconds" in normalized)
+    )
 
 
 class ProviderCallBudgetExceeded(RuntimeError):
@@ -604,6 +643,11 @@ def execute_plan(
                     if isinstance(raw_error, Mapping)
                     else raw_error
                 )
+                if (
+                    _is_timeout_error(raw_error)
+                    and response_error != PROVIDER_CALL_DEADLINE_ERROR
+                ):
+                    response_error = PROVIDER_CALL_TIMEOUT_ERROR
                 ok = bool(response.get("success", not response.get("error")))
                 attempts.append(
                     {
@@ -647,11 +691,16 @@ def execute_plan(
                 )
                 break
             except Exception as exc:  # noqa: BLE001 - fallback is part of the contract
+                error = (
+                    PROVIDER_CALL_TIMEOUT_ERROR
+                    if _is_timeout_error(exc)
+                    else str(exc)
+                )
                 attempts.append(
                     {
                         "provider": provider,
                         "success": False,
-                        "error": str(exc),
+                        "error": error,
                         "provider_calls": (
                             provider_calls_per_attempt
                             if opaque_invoker
@@ -744,13 +793,21 @@ def execute_plan(
         slice_wave_count += 1
         if failed:
             blocked = sorted(pending)
-            timeout_failure = any(
+            workflow_timeout_failure = any(
                 any(
                     attempt.get("error") == "workflow_timeout_exceeded"
                     for attempt in results[step_id].get("attempts") or []
                 )
                 for step_id in failed
             )
+            provider_timeout_failure = any(
+                any(
+                    attempt.get("error") == PROVIDER_CALL_TIMEOUT_ERROR
+                    for attempt in results[step_id].get("attempts") or []
+                )
+                for step_id in failed
+            )
+            timeout_failure = workflow_timeout_failure or provider_timeout_failure
             budget_failure = any(
                 any(
                     attempt.get("error") == PROVIDER_CALL_BUDGET_ERROR
@@ -769,14 +826,21 @@ def execute_plan(
                 ),
                 "text": (
                     "Adaptive workflow exhausted its end-to-end time budget."
-                    if timeout_failure
+                    if workflow_timeout_failure
+                    else (
+                        "A provider call timed out. Completed steps were preserved; "
+                        "continue the persisted run to retry the unfinished step."
+                    )
+                    if provider_timeout_failure
                     else "Adaptive workflow exhausted its provider-call budget."
                     if budget_failure
                     else f"Adaptive workflow failed at: {', '.join(failed)}"
                 ),
                 "error": (
                     "workflow_timeout_exceeded"
-                    if timeout_failure
+                    if workflow_timeout_failure
+                    else PROVIDER_CALL_TIMEOUT_ERROR
+                    if provider_timeout_failure
                     else PROVIDER_CALL_BUDGET_ERROR
                     if budget_failure
                     else "adaptive_step_failed"

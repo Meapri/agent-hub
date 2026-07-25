@@ -241,7 +241,7 @@ CHAT_SCHEMA: Dict[str, Any] = {
             "default": False,
             "description": "When true (agy-oauth), stream tokens via MCP notifications/message deltas.",
         },
-        "timeout_sec": {"type": "integer", "minimum": 20, "maximum": 600},
+        "timeout_sec": {"type": "integer", "minimum": 20, "maximum": 1800},
         "retry_count": {"type": "integer", "minimum": 0, "maximum": 5, "default": 1},
         "retry_sleep_cap_sec": {"type": "number", "minimum": 0, "maximum": 30, "default": 8},
     },

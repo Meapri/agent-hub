@@ -372,6 +372,8 @@ def refresh_access_token(
     refresh_token: str,
     client: Optional[OAuthClient] = None,
     expected_credential_revision: str | None = None,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
 ) -> Dict[str, Any]:
     with security.auth_state_lock():
         if not security.agy_session_enabled():
@@ -413,6 +415,11 @@ def refresh_access_token(
     clients = [client] if client else resolve_oauth_clients()
     last_error: Optional[Exception] = None
     for candidate in clients:
+        if cancel_event is not None and cancel_event.is_set():
+            raise OAuthLoginError(
+                "Direct Antigravity token refresh was cancelled.",
+                code="oauth_refresh_cancelled",
+            )
         body = urllib.parse.urlencode(
             {
                 "grant_type": "refresh_token",
@@ -456,13 +463,20 @@ def refresh_access_token(
                         "Direct Antigravity credentials changed during refresh.",
                         code="credentials_changed",
                     )
-                save_oauth_client(candidate)
-                save_tokens(
-                    access_token=str(payload["access_token"]),
-                    refresh_token=str(payload.get("refresh_token") or refresh_token),
-                    expires_in=int(payload.get("expires_in") or 3600),
-                    destination=credential_path,
-                )
+                guard = commit_guard() if commit_guard is not None else nullcontext()
+                with guard:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise OAuthLoginError(
+                            "Direct Antigravity token refresh was cancelled.",
+                            code="oauth_refresh_cancelled",
+                        )
+                    save_oauth_client(candidate)
+                    save_tokens(
+                        access_token=str(payload["access_token"]),
+                        refresh_token=str(payload.get("refresh_token") or refresh_token),
+                        expires_in=int(payload.get("expires_in") or 3600),
+                        destination=credential_path,
+                    )
             return {
                 "success": True,
                 "token_file_present": credential_path.is_file(),

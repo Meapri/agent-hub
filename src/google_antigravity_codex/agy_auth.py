@@ -14,12 +14,13 @@ import math
 import os
 from pathlib import Path
 import stat
+import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, ContextManager, Dict, Optional
 
-from agent_hub.core.auth_state import file_revision
+from agent_hub.core.auth_state import file_revision, refresh_operation_lock
 
-from . import security
+from . import paths, security
 
 # Direct plugin OAuth login (PKCE) writes here by default.
 PLUGIN_TOKEN_FILE = "~/.config/google-antigravity-codex/oauth-token.json"
@@ -182,6 +183,8 @@ def _refresh_via_oauth_client(
     credentials: AgyCredentials,
     *,
     expected_credential_revision: str,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
 ) -> Optional[AgyCredentials]:
     """Refresh using this plugin's OAuth client credentials (never agy CLI)."""
     if not credentials.refresh_token:
@@ -194,26 +197,42 @@ def _refresh_via_oauth_client(
         oauth_login.refresh_access_token(
             refresh_token=credentials.refresh_token,
             expected_credential_revision=expected_credential_revision,
+            cancel_event=cancel_event,
+            commit_guard=commit_guard,
         )
         return load_credentials()
     except Exception:
         return None
 
 
-def force_refresh_credentials() -> AgyCredentials:
+def force_refresh_credentials(
+    *,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
+) -> AgyCredentials:
     """Force a Google token refresh (plugin OAuth only)."""
-    with security.auth_state_lock():
-        credentials = load_credentials()
-        credential_revision = file_revision(token_file_path())
-    if not credentials.refresh_token:
-        raise AgyAuthError(
-            "No refresh token stored. Run: python3 scripts/google_antigravity_login.py interactive",
-            code="agy_refresh_missing",
+    with refresh_operation_lock(paths.config_dir()):
+        with security.auth_state_lock():
+            credentials = load_credentials()
+            credential_revision = file_revision(token_file_path())
+        if not credentials.expired:
+            return credentials
+        if not credentials.refresh_token:
+            raise AgyAuthError(
+                "No refresh token stored. Run: python3 scripts/google_antigravity_login.py interactive",
+                code="agy_refresh_missing",
+            )
+        if cancel_event is not None and cancel_event.is_set():
+            raise AgyAuthError(
+                "OAuth refresh was cancelled.",
+                code="agy_refresh_cancelled",
+            )
+        refreshed = _refresh_via_oauth_client(
+            credentials,
+            expected_credential_revision=credential_revision,
+            cancel_event=cancel_event,
+            commit_guard=commit_guard,
         )
-    refreshed = _refresh_via_oauth_client(
-        credentials,
-        expected_credential_revision=credential_revision,
-    )
     if refreshed is None or not refreshed.access_token:
         raise AgyAuthError(
             "OAuth refresh failed. Run: python3 scripts/google_antigravity_login.py interactive",

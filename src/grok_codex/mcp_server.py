@@ -44,7 +44,7 @@ CHAT_SCHEMA: Dict[str, Any] = {
             "enum": ["low", "medium", "high"],
             "description": "Uses Grok 4.5 Responses reasoning.effort; unsupported models fail closed.",
         },
-        "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 600, "default": 120},
+        "timeout_sec": {"type": "integer", "minimum": 5, "maximum": 1800, "default": 120},
         "messages": {
             "type": "array",
             "items": {"type": "object"},

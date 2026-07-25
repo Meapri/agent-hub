@@ -391,6 +391,24 @@ def test_gemini_status_probe_uses_read_only_provider_probe(monkeypatch):
     assert state["warnings"] == []
 
 
+def test_auth_lifecycle_normalizes_ready_credentials_as_logged_in():
+    lifecycle = operations._auth_lifecycle(
+        account_present=False,
+        logged_in=False,
+        auth_ready=True,
+        refresh_supported=False,
+    )
+
+    assert lifecycle == {
+        "account_present": True,
+        "logged_in": True,
+        "auth_ready": True,
+        "refresh_supported": False,
+        "refreshable": False,
+        "relogin_required": False,
+    }
+
+
 @pytest.mark.parametrize(
     ("subscription", "active_mode", "expected_present", "expected_pending"),
     [
@@ -469,6 +487,7 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
         lambda: {
             "logged_in": True,
             "token_valid": False,
+            "has_refresh_token": True,
             "mode": "subscription_oauth",
             "source": "test",
         },
@@ -489,6 +508,7 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
         lambda: {
             "logged_in": True,
             "token_valid": False,
+            "has_refresh_token": True,
             "mode": "subscription_oauth",
             "source": "test",
         },
@@ -528,7 +548,12 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
     monkeypatch.setattr(
         operations.google_oauth,
         "login_status",
-        lambda: {"credentials_readable": True, "expired": True},
+        lambda: {
+            "token_file_present": True,
+            "credentials_readable": True,
+            "refresh_token_present": True,
+            "expired": True,
+        },
     )
     monkeypatch.setattr(
         operations.google_oauth,
@@ -562,11 +587,16 @@ def test_all_provider_status_never_calls_credential_refresh(monkeypatch):
     assert result["success"] is True
     assert refresh_args == [False]
     assert result["data"]["providers"]["claude"]["warnings"] == [
-        "auth_refresh_required"
+        "auth_refresh_available"
     ]
+    assert result["data"]["providers"]["claude"]["refreshable"] is True
     assert result["data"]["providers"]["grok"]["warnings"] == [
-        "auth_refresh_required"
+        "auth_refresh_available"
     ]
+    assert result["data"]["providers"]["grok"]["refreshable"] is True
+    assert result["data"]["providers"]["gemini"]["refreshable"] is True
+    assert result["data"]["providers"]["gpt"]["refresh_supported"] is False
+    assert result["data"]["providers"]["gpt"]["refreshable"] is False
     status_spec = next(
         item
         for item in operations.tool_definitions()

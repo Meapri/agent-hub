@@ -433,6 +433,33 @@ def test_refresh_tool_uses_revision_fenced_force_refresh():
     assert result["access_token_present"] is True
 
 
+def test_force_refresh_coalesces_credentials_refreshed_by_another_process(
+    tmp_path,
+    monkeypatch,
+):
+    token_file = tmp_path / "oauth-token.json"
+    enable(monkeypatch, token_file)
+    monkeypatch.setattr(
+        agy_auth.paths,
+        "config_dir",
+        lambda: tmp_path / "config",
+    )
+    write_token(
+        token_file,
+        {
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_at_ms": 4102444800000,
+        },
+    )
+
+    with patch.object(agy_auth, "_refresh_via_oauth_client") as refresh:
+        credentials = agy_auth.force_refresh_credentials()
+
+    refresh.assert_not_called()
+    assert credentials.access_token == "new-access-token"
+
+
 def test_http_error_does_not_include_request_body_or_token():
     class FailingOpener:
         def open(self, request, timeout):

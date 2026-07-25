@@ -22,7 +22,8 @@
         <span>로컬 연결 관리</span>
       </div>
       <div class="topbar-actions">
-        <button class="icon-button" id="refresh-button" type="button" aria-label="상태 새로고침">
+        <button class="icon-button" id="refresh-button" type="button"
+          aria-label="상태 다시 확인" title="상태 다시 확인">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M20 11a8.1 8.1 0 0 0-14.9-4M4 4.5V9h4.5M4 13a8.1 8.1 0 0 0 14.9 4M20 19.5V15h-4.5"></path>
           </svg>
@@ -49,13 +50,15 @@
           <h2>제공자</h2>
           <nav id="provider-list" aria-label="제공자 목록"></nav>
         </aside>
-        <section class="detail-panel" id="detail-panel">
+        <section class="detail-panel" id="detail-panel" tabindex="-1">
           <div class="loading-state">
             <span class="spinner" aria-hidden="true"></span>
             <p>연결 상태를 확인하고 있습니다.</p>
           </div>
         </section>
       </section>
+      <div class="sr-only" id="job-announcer"
+        role="status" aria-live="polite" aria-atomic="true"></div>
     </main>
 
     <footer class="security-footer">

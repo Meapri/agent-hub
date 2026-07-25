@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Dict, Optional
 
-from agent_hub.core.auth_state import auth_state_lock, file_revision
+from agent_hub.core.auth_state import (
+    auth_state_lock,
+    file_revision,
+    refresh_operation_lock,
+)
 
 from . import paths, security
 
@@ -424,58 +428,41 @@ def refresh_tokens(refresh_token: str, *, token_endpoint: str = "") -> Dict[str,
     }
 
 
-def resolve_access_token() -> Optional[str]:
+def _refresh_access_token_under_operation_lock(
+    *,
+    only_if_recommended: bool,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
+) -> tuple[str, bool]:
+    """Resolve or refresh xAI OAuth while the exchange lock is already held."""
+
     with auth_state_lock(paths.config_dir()):
-        if not security.user_consent_enabled():
-            return None
+        security.require_consent()
         consent_revision = security.consent_revision()
         credential_revision = file_revision(token_path())
         data = load_tokens()
         if not data or not data.get("access_token"):
-            return None
-    # Proactive refresh when we have refresh_token (skew window).
-    refresh = str(data.get("refresh_token") or "").strip()
-    if refresh:
-        # Always try refresh if last_refresh older than skew and expires_in known
-        try:
-            last = data.get("last_refresh")
-            expires_in = int(data.get("expires_in") or 0)
-            if last and expires_in:
-                # naive: refresh if more than expires_in - skew elapsed
-                from datetime import datetime
-
-                ts = datetime.fromisoformat(str(last).replace("Z", "+00:00")).timestamp()
-                age = time.time() - ts
-                if age > max(60, expires_in - ACCESS_TOKEN_REFRESH_SKEW_SECONDS):
-                    refreshed = refresh_tokens(
-                        refresh,
-                        token_endpoint=str(data.get("token_endpoint") or ""),
-                    )
-                    with auth_state_lock(paths.config_dir()):
-                        if (
-                            not security.user_consent_enabled()
-                            or not secrets.compare_digest(
-                                security.consent_revision(),
-                                consent_revision,
-                            )
-                            or not secrets.compare_digest(
-                                file_revision(token_path()),
-                                credential_revision,
-                            )
-                        ):
-                            return None
-                        save_tokens(
-                            refreshed,
-                            discovery_info={
-                                "token_endpoint": (
-                                    refreshed.get("token_endpoint")
-                                    or data.get("token_endpoint")
-                                )
-                            },
-                        )
-                        return refreshed["access_token"]
-        except Exception:
-            pass
+            raise RuntimeError("xAI login credentials are unavailable")
+        access_token = str(data["access_token"])
+        token_valid, refresh_recommended = _token_timing(data)
+        refresh_token = str(data.get("refresh_token") or "").strip()
+        if (
+            token_valid is True
+            and refresh_recommended is False
+        ) or (
+            only_if_recommended
+            and (refresh_recommended is not True or not refresh_token)
+        ):
+            return access_token, True
+        if not refresh_token:
+            raise RuntimeError("xAI login must be completed again")
+        token_endpoint = str(data.get("token_endpoint") or "")
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("xAI login refresh was cancelled")
+    refreshed = refresh_tokens(
+        refresh_token,
+        token_endpoint=token_endpoint,
+    )
     with auth_state_lock(paths.config_dir()):
         if (
             not security.user_consent_enabled()
@@ -488,8 +475,56 @@ def resolve_access_token() -> Optional[str]:
                 credential_revision,
             )
         ):
-            return None
-    return str(data["access_token"])
+            raise RuntimeError("xAI credentials changed during refresh")
+        guard = commit_guard() if commit_guard is not None else nullcontext()
+        with guard:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("xAI login refresh was cancelled")
+            save_tokens(
+                refreshed,
+                discovery_info={
+                    "token_endpoint": (
+                        refreshed.get("token_endpoint") or token_endpoint
+                    )
+                },
+            )
+    return str(refreshed["access_token"]), False
+
+
+def force_refresh_access_token(
+    *,
+    cancel_event: threading.Event | None = None,
+    commit_guard: Callable[[], ContextManager[Any]] | None = None,
+) -> Dict[str, Any]:
+    """Refresh xAI OAuth once with consent, credential, and manager fences."""
+
+    with refresh_operation_lock(paths.config_dir()):
+        _access_token, coalesced = _refresh_access_token_under_operation_lock(
+            only_if_recommended=False,
+            cancel_event=cancel_event,
+            commit_guard=commit_guard,
+        )
+    return {
+        "success": True,
+        **({"coalesced": True} if coalesced else {}),
+    }
+
+
+def resolve_access_token() -> Optional[str]:
+    try:
+        with refresh_operation_lock(paths.config_dir()):
+            access_token, _coalesced = _refresh_access_token_under_operation_lock(
+                only_if_recommended=True,
+            )
+            return access_token
+    except Exception:
+        with auth_state_lock(paths.config_dir()):
+            if not security.user_consent_enabled():
+                return None
+            data = load_tokens()
+            if not data or not data.get("access_token"):
+                return None
+            return str(data["access_token"])
 
 
 def start_login(*, open_browser: bool = True) -> Dict[str, Any]:

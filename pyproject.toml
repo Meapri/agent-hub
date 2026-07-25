@@ -42,7 +42,7 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
 # importlib mode: lets same-named test files (test_core.py) coexist across tests/<pkg>/ dirs.
 addopts = "--import-mode=importlib --strict-markers"
 

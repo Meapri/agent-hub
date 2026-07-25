@@ -926,26 +926,32 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-25 Agent Hub 1.4.3 Gemini 3.6 실제 실행 복구
+## 2026-07-25 Provider 생명주기, 긴 workflow 복구, README 전면 개편
 
-- **원래 목표**: 동적 catalog에 표시되는 `gemini-3.6-flash-{high,medium,low}`를 Agent Hub의 공통 provider 경로와 연결 관리 GUI에서 실제로 실행하고, 로그인·목록 조회와 실제 생성 성공을 구분해 연결 상태를 정확히 보여 줍니다.
-- **현재 단계**: public model ID 실행, bounded GUI 연결 테스트, 회귀 검증, 1.4.3 로컬 설치까지 완료했습니다. Python editable package와 Codex·Claude Code plugin은 모두 1.4.3이며 새 MCP stdio process도 1.4.3을 반환합니다.
+- **원래 목표**: Claude, Grok, Gemini, GPT의 로그인 유지·현재 사용 가능·세션 갱신·재로그인 필요 상태를 공통 GUI에서 안전하게 관리하고, Agent Hub로 저장소 전체를 조사해 README를 새로 작성하며, 조사·작성 중 timeout이나 planner 오류가 발생해도 완료된 작업을 잃지 않고 근본 원인을 해결합니다.
+- **현재 단계**: provider auth lifecycle/UI와 refresh 경쟁 제어, adaptive timeout 복구, planner 교정 횟수, 재현 가능한 pytest 설정, README 전면 개편과 전체 검증까지 완료했습니다. 변경은 source checkout 작업 트리에 있으며 commit·설치·push하지 않았습니다.
 - **완료**:
-  - Antigravity catalog의 dictionary key인 public model ID를 generation에 그대로 사용합니다. 중첩 `internal_id`는 metadata로만 보존하고 non-stream, stream, 401 뒤 project/token refresh에서도 실행 ID로 치환하지 않습니다.
-  - Gemini 3.6 Flash tier의 작은 출력 한도를 최소 256 token으로 보정하고 `-medium`을 `thinking_level=medium`으로 해석합니다.
-  - Gemini GUI 연결 테스트는 시작 시점의 선택 모델과 auth generation을 고정해 30초 timeout, 최대 512 output token, retry 0, tools·grounding·policy off인 실제 요청 한 번을 보냅니다. 사용량 안내를 UI, README, provider-connect skill에 표시하고 평소 상태·catalog 조회는 생성 요청을 보내지 않습니다.
-  - 재로그인·동의 변경·manager 종료와 겹친 늦은 성공을 fail closed하고 prompt, model output, provider 원문 오류를 job·GUI에 저장하지 않습니다.
-  - 로컬 브라우저에서 `gemini-3.6-flash-high` 실제 연결 테스트가 성공했고 console error는 0건이었습니다.
+  - 공통 redacted 상태에 `logged_in`, `auth_ready`, `refresh_supported`, `refreshable`, `relogin_required`, `connection_state`를 추가하고 GUI에서 `준비됨`, `갱신 가능`, `로그인됨`, `재로그인 필요`, `로그인 필요`를 구분했습니다.
+  - Claude·Grok·Gemini refresh에 provider별 in-process/cross-process exchange lock, consent·credential revision CAS, late-success 차단을 적용했습니다. GPT login/refresh는 공식 Codex 소유로 유지하고 GUI refresh 대상에서 제외했습니다.
+  - adaptive 기본 제한을 MCP 1800초, provider 900초, workflow 1740초, 반환 여유 10초로 확대했습니다. provider schema timeout 상한도 1800초로 맞췄습니다.
+  - `TimeoutError`, `codex_timeout`, `request_timeout` 등을 raw 메시지 없이 `provider_call_timeout`으로 정규화합니다. scheduler는 이를 `timed_out`으로 분류하고 `run_workflow`가 완료 단계를 보존한 `paused` run과 `resumable=true`를 반환합니다.
+  - planner validation 교정은 기본 3회, 최대 5회로 늘렸습니다. adaptive/document-write skill은 긴 문서 작업에서 새 기본 제한을 낮추지 않고 `provider_call_timeout` run을 이어가도록 갱신·동기화했습니다.
+  - `pyproject.toml` pytest `pythonpath`에 저장소 루트를 추가해 `./.venv/bin/pytest -q`가 외부 `PYTHONPATH` 없이 `scripts` 모듈을 수집하도록 고쳤습니다.
+  - Agent Hub adaptive plan `e104e320aba5b23a95946ee16cd541a2cf14d1c1aedc40d6da27c537914baf73`을 실행했습니다. Claude planner가 한 번의 validation 오류를 교정했고 Claude/GPT/Gemini `deep/high` 조사 세 개를 병렬 실행한 뒤 Claude가 README를 작성했습니다. 5 leaf call, 386974ms, quality rewrite 1회 후 gate를 통과했습니다.
+  - README를 설치, GUI/수동 로그인, live catalog와 `static_fallback`, 공개 도구 37개, fixed/adaptive workflow, 긴 실행 복구, HANDOFF/takeover, 보안, 문제 해결, 개발 검증 중심으로 전면 개편했습니다.
 - **미완**:
-  - 현재 실행 중인 Codex Desktop과 Claude Code process는 설치 전 plugin/MCP를 적재했을 수 있어 host 재시작이 필요합니다.
-  - live catalog와 응답 가능 여부는 Google 서비스와 현재 계정 권한에 따라 달라질 수 있으며 GUI 연결 테스트는 누를 때마다 작은 생성 요청 한 번을 사용합니다.
-- **변경 파일**: 실행·GUI는 `src/google_antigravity_codex/{antigravity_api.py,chat.py}`, `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/app.js`; 버전·plugin은 `pyproject.toml`, `src/agent_hub/__init__.py`, `.claude-plugin/marketplace.json`, `hubs/{codex/.codex-plugin/plugin.json,claude-code/.claude-plugin/plugin.json}`; 문서·skill은 `README.md`, `HANDOFF.md`, `hubs/{shared,codex,claude-code}/skills/provider-connect/SKILL.md`; 회귀 테스트는 관련 `tests/agent_hub/`와 `tests/google_antigravity_codex/` 파일을 갱신했습니다.
+  - 실행 중인 Codex plugin MCP는 수정 전 Python 모듈을 이미 import했으므로, 새 timeout default와 schema를 앱에서 사용하려면 MCP 재시작이 필요합니다. source checkout 새 프로세스에서는 실제 6분 27초 README workflow 완료로 검증했습니다.
+  - 실제 Claude·Gemini credential 갱신은 사용자 계정을 바꾸는 동작이라 실행하지 않았습니다.
+  - 작업 트리를 commit·설치·push하지 않았습니다.
+- **변경 파일**: auth/API/UI는 `src/agent_hub/{operations.py,connect_service.py,connect_app.py,core/auth_state.py,connect_ui/}`와 provider auth 모듈; adaptive 복구는 `src/agent_hub/{operations.py,orchestrator.py}`, 네 provider `mcp_server.py`, `tests/agent_hub/test_adaptive_orchestration.py`; 문서·skill은 `README.md`, `hubs/{shared,codex,claude-code}/skills/{adaptive-orchestrate,document-write,provider-connect}/SKILL.md`; 테스트 재현성은 `pyproject.toml`입니다.
 - **검증 실행 결과**:
-  - 수정 전 신규 회귀 5건 실패 재현; 관련 suite → `135 passed`; 격리된 전체 pytest → `684 passed, 2 skipped`
-  - Ruff, `node --check`, `git diff --check`, hub plugin·Ruler sync·phase1·release version 검사 → 통과
-  - 1.4.3 sdist·wheel build와 필수 파일 포함 확인; setup check → changed 0; doctor → `8 pass, 0 warn, 0 fail`
-  - Python package와 Codex·Claude Code plugin → 1.4.3 installed/enabled; 새 MCP stdio → server 1.4.3, `agent_hub_*` 도구 37개; 설치 skill SHA-256 일치
-- **현재 리스크**: nested `internal_id`를 다시 generation model로 사용하면 404 회귀가 발생합니다. 이미 실행 중인 MCP process는 1.4.3으로 자동 hot reload되지 않습니다.
-- **Do-Not-Repeat**: nested placeholder를 generation body에 보내지 마세요. status나 model-list 성공만으로 generation 성공을 주장하지 마세요. 연결 테스트에 prompt, model output, provider response body·원문 오류를 복사하지 마세요. auth generation fence 없이 늦은 성공을 완료 처리하지 마세요.
-- **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새 연결 관리 화면의 Gemini 카드에서 `연결 테스트`를 한 번 실행해 host 재적재 후에도 1.4.3 실제 응답 성공 문구가 표시되는지 확인하세요.
+  - 전체 pytest → `706 passed, 2 skipped`; timeout/provider/auth/UI 집중 suite → `218 passed`
+  - 전체 Ruff, `node --check`, 관련 `py_compile`, `git diff --check` → 통과
+  - `agent_hub_verify(doc_class=durable,user_facing=true)`와 `orchestrate_codex.document_quality README.md` → 경고 0, 통과
+  - hub plugin 검사, Ruler sync 검사, release version 1.4.3 일치, sdist/wheel build → 통과
+  - 수정된 source 프로세스의 실제 adaptive README workflow → `completed`, 5 leaf call, 386974ms, final provider Claude, quality gate 통과
+  - 기존 localhost read-only UI QA → 로그인됨 4, 준비됨 2, 갱신 가능 2, detail focus 유지, console error 0
+- **현재 리스크**: 29분짜리 MCP 호출은 호스트 앱의 외부 timeout이 더 짧으면 여전히 끊길 수 있으므로 여러 wave의 장문 작업은 `start`/`continue`가 안전합니다. timeout 재개는 같은 provider 요청을 다시 보낼 수 있어 사용량이 중복될 수 있습니다. refresh token 회전 경쟁은 exchange lock과 revision CAS로 막지만 실제 credential 갱신은 아직 수행하지 않았습니다.
+- **Do-Not-Repeat**: provider timeout을 `adaptive_step_failed`로 굳혀 완료된 wave를 버리지 마세요. 장문 `deep/high` 조사에 150초/270초 제한을 다시 하드코딩하지 마세요. routine status에서 credential을 갱신하거나 token·raw prompt·계정 식별자를 오류, event, DOM, HANDOFF에 넣지 마세요. README에 internal recipe를 public workflow처럼 쓰거나 `static_fallback`을 live catalog로 표현하지 마세요.
+- **다음 한 걸음**: Codex에서 Agent Hub MCP를 재시작한 뒤 새 `tools/list`의 `agent_hub_run_workflow` schema에서 `per_call_timeout.default=900`, `workflow_timeout.default=1740`, `planner_repair_attempts.default=3`을 확인하세요.
 <!-- agent-hub:handoff:v1:end -->

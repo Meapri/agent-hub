@@ -131,6 +131,7 @@ class ConnectHandler(BaseHTTPRequestHandler):
                 confirmation=str(body.get("confirmation") or ""),
             ),
             "login-start": lambda: self.server.manager.start_login(provider),
+            "refresh": lambda: self.server.manager.start_refresh(provider),
             "login-complete": lambda: self.server.manager.complete_login(
                 provider,
                 str(body.get("job_id") or ""),
@@ -167,6 +168,8 @@ class ConnectHandler(BaseHTTPRequestHandler):
                     "provider_busy",
                     "login_in_progress",
                     "test_in_progress",
+                    "refresh_in_progress",
+                    "refresh_unavailable",
                     "credential_removal_failed",
                 }
                 else HTTPStatus.BAD_REQUEST

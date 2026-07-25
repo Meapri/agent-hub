@@ -7,6 +7,7 @@ only redacted state.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 import hashlib
 import http.server
@@ -24,6 +25,8 @@ import urllib.parse
 
 from claude_codex import security as claude_security
 from claude_codex import models as claude_models
+from claude_codex import subscription_auth as claude_subscription
+from google_antigravity_codex import agy_auth as google_auth
 from google_antigravity_codex import account as google_account
 from google_antigravity_codex import consent_cli as google_consent
 from google_antigravity_codex import models as google_models
@@ -274,6 +277,7 @@ class ConnectionManager:
         self._jobs: Dict[str, ConnectionJob] = {}
         self._lock = threading.RLock()
         self._starting_logins: set[str] = set()
+        self._starting_refreshes: set[str] = set()
         self._starting_tests: set[str] = set()
         self._cancel_events: Dict[str, threading.Event] = {}
         self._callback_servers: Dict[str, http.server.HTTPServer] = {}
@@ -292,11 +296,38 @@ class ConnectionManager:
         public: Dict[str, Dict[str, Any]] = {}
         for provider_id, state in raw["providers"].items():
             auth_mode = state.get("auth_mode")
+            auth_ready = bool(state.get("auth_ready", state.get("authenticated")))
+            logged_in = bool(
+                state.get(
+                    "logged_in",
+                    state.get("configured", state.get("authenticated")),
+                )
+                or auth_ready
+            )
+            account_present = bool(
+                state.get(
+                    "account_present",
+                    state.get("configured", state.get("authenticated")),
+                )
+                or logged_in
+            )
+            refreshable = bool(
+                state.get("refreshable")
+                and logged_in
+                and not auth_ready
+            )
+            relogin_required = bool(
+                not auth_ready
+                and not refreshable
+                and (state.get("relogin_required") or account_present)
+            )
             session_label = PROVIDER_SESSION_LABELS[provider_id]
             if provider_id == "claude" and auth_mode == "api_key":
                 session_label = "Claude API key"
             elif provider_id == "grok" and auth_mode == "api_key":
                 session_label = "xAI API key"
+            elif provider_id == "gpt" and auth_mode in {"api_key", "apiKey"}:
+                session_label = "Codex API key"
             safe = {
                 "id": provider_id,
                 "label": PROVIDER_LABELS[provider_id],
@@ -304,11 +335,16 @@ class ConnectionManager:
                 "login_owner": PROVIDER_LOGIN_OWNERS[provider_id],
                 "consent": bool(state.get("consent")),
                 "configured": bool(state.get("configured", state.get("authenticated"))),
-                "authenticated": bool(state.get("authenticated")),
-                "account_present": bool(
-                    state.get("configured", state.get("authenticated"))
+                "authenticated": auth_ready,
+                "logged_in": logged_in,
+                "auth_ready": auth_ready,
+                "account_present": account_present,
+                "login_ready": auth_ready,
+                "refresh_supported": bool(
+                    state.get("refresh_supported") or refreshable
                 ),
-                "login_ready": bool(state.get("authenticated")),
+                "refreshable": refreshable,
+                "relogin_required": relogin_required,
                 "ready": bool(state.get("ready")),
                 "auth_mode": auth_mode,
                 "plan_type": state.get("plan_type"),
@@ -349,6 +385,7 @@ class ConnectionManager:
                 ),
                 "capabilities": self._capability_labels(state.get("capabilities")),
             }
+            safe["connection_state"] = self._connection_state(safe)
             public[provider_id] = safe
         return {
             "success": True,
@@ -356,12 +393,32 @@ class ConnectionManager:
             "summary": {
                 "ready": sum(item["ready"] for item in public.values()),
                 "authenticated": sum(item["authenticated"] for item in public.values()),
+                "connected": sum(item["logged_in"] for item in public.values()),
+                "refreshable": sum(item["refreshable"] for item in public.values()),
+                "relogin_required": sum(
+                    item["relogin_required"] for item in public.values()
+                ),
                 "consent_required": sum(
-                    item["authenticated"] and not item["consent"] for item in public.values()
+                    item["logged_in"] and not item["consent"]
+                    for item in public.values()
                 ),
                 "total": len(public),
             },
         }
+
+    @staticmethod
+    def _connection_state(state: Dict[str, Any]) -> str:
+        if state["ready"]:
+            return "ready"
+        if state["refreshable"]:
+            return "refreshable"
+        if state["relogin_required"] or (
+            state["account_present"] and not state["logged_in"]
+        ):
+            return "relogin_required"
+        if state["logged_in"] or state["auth_ready"]:
+            return "signed_in"
+        return "signed_out"
 
     @staticmethod
     def _capability_labels(capabilities: Any) -> list[str]:
@@ -522,6 +579,11 @@ class ConnectionManager:
                     "이 제공자의 연결 확인이 시작되고 있습니다. 완료된 뒤 다시 로그인해 주세요.",
                     code="provider_busy",
                 )
+            if provider in self._starting_refreshes:
+                raise ConnectionError(
+                    "이 제공자의 로그인 갱신이 시작되고 있습니다. 완료된 뒤 다시 로그인해 주세요.",
+                    code="provider_busy",
+                )
             self._starting_logins.add(provider)
             self._invalidate_model_catalog(provider)
         try:
@@ -538,6 +600,59 @@ class ConnectionManager:
         finally:
             with self._lock:
                 self._starting_logins.discard(provider)
+
+    def start_refresh(self, provider: str) -> Dict[str, Any]:
+        provider = _provider(provider)
+        with self._lock:
+            self._ensure_open()
+            active = self._active_job(provider)
+            if active is not None:
+                if active.kind == "refresh":
+                    return active.public()
+                raise ConnectionError(
+                    "이 제공자의 다른 연결 작업이 진행 중입니다. 완료된 뒤 갱신해 주세요.",
+                    code="provider_busy",
+                )
+            current = self.status(provider)["providers"][provider]
+            if not current["consent"]:
+                raise ConnectionError(
+                    "먼저 Agent Hub 사용 동의를 완료해 주세요.",
+                    code="consent_required",
+                )
+            if not current["refreshable"]:
+                raise ConnectionError(
+                    "현재 로그인은 바로 갱신할 수 없습니다. 다시 로그인해 주세요.",
+                    code="refresh_unavailable",
+                )
+            if provider in self._starting_refreshes:
+                raise ConnectionError(
+                    "로그인 갱신 요청을 처리하고 있습니다.",
+                    code="refresh_in_progress",
+                )
+            if provider in self._starting_logins or provider in self._starting_tests:
+                raise ConnectionError(
+                    "이 제공자의 다른 연결 작업이 시작되고 있습니다. 완료된 뒤 갱신해 주세요.",
+                    code="provider_busy",
+                )
+            self._starting_refreshes.add(provider)
+            self._invalidate_model_catalog(provider)
+            try:
+                job = self._create_job(
+                    provider,
+                    kind="refresh",
+                    state="working",
+                    message=f"{PROVIDER_LABELS[provider]} 로그인 정보를 갱신하는 중입니다.",
+                )
+                cancel_event = threading.Event()
+                self._cancel_events[job.id] = cancel_event
+                threading.Thread(
+                    target=self._run_refresh,
+                    args=(job.id, cancel_event),
+                    daemon=True,
+                ).start()
+                return job.public()
+            finally:
+                self._starting_refreshes.discard(provider)
 
     def complete_login(self, provider: str, job_id: str, code_or_url: str) -> Dict[str, Any]:
         provider = _provider(provider)
@@ -613,6 +728,11 @@ class ConnectionManager:
             if provider in self._starting_logins:
                 raise ConnectionError(
                     "이 제공자의 로그인이 시작되고 있습니다. 완료된 뒤 연결을 확인해 주세요.",
+                    code="provider_busy",
+                )
+            if provider in self._starting_refreshes:
+                raise ConnectionError(
+                    "이 제공자의 로그인 갱신이 시작되고 있습니다. 완료된 뒤 연결을 확인해 주세요.",
                     code="provider_busy",
                 )
             self._starting_tests.add(provider)
@@ -1368,6 +1488,96 @@ class ConnectionManager:
             ),
         )
 
+    def _run_refresh(
+        self,
+        job_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        provider = self._job(job_id).provider
+        try:
+            self._refresh_provider(
+                provider,
+                cancel_event=cancel_event,
+                commit_guard=lambda: self._refresh_commit_guard(job_id),
+            )
+            if cancel_event.is_set():
+                return
+            refreshed = self.status(provider)["providers"][provider]["auth_ready"]
+        except Exception:  # noqa: BLE001
+            if not cancel_event.is_set():
+                self._update_job(
+                    job_id,
+                    state="failed",
+                    message=(
+                        f"{PROVIDER_LABELS[provider]} 로그인 정보를 갱신하지 못했습니다. "
+                        "다시 시도하거나 다시 로그인해 주세요."
+                    ),
+                )
+            return
+        finally:
+            with self._lock:
+                self._cancel_events.pop(job_id, None)
+        if cancel_event.is_set():
+            return
+        self._update_job(
+            job_id,
+            state="complete" if refreshed else "failed",
+            message=(
+                f"{PROVIDER_LABELS[provider]} 로그인 정보가 갱신되었습니다."
+                if refreshed
+                else (
+                    f"{PROVIDER_LABELS[provider]} 로그인 갱신 결과를 확인하지 못했습니다. "
+                    "다시 로그인해 주세요."
+                )
+            ),
+        )
+
+    @staticmethod
+    def _refresh_provider(
+        provider: str,
+        *,
+        cancel_event: threading.Event,
+        commit_guard: Callable[[], Any],
+    ) -> Any:
+        if provider == "claude":
+            return claude_subscription.refresh_access_token(
+                cancel_event=cancel_event,
+                commit_guard=commit_guard,
+            )
+        if provider == "grok":
+            return grok_oauth.force_refresh_access_token(
+                cancel_event=cancel_event,
+                commit_guard=commit_guard,
+            )
+        if provider == "gemini":
+            return google_auth.force_refresh_credentials(
+                cancel_event=cancel_event,
+                commit_guard=commit_guard,
+            )
+        raise ConnectionError(
+            "GPT 세션 갱신은 공식 Codex가 관리합니다.",
+            code="refresh_unavailable",
+        )
+
+    @contextmanager
+    def _refresh_commit_guard(self, job_id: str):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            cancel_event = self._cancel_events.get(job_id)
+            if (
+                self._closed
+                or job is None
+                or job.kind != "refresh"
+                or job.state not in ACTIVE_JOB_STATES
+                or cancel_event is None
+                or cancel_event.is_set()
+            ):
+                raise ConnectionError(
+                    "로그인 갱신이 취소되었습니다.",
+                    code="refresh_cancelled",
+                )
+            yield
+
     def _run_test(
         self,
         job_id: str,
@@ -1518,7 +1728,7 @@ class ConnectionManager:
                     setattr(job, key, value)
             job.updated_at = time.time()
             if (
-                job.kind == "login"
+                job.kind in {"login", "refresh"}
                 and was_active
                 and job.state not in ACTIVE_JOB_STATES
             ):
@@ -1561,6 +1771,7 @@ class ConnectionManager:
             if (
                 self._active_job(provider) is not None
                 or provider in self._starting_logins
+                or provider in self._starting_refreshes
                 or provider in self._starting_tests
             ):
                 raise ConnectionError(message, code="provider_busy")

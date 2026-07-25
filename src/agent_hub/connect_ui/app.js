@@ -36,6 +36,8 @@ const state = {
   modelErrors: {},
   modelNotices: {},
   modelGenerations: {},
+  detailFocusAction: null,
+  jobAnnouncement: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -51,27 +53,41 @@ function escapeHtml(value) {
 
 function statusView(provider) {
   if (provider.ready) {
-    return { label: "연결됨", tone: "ready", message: "Agent Hub에서 사용할 준비가 완료되었습니다." };
+    return { label: "준비됨", tone: "ready", message: "Agent Hub에서 사용할 준비가 완료되었습니다." };
   }
-  if (provider.authenticated && !provider.consent) {
+  if (provider.connection_state === "refreshable") {
     return {
-      label: "동의 필요",
+      label: "갱신 가능",
       tone: "attention",
-      message: "로그인은 확인됐지만 Agent Hub 사용 동의가 필요합니다.",
+      message: "계정 로그인은 유지되어 있습니다. 세션을 갱신하면 바로 사용할 수 있습니다.",
     };
   }
-  if (provider.consent && !provider.authenticated) {
+  if (provider.connection_state === "relogin_required") {
+    return {
+      label: "재로그인 필요",
+      tone: "attention",
+      message: reloginMessage(provider),
+    };
+  }
+  if (provider.connection_state === "signed_in" && !provider.consent) {
+    return {
+      label: "로그인됨",
+      tone: "attention",
+      message: "계정 로그인은 확인되었습니다. Agent Hub 사용 동의를 완료해 주세요.",
+    };
+  }
+  if (provider.connection_state === "signed_in") {
+    return {
+      label: "로그인됨",
+      tone: "attention",
+      message: warningMessage(provider.warnings?.[0]),
+    };
+  }
+  if (provider.consent) {
     return {
       label: "로그인 필요",
       tone: "attention",
       message: "사용 동의가 완료되었습니다. 공식 계정 로그인을 진행해 주세요.",
-    };
-  }
-  if (provider.consent && provider.authenticated) {
-    return {
-      label: "확인 필요",
-      tone: "attention",
-      message: warningMessage(provider.warnings?.[0]),
     };
   }
   return {
@@ -83,7 +99,9 @@ function statusView(provider) {
 
 function warningMessage(code) {
   const messages = {
-    auth_refresh_required: "로그인 갱신이 필요합니다. 다시 로그인한 뒤 연결을 확인해 주세요.",
+    auth_refresh_available: "계정 로그인은 유지되어 있습니다. 세션을 갱신해 주세요.",
+    reauthentication_required: "현재 로그인은 갱신할 수 없습니다. 다시 로그인해 주세요.",
+    auth_refresh_required: "세션 갱신이 필요합니다.",
     credentials_missing: "로그인 정보가 없습니다. 계정 로그인을 진행해 주세요.",
     provider_not_configured: "로그인은 확인됐지만 provider 구성을 완료하지 못했습니다.",
     provider_not_ready: "로그인은 확인됐지만 provider가 아직 준비되지 않았습니다.",
@@ -94,6 +112,13 @@ function warningMessage(code) {
     codex_protocol_error: "공식 Codex 로그인 상태를 확인하지 못했습니다.",
   };
   return messages[code] || "로그인은 확인됐지만 연결 상태를 추가로 확인해야 합니다.";
+}
+
+function reloginMessage(provider) {
+  const warning = provider.warnings?.[0];
+  return warning
+    ? warningMessage(warning)
+    : "저장된 로그인 정보로 세션을 갱신할 수 없습니다. 다시 로그인해 주세요.";
 }
 
 function currentJob(provider = state.selected) {
@@ -115,7 +140,12 @@ function providerAuthFingerprint(provider) {
     Boolean(provider?.consent),
     Boolean(provider?.configured),
     Boolean(provider?.authenticated),
+    Boolean(provider?.logged_in),
+    Boolean(provider?.auth_ready),
+    Boolean(provider?.refreshable),
+    Boolean(provider?.relogin_required),
     Boolean(provider?.ready),
+    provider?.connection_state || "",
     provider?.auth_mode || "",
   ].join(":");
 }
@@ -217,7 +247,9 @@ function render() {
 function renderSummary() {
   const total = state.summary.total ?? 0;
   $("#summary-ready").textContent = `${state.summary.ready ?? 0} / ${total}`;
-  $("#summary-auth").textContent = String(state.summary.authenticated ?? 0);
+  $("#summary-auth").textContent = String(
+    state.summary.connected ?? state.summary.authenticated ?? 0,
+  );
   $("#summary-consent").textContent = String(state.summary.consent_required ?? 0);
 }
 
@@ -244,30 +276,53 @@ function renderProviderList() {
 }
 
 function renderDetail() {
+  const focusedAction = document.activeElement
+    ?.closest?.("#detail-panel [data-action]")
+    ?.getAttribute("data-action");
+  if (focusedAction) state.detailFocusAction = focusedAction;
   const provider = state.providers[state.selected];
   if (!provider) return;
   const view = statusView(provider);
   const consentComplete = provider.consent;
-  const authComplete = provider.authenticated;
+  const authComplete = provider.logged_in;
+  const tokenReady = provider.auth_ready;
+  const refreshable = provider.refreshable;
+  const reloginRequired = provider.relogin_required;
+  const authStepComplete = authComplete && !reloginRequired;
+  const apiKeyMode = ["api_key", "apiKey"].includes(provider.auth_mode);
   const ready = provider.ready;
   const loginBusy = isBusy(provider.id, "login");
+  const refreshBusy = isBusy(provider.id, "refresh");
   const testBusy = isBusy(provider.id, "test");
   const forgetBusy = Boolean(state.forgetInFlight);
   const job = currentJob(provider.id);
   const jobBusy = job && ["pending", "working", "waiting"].includes(job.state);
+  announceJob(job);
+  const detailBusy =
+    jobBusy ||
+    forgetBusy ||
+    Object.keys(state.busy).some((key) => key.startsWith(`${provider.id}:`));
   const primary = !consentComplete
     ? "동의하고 연결"
-    : !authComplete
-      ? "로그인 시작"
+    : refreshable
+      ? "세션 갱신"
+      : !authComplete || reloginRequired
+        ? reloginRequired
+          ? "다시 로그인"
+          : "로그인 시작"
       : "연결 테스트";
   const testCopy =
     provider.id === "gemini"
       ? ready
         ? "선택한 모델에 짧은 실제 요청을 보내 응답까지 확인합니다. 소량의 사용량이 발생합니다."
-        : "동의와 로그인을 완료하면 선택한 모델의 실제 응답을 확인할 수 있습니다."
+        : refreshable
+          ? "세션을 갱신한 뒤 선택한 모델의 실제 응답을 확인할 수 있습니다."
+          : "동의와 로그인을 완료하면 선택한 모델의 실제 응답을 확인할 수 있습니다."
       : ready
         ? "모델 목록을 안전하게 조회해 연결을 확인할 수 있습니다."
-        : "동의와 로그인을 완료하면 안전한 상태 검사를 실행합니다.";
+        : refreshable
+          ? "세션을 갱신하면 안전한 상태 검사를 실행할 수 있습니다."
+          : "동의와 로그인을 완료하면 안전한 상태 검사를 실행합니다.";
 
   $("#detail-panel").innerHTML = `
     <div class="detail-header">
@@ -294,60 +349,86 @@ function renderDetail() {
           }
         </div>
         <button class="text-button" type="button" data-action="show-consent"
-          ${loginBusy || testBusy || forgetBusy || jobBusy ? "disabled" : ""}>자세한 범위 보기</button>
+          ${loginBusy || refreshBusy || testBusy || forgetBusy || jobBusy ? "disabled" : ""}>자세한 범위 보기</button>
       </section>
       <section class="setup-step">
-        <span class="step-number ${authComplete ? "complete" : consentComplete ? "active" : ""}">
-          ${authComplete ? iconCheck(true) : "2"}
+        <span class="step-number ${authStepComplete ? "complete" : consentComplete ? "active" : ""}">
+          ${authStepComplete ? iconCheck(true) : "2"}
         </span>
         <div class="step-copy">
           <h3>계정 로그인</h3>
-          <p class="${authComplete ? "success-copy" : ""}">
+          <p class="${authStepComplete ? "success-copy" : ""}">
             ${
-              authComplete
-                ? `${escapeHtml(provider.login_owner)} 로그인이 확인되었습니다.`
+              reloginRequired
+                ? reloginMessage(provider)
+                : apiKeyMode
+                  ? `${escapeHtml(provider.session_label)}가 설정되어 있습니다. 구독 계정을 사용하려면 별도로 로그인하세요.`
+                : authComplete
+                ? refreshable
+                  ? `${escapeHtml(provider.login_owner)} 로그인은 유지되어 있으며 세션 갱신이 가능합니다.`
+                  : `${escapeHtml(provider.login_owner)} 로그인이 확인되었습니다.`
                 : `${escapeHtml(provider.login_owner)}의 공식 로그인 화면을 사용합니다.`
             }
           </p>
         </div>
         <button class="secondary-button" type="button" data-action="login"
-          ${loginBusy || forgetBusy || jobBusy ? "disabled" : ""}>
-          ${loginBusy ? "시작 중…" : authComplete ? "다시 로그인" : "로그인"}
+          ${loginBusy || refreshBusy || forgetBusy || jobBusy ? "disabled" : ""}>
+          ${
+            loginBusy
+              ? "시작 중…"
+              : apiKeyMode
+                ? provider.id === "gpt"
+                  ? "ChatGPT로 로그인"
+                  : "구독 계정 로그인"
+              : authComplete || reloginRequired
+                ? "다시 로그인"
+                : "로그인"
+          }
         </button>
       </section>
       <section class="setup-step">
-        <span class="step-number ${ready ? "complete" : consentComplete && authComplete ? "active" : ""}">
+        <span class="step-number ${ready ? "complete" : consentComplete && (tokenReady || refreshable) ? "active" : ""}">
           ${ready ? iconCheck(true) : "3"}
         </span>
         <div class="step-copy">
           <h3>연결 확인</h3>
           <p>${escapeHtml(testCopy)}</p>
         </div>
-        <button class="secondary-button" type="button" data-action="test"
+        <button class="secondary-button" type="button" data-action="${refreshable ? "refresh" : "test"}"
           ${
             consentComplete &&
-            authComplete &&
+            (refreshable || tokenReady) &&
             !loginBusy &&
+            !refreshBusy &&
             !testBusy &&
             !forgetBusy &&
             !jobBusy
               ? ""
               : "disabled"
           }>
-          ${testBusy ? "확인 중…" : "연결 테스트"}
+          ${
+            refreshable
+              ? refreshBusy
+                ? "갱신 중…"
+                : "세션 갱신"
+              : testBusy
+                ? "확인 중…"
+                : "연결 테스트"
+          }
         </button>
       </section>
     </div>
     ${renderJobPanel()}
     ${renderModelSettings(
       provider,
-      Boolean(loginBusy || testBusy || forgetBusy || jobBusy),
+      Boolean(loginBusy || refreshBusy || testBusy || forgetBusy || jobBusy),
     )}
     <div class="detail-actions">
       <button class="primary-button" type="button" data-action="primary"
         ${
           (!consentComplete && !state.inlineConsent) ||
           loginBusy ||
+          refreshBusy ||
           testBusy ||
           forgetBusy ||
           jobBusy
@@ -359,14 +440,14 @@ function renderDetail() {
       ${
         consentComplete
           ? `<button class="text-button" type="button" data-action="disconnect"
-              ${loginBusy || testBusy || forgetBusy || jobBusy ? "disabled" : ""}>연결 해제</button>`
+              ${loginBusy || refreshBusy || testBusy || forgetBusy || jobBusy ? "disabled" : ""}>연결 해제</button>`
           : ""
       }
       ${
         provider.supports_local_logout &&
         (provider.local_credentials_present || provider.pending_login_present)
           ? `<button class="text-button" type="button" data-action="forget-local"
-              ${loginBusy || testBusy || forgetBusy || jobBusy ? "disabled" : ""}>${
+              ${loginBusy || refreshBusy || testBusy || forgetBusy || jobBusy ? "disabled" : ""}>${
                 forgetBusy
                   ? "삭제 중…"
                   : provider.local_credentials_present
@@ -376,6 +457,25 @@ function renderDetail() {
           : ""
       }
     </div>`;
+  $("#detail-panel").setAttribute("aria-busy", String(Boolean(detailBusy)));
+  restoreDetailFocus({ detailBusy });
+}
+
+function restoreDetailFocus({ detailBusy }) {
+  const action = state.detailFocusAction;
+  if (!action) return;
+  requestAnimationFrame(() => {
+    const target = Array.from(
+      document.querySelectorAll("#detail-panel [data-action]"),
+    ).find((element) => element.getAttribute("data-action") === action);
+    if (target && !target.disabled) {
+      target.focus({ preventScroll: true });
+      state.detailFocusAction = null;
+      return;
+    }
+    $("#detail-panel")?.focus({ preventScroll: true });
+    if (!detailBusy) state.detailFocusAction = null;
+  });
 }
 
 function modelSourceLabel(provider) {
@@ -415,11 +515,15 @@ function renderModelSettings(provider, jobBusy) {
       : catalog.live_unavailable
         ? provider.ready
           ? "최신 목록을 확인하지 못해 로컬 안전 목록을 표시합니다. 잠시 후 다시 시도해 주세요."
-          : "로그인이 완료되지 않아 로컬 안전 목록을 표시합니다."
+          : provider.refreshable
+            ? "세션 갱신 전이라 로컬 안전 목록을 표시합니다."
+            : "로그인이 완료되지 않아 로컬 안전 목록을 표시합니다."
         : "빠른 로컬 목록입니다. 연결 후 최신 목록을 새로고칠 수 있습니다."
     : provider.ready
       ? "연결된 provider에서 현재 계정의 최신 모델 목록을 불러옵니다."
-      : "로그인 전에는 로컬 안전 목록에서 미리 선택할 수 있습니다.";
+      : provider.refreshable
+        ? "세션을 갱신하기 전에는 로컬 안전 목록에서 선택할 수 있습니다."
+        : "로그인 전에는 로컬 안전 목록에서 미리 선택할 수 있습니다.";
   const options = (catalog?.models || [])
     .map((item) => {
       const unavailable = item.selectable ? "" : " (현재 catalog에서 확인되지 않음)";
@@ -507,7 +611,8 @@ function renderJobPanel() {
   if (!job) return "";
   const busy = ["pending", "working", "waiting"].includes(job.state);
   return `
-    <div class="job-panel" data-state="${escapeHtml(job.state)}">
+    <div class="job-panel" data-state="${escapeHtml(job.state)}"
+      role="group" aria-label="연결 작업">
       ${busy ? '<span class="spinner" aria-hidden="true"></span>' : ""}
       <div>
         <strong>${escapeHtml(job.message)}</strong>
@@ -537,6 +642,18 @@ function renderJobPanel() {
     </div>`;
 }
 
+function announceJob(job) {
+  const text = job
+    ? `${job.message || ""}${job.user_code ? ` 인증 코드 ${job.user_code}` : ""}`.trim()
+    : "";
+  const fingerprint = job
+    ? `${job.id || ""}:${job.state || ""}:${text}`
+    : "";
+  if (state.jobAnnouncement === fingerprint) return;
+  state.jobAnnouncement = fingerprint;
+  $("#job-announcer").textContent = text;
+}
+
 async function loadModels({ provider = state.selected, refresh = false } = {}) {
   if (isBusy(provider, "models")) return;
   const generation = (state.modelGenerations[provider] || 0) + 1;
@@ -562,7 +679,9 @@ async function loadModels({ provider = state.selected, refresh = false } = {}) {
     state.modelNotices[provider] = catalog.live_unavailable
       ? state.providers[provider]?.ready
         ? "최신 목록을 확인하지 못해 로컬 안전 목록을 표시했습니다."
-        : "로그인 전이라 로컬 안전 목록을 표시했습니다."
+        : state.providers[provider]?.refreshable
+          ? "세션 갱신 전이라 로컬 안전 목록을 표시했습니다."
+          : "로그인 전이라 로컬 안전 목록을 표시했습니다."
       : catalog.refreshed
         ? "최신 모델 목록을 불러왔습니다."
         : "로컬 모델 목록을 불러왔습니다.";
@@ -657,8 +776,11 @@ function openConsentDialog(continuation = "status") {
     `위 내용을 이해했으며 Agent Hub의 ${provider.label} 세션 사용에 동의합니다.`;
   $("#modal-consent-check").checked = state.inlineConsent;
   $("#modal-consent-submit").disabled = !state.inlineConsent;
-  $("#modal-consent-submit").textContent =
-    continuation === "login" ? "동의하고 로그인" : "동의하고 연결";
+  $("#modal-consent-submit").textContent = continuation === "login"
+    ? "동의하고 로그인"
+    : continuation === "refresh"
+      ? "동의하고 갱신"
+      : "동의하고 연결";
   $("#consent-error").textContent = "";
   $("#consent-error").hidden = true;
   $("#consent-dialog").showModal();
@@ -728,6 +850,10 @@ async function grantConsent(loginWindow = null) {
     showToast(`${current.label} 사용 동의를 저장했습니다.`);
     if (continuation === "login") {
       await startLogin({ provider, loginWindow });
+    } else if (continuation === "refresh") {
+      closeLoginWindow(loginWindow);
+      state.selected = provider;
+      await startRefresh();
     } else if (continuation === "test") {
       closeLoginWindow(loginWindow);
       state.selected = provider;
@@ -746,8 +872,11 @@ async function grantConsent(loginWindow = null) {
       button.disabled = false;
     });
     submit.disabled = !$("#modal-consent-check").checked;
-    submit.textContent =
-      continuation === "login" ? "동의하고 로그인" : "동의하고 연결";
+    submit.textContent = continuation === "login"
+      ? "동의하고 로그인"
+      : continuation === "refresh"
+        ? "동의하고 갱신"
+        : "동의하고 연결";
   }
 }
 
@@ -787,6 +916,33 @@ async function startLogin({ provider = state.selected, loginWindow = null } = {}
   }
 }
 
+async function startRefresh() {
+  const provider = state.selected;
+  const current = state.providers[provider];
+  if (!current || !current.refreshable || isBusy(provider, "refresh")) return;
+  if (!current.consent) {
+    openConsentDialog("refresh");
+    return;
+  }
+  clearModelCatalog(provider);
+  setBusy(provider, "refresh", true);
+  renderDetail();
+  try {
+    const job = await request(`/api/providers/${provider}/refresh`, {
+      method: "POST",
+      body: {},
+    });
+    state.jobs[provider] = job;
+    renderDetail();
+    pollJob(provider, job.id);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setBusy(provider, "refresh", false);
+    if (state.selected === provider) renderDetail();
+  }
+}
+
 function clearProviderPoll(provider) {
   clearTimeout(state.pollTimers[provider]);
   delete state.pollTimers[provider];
@@ -813,7 +969,7 @@ function pollJob(provider, jobId) {
       if (["pending", "working", "waiting"].includes(job.state)) {
         state.pollTimers[provider] = setTimeout(poll, 1400);
       } else {
-        if (job.kind === "login") clearModelCatalog(provider);
+        if (["login", "refresh"].includes(job.kind)) clearModelCatalog(provider);
         showToast(job.message);
         await loadStatus({ quiet: true });
       }
@@ -946,6 +1102,7 @@ document.addEventListener("click", async (event) => {
     state.selected = providerButton.dataset.provider;
     state.inlineConsent = false;
     state.pendingConsentAction = null;
+    state.detailFocusAction = null;
     render();
     if (window.matchMedia("(max-width: 560px)").matches) {
       requestAnimationFrame(() => {
@@ -959,6 +1116,7 @@ document.addEventListener("click", async (event) => {
   const action = actionButton.dataset.action;
   if (action === "show-consent") openConsentDialog("status");
   if (action === "login") await startLogin();
+  if (action === "refresh") await startRefresh();
   if (action === "test") await startTest();
   if (action === "load-models") {
     const provider = state.providers[state.selected];
@@ -971,9 +1129,12 @@ document.addEventListener("click", async (event) => {
   if (action === "primary") {
     const provider = state.providers[state.selected];
     if (!provider.consent) {
-      openConsentDialog(provider.authenticated ? "test" : "login");
+      openConsentDialog(
+        provider.refreshable ? "refresh" : provider.auth_ready ? "test" : "login",
+      );
     }
-    else if (!provider.authenticated) await startLogin();
+    else if (provider.refreshable) await startRefresh();
+    else if (!provider.auth_ready) await startLogin();
     else await startTest();
   }
   if (action === "disconnect") {
@@ -993,7 +1154,10 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("change", (event) => {
   if (event.target.id === "inline-consent-check") {
     state.inlineConsent = event.target.checked;
-    renderDetail();
+    const primary = document.querySelector(
+      '#detail-panel [data-action="primary"]',
+    );
+    if (primary) primary.disabled = !state.inlineConsent;
   }
   if (event.target.id === "modal-consent-check") {
     state.inlineConsent = event.target.checked;

@@ -372,6 +372,135 @@ def test_oauth_refresh_does_not_recreate_deleted_credentials(monkeypatch, tmp_pa
     assert not oauth_login.token_path().exists()
 
 
+def test_strict_oauth_refresh_rotates_tokens(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login.save_tokens(
+        {
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "expires_in": 3600,
+        }
+    )
+    stored = json.loads(oauth_login.token_path().read_text(encoding="utf-8"))
+    stored["last_refresh"] = "2020-01-01T00:00:00Z"
+    oauth_login._write_private_json(oauth_login.token_path(), stored)
+    monkeypatch.setattr(
+        oauth_login,
+        "refresh_tokens",
+        lambda refresh_token, **_kwargs: {
+            "access_token": "fresh-access",
+            "refresh_token": f"{refresh_token}-rotated",
+            "expires_in": 3600,
+            "token_endpoint": "https://auth.x.ai/oauth2/token",
+        },
+    )
+
+    result = oauth_login.force_refresh_access_token()
+
+    refreshed = json.loads(oauth_login.token_path().read_text(encoding="utf-8"))
+    assert result == {"success": True}
+    assert refreshed["access_token"] == "fresh-access"
+    assert refreshed["refresh_token"] == "old-refresh-rotated"
+
+
+def test_routine_and_explicit_refresh_share_one_remote_exchange(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login.save_tokens(
+        {
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "expires_in": 3600,
+        }
+    )
+    stored = json.loads(oauth_login.token_path().read_text(encoding="utf-8"))
+    stored["last_refresh"] = "2020-01-01T00:00:00Z"
+    oauth_login._write_private_json(oauth_login.token_path(), stored)
+    exchange_started = threading.Event()
+    release_exchange = threading.Event()
+    explicit_started = threading.Event()
+    calls = []
+    results = {}
+    errors = []
+
+    def refresh_tokens(refresh_token, **_kwargs):
+        calls.append(refresh_token)
+        exchange_started.set()
+        assert release_exchange.wait(timeout=5)
+        return {
+            "access_token": "fresh-access",
+            "refresh_token": "fresh-refresh",
+            "expires_in": 3600,
+            "token_endpoint": "https://auth.x.ai/oauth2/token",
+        }
+
+    def routine_refresh():
+        try:
+            results["routine"] = oauth_login.resolve_access_token()
+        except Exception as exc:  # noqa: BLE001 - thread result capture
+            errors.append(exc)
+
+    def explicit_refresh():
+        explicit_started.set()
+        try:
+            results["explicit"] = oauth_login.force_refresh_access_token()
+        except Exception as exc:  # noqa: BLE001 - thread result capture
+            errors.append(exc)
+
+    monkeypatch.setattr(oauth_login, "refresh_tokens", refresh_tokens)
+    routine = threading.Thread(target=routine_refresh)
+    explicit = threading.Thread(target=explicit_refresh)
+    routine.start()
+    assert exchange_started.wait(timeout=5)
+    explicit.start()
+    assert explicit_started.wait(timeout=5)
+    release_exchange.set()
+    routine.join(timeout=5)
+    explicit.join(timeout=5)
+
+    assert errors == []
+    assert calls == ["old-refresh"]
+    assert results["routine"] == "fresh-access"
+    assert results["explicit"] == {"success": True, "coalesced": True}
+
+
+def test_strict_oauth_refresh_does_not_revive_deleted_credentials(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
+    oauth_login.save_tokens(
+        {
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "expires_in": 3600,
+        }
+    )
+    stored = json.loads(oauth_login.token_path().read_text(encoding="utf-8"))
+    stored["last_refresh"] = "2020-01-01T00:00:00Z"
+    oauth_login._write_private_json(oauth_login.token_path(), stored)
+
+    def refresh_then_delete(*_args, **_kwargs):
+        oauth_login.clear_tokens()
+        return {
+            "access_token": "must-not-be-saved",
+            "refresh_token": "must-not-be-saved",
+            "expires_in": 3600,
+        }
+
+    monkeypatch.setattr(oauth_login, "refresh_tokens", refresh_then_delete)
+
+    with pytest.raises(RuntimeError, match="changed"):
+        oauth_login.force_refresh_access_token()
+
+    assert not oauth_login.token_path().exists()
+
+
 def test_oauth_token_and_pending_files_are_written_private(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")

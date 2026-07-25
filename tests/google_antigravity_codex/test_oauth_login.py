@@ -408,6 +408,36 @@ def test_refresh_access_token_saves_new_access(consent_and_paths):
     assert data["access"] == "fresh-access"
 
 
+def test_refresh_cancelled_before_network_does_not_exchange_tokens(
+    consent_and_paths,
+):
+    oauth_login.save_tokens(
+        access_token="old-access",
+        refresh_token="old-refresh",
+        expires_in=3600,
+    )
+    client = oauth_login.OAuthClient(
+        client_id="test-client.apps.googleusercontent.com",
+        client_secret="test-secret",
+        label="test",
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with patch.object(oauth_login.urllib.request, "urlopen") as request:
+        with pytest.raises(oauth_login.OAuthLoginError) as cancelled:
+            oauth_login.refresh_access_token(
+                refresh_token="old-refresh",
+                client=client,
+                cancel_event=cancel_event,
+            )
+
+    assert cancelled.value.code == "oauth_refresh_cancelled"
+    request.assert_not_called()
+    data = json.loads(oauth_login.token_file_path().read_text(encoding="utf-8"))
+    assert data["access"] == "old-access"
+
+
 def test_refresh_rejects_credentials_deleted_before_revision_snapshot(
     consent_and_paths,
 ):

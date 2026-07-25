@@ -15,6 +15,7 @@ class FakeManager:
     def __init__(self):
         self.granted = []
         self.forgotten = []
+        self.refreshed = []
         self.model_updates = []
         self.model_resets = []
         self.closed = False
@@ -26,6 +27,9 @@ class FakeManager:
             "summary": {
                 "ready": 0,
                 "authenticated": 0,
+                "connected": 0,
+                "refreshable": 0,
+                "relogin_required": 0,
                 "consent_required": 0,
                 "total": 0,
             },
@@ -33,6 +37,16 @@ class FakeManager:
 
     def job(self, job_id):
         return {"id": job_id, "state": "complete"}
+
+    def start_refresh(self, provider):
+        self.refreshed.append(provider)
+        return {
+            "success": True,
+            "id": "refresh-job",
+            "provider": provider,
+            "kind": "refresh",
+            "state": "working",
+        }
 
     def grant_consent(self, provider, *, confirmation):
         self.granted.append((provider, confirmation))
@@ -132,6 +146,8 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         with opener.open(f"{server.origin}/?session=test-session") as response:
             html = response.read().decode()
         assert "모델 연결 관리" in html
+        assert 'id="detail-panel" tabindex="-1"' in html
+        assert 'id="job-announcer"' in html
 
         with opener.open(f"{server.origin}/styles.css") as response:
             css = response.read().decode()
@@ -140,11 +156,21 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         with opener.open(f"{server.origin}/app.js") as response:
             javascript = response.read().decode()
         assert "function clearModelCatalog(provider)" in javascript
-        assert 'if (job.kind === "login") clearModelCatalog(provider);' in javascript
+        assert (
+            'if (["login", "refresh"].includes(job.kind)) clearModelCatalog(provider);'
+            in javascript
+        )
         assert "providerAuthFingerprint(previous)" in javascript
         assert "최신 모델 목록 불러오기" in javascript
         assert "loadModels({ refresh: Boolean(provider?.ready) })" in javascript
         assert "소량의 사용량이 발생합니다." in javascript
+        assert "async function startRefresh()" in javascript
+        assert 'data-action="${refreshable ? "refresh" : "test"}"' in javascript
+        assert "세션 갱신" in javascript
+        assert "const authStepComplete = authComplete && !reloginRequired;" in javascript
+        assert "function restoreDetailFocus({ detailBusy })" in javascript
+        assert "function announceJob(job)" in javascript
+        assert "$(\"#job-announcer\").textContent = text;" in javascript
         assert (
             "provider.local_credentials_present || provider.pending_login_present"
             in javascript
@@ -171,6 +197,59 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         assert payload["success"] is True
         assert response.headers["Cache-Control"] == "no-store"
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_refresh_uses_authenticated_same_origin_post():
+    server, manager, thread = _running_server()
+    opener = _opener()
+    try:
+        opener.open(f"{server.origin}/?session=test-session").read()
+        missing_origin = urllib.request.Request(
+            f"{server.origin}/api/providers/gemini/refresh",
+            data=b"{}",
+            method="POST",
+            headers={"X-Agent-Hub-Session": "test-session"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as origin_error:
+            opener.open(missing_origin)
+        assert origin_error.value.code == 403
+
+        missing_session = urllib.request.Request(
+            f"{server.origin}/api/providers/gemini/refresh",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Origin": server.origin,
+                "X-Agent-Hub-Intent": "provider-management",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as session_error:
+            opener.open(missing_session)
+        assert session_error.value.code == 403
+        assert manager.refreshed == []
+
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": server.origin,
+            "X-Agent-Hub-Intent": "provider-management",
+            "X-Agent-Hub-Session": "test-session",
+        }
+        request = urllib.request.Request(
+            f"{server.origin}/api/providers/gemini/refresh",
+            data=b"{}",
+            method="POST",
+            headers=headers,
+        )
+
+        with opener.open(request) as response:
+            payload = json.load(response)
+
+        assert payload["kind"] == "refresh"
+        assert manager.refreshed == ["gemini"]
     finally:
         server.shutdown()
         server.server_close()

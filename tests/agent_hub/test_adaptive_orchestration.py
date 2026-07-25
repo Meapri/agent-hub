@@ -355,6 +355,39 @@ def test_scheduler_rejects_success_that_arrives_after_workflow_deadline():
     assert result["error"] == "workflow_timeout_exceeded"
 
 
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        {"type": "TimeoutError", "message": "provider exceeded its limit"},
+        {"type": "codex_timeout", "message": "official Codex timed out"},
+        "request_timeout",
+    ],
+)
+def test_scheduler_turns_provider_timeouts_into_resumable_timeout(provider_error):
+    result = orchestrator.execute_plan(
+        _single_chat_plan(),
+        invoke=lambda *_args, **_kwargs: {
+            "success": False,
+            "error": provider_error,
+            "text": "provider failed",
+        },
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "timed_out"
+    assert result["error"] == "provider_call_timeout"
+    attempts = result["results"]["answer"]["attempts"]
+    assert attempts == [
+        {
+                "provider": "claude",
+                "success": False,
+                "error": "provider_call_timeout",
+                "provider_calls": 1,
+        }
+    ]
+    assert "official Codex timed out" not in json.dumps(result)
+
+
 def test_adaptive_compare_does_not_dispatch_queued_participants_after_deadline(
     tmp_path, monkeypatch
 ):
@@ -760,8 +793,18 @@ def test_adaptive_run_clamps_each_call_to_remaining_workflow_budget(tmp_path, mo
 def test_adaptive_run_schema_exposes_end_to_end_timeout():
     specs = {item["name"]: item for item in operations.tool_definitions()}
     timeout = specs["agent_hub_run_workflow"]["inputSchema"]["properties"]["workflow_timeout"]
-    assert timeout["default"] == 270
-    assert timeout["maximum"] == 290
+    per_call = specs["agent_hub_run_workflow"]["inputSchema"]["properties"][
+        "per_call_timeout"
+    ]
+    repairs = specs["agent_hub_plan_workflow"]["inputSchema"]["properties"][
+        "planner_repair_attempts"
+    ]
+    assert timeout["default"] == 1740
+    assert timeout["maximum"] == 1790
+    assert per_call["default"] == 900
+    assert per_call["maximum"] == 1790
+    assert repairs["default"] == 3
+    assert repairs["maximum"] == 5
     assert (
         specs["agent_hub_plan_workflow"]["inputSchema"]["properties"]["max_leaf_calls"]["default"]
         == 24
@@ -1068,8 +1111,8 @@ def test_adaptive_start_and_continue_schemas_expose_resumable_controls():
     continue_props = specs["agent_hub_continue_workflow"]["inputSchema"]["properties"]
     get_props = specs["agent_hub_get_run"]["inputSchema"]["properties"]
 
-    assert start_props["workflow_timeout"]["default"] == 270
-    assert continue_props["workflow_timeout"]["maximum"] == 290
+    assert start_props["workflow_timeout"]["default"] == 1740
+    assert continue_props["workflow_timeout"]["maximum"] == 1790
     assert continue_props["max_waves_per_call"]["default"] == 1
     assert continue_props["expected_revision"]["minimum"] == 0
     assert claim_props["action_id"]["pattern"] == "^[0-9a-f]{64}$"
@@ -1172,6 +1215,40 @@ def test_end_to_end_timeout_returns_a_persisted_resume_run(tmp_path, monkeypatch
     assert loaded["data"]["status"] == "paused"
     assert loaded["data"]["pause_reason"] == "workflow_timeout_exceeded"
     assert set(loaded["data"]["results"]) == {"analyze_code"}
+
+
+def test_provider_timeout_returns_a_persisted_resume_run(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _policy_root(repo)
+    state_dir = tmp_path / "runs"
+    monkeypatch.setenv("ORCHESTRATE_CODEX_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(
+        orchestrator,
+        "execute_plan",
+        lambda *_args, **_kwargs: {
+            "success": False,
+            "status": "timed_out",
+            "error": "provider_call_timeout",
+            "text": "provider call timed out",
+            "results": {},
+            "waves": [],
+            "leaf_calls": 1,
+        },
+    )
+
+    result = operations.dispatch_tool(
+        "agent_hub_run_workflow",
+        {"workflow_id": "adaptive", "plan": _single_chat_plan(), "project_root": root},
+    )
+
+    assert result["success"] is False
+    assert result["data"]["resumable"] is True
+    run_id = result["data"]["run_id"]
+    loaded = operations.dispatch_tool("agent_hub_get_run", {"run_id": run_id})
+    assert loaded["data"]["status"] == "paused"
+    assert loaded["data"]["pause_reason"] == "provider_call_timeout"
+    assert loaded["data"]["results"] == {}
 
 
 def test_adaptive_run_fails_closed_when_resume_state_cannot_be_persisted(monkeypatch):

@@ -74,14 +74,22 @@ def _positive_float_env(name: str, default: float) -> float:
 PROVIDERS = provider_registry.AVAILABLE_PROVIDERS
 DEFAULT_COMPARE_PROVIDERS = provider_registry.DEFAULT_COMPARE_PROVIDERS
 ADAPTIVE_WORKFLOW_TIMEOUT_MIN = 30.0
-ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env("AGENT_HUB_MCP_CALL_TIMEOUT", 300.0)
+ADAPTIVE_MCP_CALL_TIMEOUT = _positive_float_env("AGENT_HUB_MCP_CALL_TIMEOUT", 1800.0)
 ADAPTIVE_TIMEOUT_RETURN_MARGIN = _positive_float_env("AGENT_HUB_TIMEOUT_RETURN_MARGIN", 10.0)
 ADAPTIVE_WORKFLOW_TIMEOUT_MAX = max(
     ADAPTIVE_WORKFLOW_TIMEOUT_MIN,
     ADAPTIVE_MCP_CALL_TIMEOUT - ADAPTIVE_TIMEOUT_RETURN_MARGIN,
 )
 ADAPTIVE_WORKFLOW_TIMEOUT_DEFAULT = min(
-    _positive_float_env("AGENT_HUB_WORKFLOW_TIMEOUT", 270.0),
+    _positive_float_env("AGENT_HUB_WORKFLOW_TIMEOUT", 1740.0),
+    ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
+)
+ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT = _positive_float_env(
+    "AGENT_HUB_PER_CALL_TIMEOUT",
+    900.0,
+)
+ADAPTIVE_PER_CALL_TIMEOUT_MAX = min(
+    1800.0,
     ADAPTIVE_WORKFLOW_TIMEOUT_MAX,
 )
 ADAPTIVE_MAX_WAVES_PER_CALL = 8
@@ -377,6 +385,31 @@ def _snapshot_provider_models(explicit: Any = None) -> Dict[str, str]:
     return snapshot
 
 
+def _auth_lifecycle(
+    *,
+    account_present: bool,
+    logged_in: bool,
+    auth_ready: bool,
+    refresh_supported: bool,
+) -> Dict[str, bool]:
+    """Return the redacted auth lifecycle shared by every provider."""
+
+    auth_ready = bool(auth_ready)
+    logged_in = bool(logged_in or auth_ready)
+    account_present = bool(account_present or logged_in)
+    refreshable = bool(logged_in and not auth_ready and refresh_supported)
+    return {
+        "account_present": account_present,
+        "logged_in": logged_in,
+        "auth_ready": auth_ready,
+        "refresh_supported": bool(refresh_supported),
+        "refreshable": refreshable,
+        "relogin_required": bool(
+            account_present and not auth_ready and not refreshable
+        ),
+    }
+
+
 def _status(args: Dict[str, Any]) -> Dict[str, Any]:
     probe = bool(args.get("probe", False))
     states: Dict[str, Any] = {}
@@ -385,6 +418,16 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
             consent = claude_security.consent_status()
             auth = claude_auth.status()
             authenticated = bool(auth.get("ready"))
+            subscription = auth.get("subscription") or {}
+            lifecycle = _auth_lifecycle(
+                account_present=bool(auth.get("credentials_present")),
+                logged_in=bool(auth.get("credentials_present")),
+                auth_ready=authenticated,
+                refresh_supported=bool(
+                    subscription.get("logged_in")
+                    and subscription.get("has_refresh_token")
+                ),
+            )
             model_state = _provider_model_state(
                 "claude",
                 fallback=claude_models.DEFAULT_MODEL,
@@ -396,14 +439,17 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "authenticated": authenticated,
                 "ready": bool(consent.get("user_consent") and authenticated),
                 "auth_mode": auth.get("active_mode"),
+                **lifecycle,
                 **model_state,
                 "capabilities": capabilities.provider_capabilities("claude"),
                 "warnings": (
                     []
                     if authenticated
                     else [
-                        "auth_refresh_required"
-                        if auth.get("credentials_present")
+                        "auth_refresh_available"
+                        if lifecycle["refreshable"]
+                        else "reauthentication_required"
+                        if lifecycle["relogin_required"]
                         else "credentials_missing"
                     ]
                 )
@@ -413,6 +459,20 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
             consent = grok_security.consent_status()
             auth = grok_auth.status()
             authenticated = bool(auth.get("ready"))
+            subscription = auth.get("subscription") or {}
+            account_present = bool(
+                auth.get("credentials_present")
+                or subscription.get("token_file_present")
+            )
+            lifecycle = _auth_lifecycle(
+                account_present=account_present,
+                logged_in=bool(auth.get("credentials_present")),
+                auth_ready=authenticated,
+                refresh_supported=bool(
+                    subscription.get("logged_in")
+                    and subscription.get("has_refresh_token")
+                ),
+            )
             model_state = _provider_model_state(
                 "grok",
                 fallback=grok_models.DEFAULT_MODEL,
@@ -424,6 +484,7 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "authenticated": authenticated,
                 "ready": bool(consent.get("user_consent") and authenticated),
                 "auth_mode": auth.get("active_mode"),
+                **lifecycle,
                 "local_credentials_present": bool(
                     (auth.get("subscription") or {}).get("token_file_present")
                 ),
@@ -436,8 +497,10 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                     []
                     if authenticated
                     else [
-                        "auth_refresh_required"
-                        if auth.get("credentials_present")
+                        "auth_refresh_available"
+                        if lifecycle["refreshable"]
+                        else "reauthentication_required"
+                        if lifecycle["relogin_required"]
                         else "credentials_missing"
                     ]
                 )
@@ -457,6 +520,12 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 warnings.append(str(auth["error_type"]))
             if model_state["settings_error"]:
                 warnings.append(model_state["settings_error"])
+            lifecycle = _auth_lifecycle(
+                account_present=bool(auth.get("logged_in")),
+                logged_in=bool(auth.get("logged_in")),
+                auth_ready=bool(auth.get("configured")),
+                refresh_supported=False,
+            )
             states[provider] = {
                 "consent": bool(consent.get("user_consent")),
                 "configured": bool(auth.get("configured")),
@@ -464,6 +533,7 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "ready": bool(consent.get("user_consent") and auth.get("configured")),
                 "auth_mode": auth.get("auth_mode"),
                 "plan_type": auth.get("plan_type"),
+                **lifecycle,
                 **model_state,
                 "capabilities": capabilities.provider_capabilities("gpt"),
                 "warnings": warnings,
@@ -474,6 +544,12 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
             login = google_oauth.login_status()
             authenticated = bool(
                 login.get("credentials_readable") and login.get("expired") is not True
+            )
+            lifecycle = _auth_lifecycle(
+                account_present=bool(login.get("token_file_present")),
+                logged_in=bool(login.get("credentials_readable")),
+                auth_ready=authenticated,
+                refresh_supported=bool(login.get("refresh_token_present")),
             )
             configured = bool(provider_state.get("configured"))
             healthy = provider_state.get("healthy")
@@ -490,6 +566,7 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "authenticated": authenticated,
                 "ready": ready,
                 "auth_mode": provider_state.get("auth_method") or "plugin_oauth_login",
+                **lifecycle,
                 "local_credentials_present": bool(login.get("token_file_present")),
                 "pending_login_present": bool(login.get("pending_login")),
                 **model_state,
@@ -498,7 +575,16 @@ def _status(args: Dict[str, Any]) -> Dict[str, Any]:
                 "warnings": (
                     []
                     if ready
-                    else [str(provider_state.get("error_type") or "provider_not_ready")]
+                    else [
+                        "auth_refresh_available"
+                        if lifecycle["refreshable"]
+                        else "reauthentication_required"
+                        if lifecycle["relogin_required"]
+                        else str(
+                            provider_state.get("error_type")
+                            or "provider_not_ready"
+                        )
+                    ]
                 )
                 + ([model_state["settings_error"]] if model_state["settings_error"] else []),
             }
@@ -1699,7 +1785,13 @@ def _adaptive_run_options(
             options["models"] = _snapshot_provider_models(persisted_models)
     options["project_root"] = str(gather.validate_project_root(options.get("project_root") or "."))
     options["workflow_timeout"] = _adaptive_workflow_timeout(options.get("workflow_timeout"))
-    options["per_call_timeout"] = max(5.0, float(options.get("per_call_timeout") or 180))
+    options["per_call_timeout"] = max(
+        5.0,
+        min(
+            float(options.get("per_call_timeout") or ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT),
+            ADAPTIVE_PER_CALL_TIMEOUT_MAX,
+        ),
+    )
     options["max_concurrency"] = max(1, min(int(options.get("max_concurrency") or 3), 3))
     options["max_leaf_calls"] = max(
         1,
@@ -1876,12 +1968,12 @@ def _adaptive_plan(
     operational_handoff = handoff_state.render_context(snapshot)
     if operational_handoff:
         initial_prompt = f"{initial_prompt}\n\n{operational_handoff}"
-    repairs = max(0, min(int(args.get("planner_repair_attempts", 1)), 2))
+    repairs = max(0, min(int(args.get("planner_repair_attempts", 3)), 5))
     attempts: List[Dict[str, Any]] = []
     previous_text = ""
     validation_error = ""
     planner_timeout = min(
-        float(args.get("per_call_timeout") or 240),
+        float(args.get("per_call_timeout") or ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT),
         max(
             ADAPTIVE_TIMEOUT_RETURN_MARGIN,
             _adaptive_workflow_timeout(args.get("workflow_timeout"))
@@ -2055,7 +2147,7 @@ def _adaptive_step_call(
         "model": selected_model,
         "max_tokens": args.get("max_tokens"),
         "reasoning_effort": step.get("reasoning_effort") or "medium",
-        "timeout_sec": args.get("per_call_timeout") or 180,
+        "timeout_sec": args.get("per_call_timeout") or ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT,
         "project_root": root,
         "_provider_call_budget": args.get("_provider_call_budget"),
         "_provider_call_reservation": step.get("_provider_call_reservation"),
@@ -2123,7 +2215,9 @@ def _adaptive_step_call(
                 "model": selected_model,
                 "query": context,
                 "max_tokens": args.get("max_tokens"),
-                "timeout_sec": args.get("per_call_timeout") or 180,
+                "timeout_sec": (
+                    args.get("per_call_timeout") or ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT
+                ),
                 "_provider_call_budget": args.get("_provider_call_budget"),
                 "_provider_call_reservation": step.get("_provider_call_reservation"),
             }
@@ -2185,7 +2279,9 @@ def _adaptive_step_call(
                 "consistency": gate,
                 "max_tokens": args.get("max_tokens"),
                 "reasoning_effort": step.get("reasoning_effort") or "medium",
-                "timeout_sec": args.get("per_call_timeout") or 180,
+                "timeout_sec": (
+                    args.get("per_call_timeout") or ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT
+                ),
                 "_provider_call_budget": args.get("_provider_call_budget"),
                 "_provider_call_reservation": step.get("_provider_call_reservation"),
                 "_reasoning_effort_implicit": bool(
@@ -3004,7 +3100,9 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
         }
         workflow_timeout = _adaptive_workflow_timeout(args.get("workflow_timeout"))
         started = time.monotonic()
-        requested_per_call = float(args.get("per_call_timeout") or 180)
+        requested_per_call = float(
+            args.get("per_call_timeout") or ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT
+        )
         planning_args = {
             **args,
             "per_call_timeout": min(
@@ -3075,7 +3173,9 @@ def _run_workflow(args: Dict[str, Any]) -> Dict[str, Any]:
             state.update(
                 {
                     "status": "paused",
-                    "pause_reason": "workflow_timeout_exceeded",
+                    "pause_reason": str(
+                        result.get("error") or "workflow_timeout_exceeded"
+                    ),
                     "results": persisted,
                     "waves": list(result.get("waves") or []),
                     "leaf_calls": int(result.get("leaf_calls") or 0),
@@ -3397,8 +3497,8 @@ WORKFLOW_BASE = {
     "planner_repair_attempts": {
         "type": "integer",
         "minimum": 0,
-        "maximum": 2,
-        "default": 1,
+        "maximum": 5,
+        "default": 3,
     },
     "planner_max_tokens": {
         "type": "integer",
@@ -3453,8 +3553,8 @@ ADAPTIVE_EXECUTION_CONTROL_SCHEMA = {
     "per_call_timeout": {
         "type": "number",
         "minimum": 5,
-        "maximum": 600,
-        "default": 180,
+        "maximum": ADAPTIVE_PER_CALL_TIMEOUT_MAX,
+        "default": ADAPTIVE_PER_CALL_TIMEOUT_DEFAULT,
     },
     "workflow_timeout": {
         "type": "number",
