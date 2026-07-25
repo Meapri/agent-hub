@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import runpy
+import subprocess
+import sys
 
 from agent_hub import local_setup
 
@@ -125,6 +127,27 @@ def test_release_version_check_uses_unified_agent_hub_fields():
         "claude_marketplace",
     }
     assert set(found.values()) == {"1.4.3"}
+
+
+def test_retired_standalone_bundle_fails_with_current_install_guidance(tmp_path):
+    script = ROOT / "scripts" / "build_plugin_bundle.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--output",
+            str(tmp_path / "bundle"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "standalone Antigravity plugin bundle was retired" in result.stderr
+    assert "agent-hub-setup" in result.stderr
+    assert not (tmp_path / "bundle").exists()
 
 
 def test_hub_readmes_describe_the_same_four_provider_surface():

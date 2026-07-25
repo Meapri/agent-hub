@@ -1,5 +1,9 @@
 # Google Antigravity Codex
 
+> **보관용 snapshot입니다.** 현재 Agent Hub 설치·실행 경로가 아니며 아래 독립 플러그인 명령은
+> 통합 전 구조를 기록하기 위해 남아 있습니다. 실제 설치와 provider 관리는 저장소 루트의
+> `README.md`, `agent-hub-setup`, `agent-hub-connect`를 사용하세요.
+
 **버전 0.9.8** · OpenAI **Codex Desktop / GUI**용 플러그인(`.codex-plugin`) + **MCP stdio** 서버.
 
 Codex 안에서 Google Antigravity(Code Assist)로 채팅, Google Search grounding, 이미지 생성, 글쓰기, 모델 선택, diff 리뷰 등을 쓸 수 있습니다.

@@ -735,6 +735,45 @@ def test_dependency_context_has_one_total_character_limit(monkeypatch):
     assert len(rendered) <= operations.ADAPTIVE_DEPENDENCY_CONTEXT_MAX_CHARS + 31
 
 
+def test_dependency_context_discloses_redacted_fallback_provenance():
+    rendered = operations._render_dependency_outputs(
+        {
+            "technical_review": {
+                "provider": "gemini",
+                "text": "Fallback review",
+                "attempts": [
+                    {
+                        "provider": "gpt",
+                        "success": False,
+                        "error": "codex_process_error",
+                    },
+                    {"provider": "gemini", "success": True, "error": None},
+                ],
+            },
+            "unsafe_error": {
+                "provider": "claude",
+                "text": "Recovered",
+                "attempts": [
+                    {
+                        "provider": "gpt",
+                        "success": False,
+                        "error": "token abc123 leaked from /private/path",
+                    },
+                    {"provider": "claude", "success": True, "error": None},
+                ],
+            },
+        }
+    )
+
+    assert (
+        "actual_provider=gemini; failed_attempts=gpt:codex_process_error"
+        in rendered
+    )
+    assert "actual_provider=claude; failed_attempts=gpt:operation_error" in rendered
+    assert "abc123" not in rendered
+    assert "/private/path" not in rendered
+
+
 def test_adaptive_planner_repairs_one_invalid_plan(tmp_path, monkeypatch):
     root = _policy_root(tmp_path)
     responses = iter(

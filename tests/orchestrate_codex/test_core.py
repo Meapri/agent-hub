@@ -1201,6 +1201,8 @@ def test_verify_allows_cli_commands(tmp_path):
     (pkg / "mcp_server.py").write_text('T = [{"name": "grok_codex_chat"}]\n', encoding="utf-8")
     facts = gather.gather_durable_facts(tmp_path)
     assert "grok_codex_login" in facts["cli_commands"]
+    assert facts["console_scripts"] == ["grok_codex_mcp"]
+    assert facts["repository_scripts"] == ["grok_codex_login"]
     assert facts["install_commands"]  # pip install -e . detected
     body = (
         "Run `python3 scripts/grok_codex_login.py` and start grok_codex_mcp. Also grok_codex_chat."
@@ -1418,6 +1420,40 @@ def test_gather_durable_facts(tmp_path):
     assert "demo" in facts["skills"]
     assert "demo_package" in facts["packages"]
     assert "DURABLE FACT PACK" in facts["text"]
+
+
+def test_agent_hub_fact_pack_detects_public_tools_shared_skills_and_command_kinds(
+    tmp_path,
+):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nversion = "1.0.0"\n\n'
+        '[project.scripts]\nagent-hub-mcp = "agent_hub.server:serve"\n',
+        encoding="utf-8",
+    )
+    operations = tmp_path / "src" / "agent_hub" / "operations.py"
+    operations.parent.mkdir(parents=True)
+    operations.write_text(
+        'TOOL_SPECS = [_spec("agent_hub_status", "Status", "Show status", {})]\n',
+        encoding="utf-8",
+    )
+    skill = tmp_path / "hubs" / "shared" / "skills" / "adaptive-orchestrate"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# Adaptive\n", encoding="utf-8")
+    host_skill = tmp_path / "hubs" / "codex" / "skills" / "route-to"
+    host_skill.mkdir(parents=True)
+    (host_skill / "SKILL.md").write_text("# Route\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "setup_local.py").write_text("# local helper\n", encoding="utf-8")
+
+    facts = gather.gather_durable_facts(tmp_path)
+
+    assert facts["mcp_tools_detected"] == ["agent_hub_status"]
+    assert facts["skills"] == ["adaptive-orchestrate", "route-to"]
+    assert facts["console_scripts"] == ["agent-hub-mcp"]
+    assert facts["repository_scripts"] == ["setup_local"]
+    assert "Installed console scripts: agent-hub-mcp" in facts["text"]
+    assert "run by path; not installed console scripts" in facts["text"]
 
 
 def test_durable_manifest_includes_non_ignored_untracked_files(tmp_path):

@@ -1,4 +1,8 @@
 # Orchestrate Codex
+
+> **보관용 snapshot입니다.** 현재 Agent Hub 설치·실행 경로가 아니며 아래 독립 MCP 등록 절차는
+> 통합 전 구조를 기록하기 위해 남아 있습니다. 실제 workflow는 저장소 루트의 `README.md`와
+> 단일 `agent-hub` MCP를 사용하세요.
 프로바이더 중립 오케스트레이션 MCP 플러그인입니다. (버전 0.5.4)
 
 ## 개요

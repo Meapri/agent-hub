@@ -25,9 +25,11 @@ from agent_hub.core import limits
 from agent_hub import __version__ as AGENT_HUB_VERSION
 
 from .errors import (
+    CodexAuthenticationRequired,
     CodexProcessError,
     CodexProtocolError,
     CodexSideEffectRefused,
+    CodexSubscriptionRequired,
     CodexTimeout,
     CodexUnavailable,
 )
@@ -437,6 +439,28 @@ def exec_argv(
     return argv
 
 
+def _raise_exec_failure(message: str) -> None:
+    lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in ("timed out", "timeout", "deadline exceeded", "deadline_exceeded")
+    ):
+        raise CodexTimeout("Official Codex generation timed out.")
+    if any(
+        marker in lowered
+        for marker in ("chatgpt subscription", "subscription login", "subscription required")
+    ):
+        raise CodexSubscriptionRequired(
+            "Official Codex requires a ChatGPT subscription login."
+        )
+    if any(
+        marker in lowered
+        for marker in ("authentication required", "not logged in", "unauthorized", "401")
+    ):
+        raise CodexAuthenticationRequired("Official Codex login is required.")
+    raise CodexProcessError(message)
+
+
 def run_exec_chat(
     prompt: str,
     *,
@@ -496,7 +520,7 @@ def run_exec_chat(
             failure = redact(event.get("message"))
 
     if returncode != 0 or failure:
-        raise CodexProcessError(
+        _raise_exec_failure(
             failure
             or f"Codex exec exited with {returncode}: {redact(stderr) or 'no details'}"
         )

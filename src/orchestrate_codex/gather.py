@@ -265,22 +265,33 @@ def _list_skills(
     manifest_source: str,
     root_fd: int,
 ) -> List[str]:
-    names = {
-        parts[1]
-        for item in available
-        if len(parts := Path(item).parts) >= 2
-        and parts[0] == "skills"
-        and not parts[1].startswith(".")
-    }
+    skill_roots = (
+        Path("skills"),
+        Path("hubs/shared/skills"),
+        Path("hubs/codex/skills"),
+        Path("hubs/claude-code/skills"),
+    )
+    names: set[str] = set()
+    for item in available:
+        parts = Path(item).parts
+        for skill_root in skill_roots:
+            root_parts = skill_root.parts
+            if (
+                len(parts) > len(root_parts)
+                and parts[: len(root_parts)] == root_parts
+                and not parts[len(root_parts)].startswith(".")
+            ):
+                names.add(parts[len(root_parts)])
     if manifest_source != "filesystem":
         return sorted(names)[:_DURABLE_METADATA_ENTRY_LIMIT]
-    discovered, _truncated = repository_subdirectories(
-        Path("skills"),
-        root,
-        root_fd=root_fd,
-        max_entries=_DURABLE_METADATA_ENTRY_LIMIT,
-    )
-    names.update(discovered)
+    for skill_root in skill_roots:
+        discovered, _truncated = repository_subdirectories(
+            skill_root,
+            root,
+            root_fd=root_fd,
+            max_entries=_DURABLE_METADATA_ENTRY_LIMIT,
+        )
+        names.update(discovered)
     return sorted(names)[:_DURABLE_METADATA_ENTRY_LIMIT]
 
 
@@ -290,10 +301,18 @@ def _mcp_tools_from_config(
 ) -> List[str]:
     names: List[str] = []
     server_files = sorted(
-        item for item in available if Path(item).name == "mcp_server.py"
+        item
+        for item in available
+        if Path(item).name == "mcp_server.py"
+        or item == "src/agent_hub/operations.py"
     )
     for path in server_files:
         text = read_text(path)
+        for m in re.finditer(r'_spec\(\s*"([a-z0-9_]+)"', text):
+            if m.group(1) not in names:
+                names.append(m.group(1))
+                if len(names) >= _DURABLE_METADATA_ENTRY_LIMIT:
+                    return sorted(set(names))
         for m in re.finditer(r'"name":\s*"([a-z0-9_]+)"', text):
             name = m.group(1)
             if name not in names and (
@@ -316,14 +335,13 @@ def _mcp_tools_from_config(
     return sorted(set(names))[:_DURABLE_METADATA_ENTRY_LIMIT]
 
 
-def _cli_commands_from_tree(
+def _command_references_from_tree(
     available: set[str],
     read_text: Callable[[str], str],
-) -> List[str]:
-    """CLI entry points a README may legitimately reference: scripts/*.py basenames and
-    pyproject [project.scripts] console-script names. Without these, verify would flag a
-    correct `python3 scripts/foo.py` reference as a hallucinated tool."""
-    names = [
+) -> tuple[List[str], List[str]]:
+    """Separate installed entry points from repository-local Python scripts."""
+
+    repository_scripts = [
         Path(item).stem
         for item in available
         if len(Path(item).parts) == 2
@@ -331,6 +349,7 @@ def _cli_commands_from_tree(
         and Path(item).suffix == ".py"
         and not Path(item).name.startswith("_")
     ]
+    console_scripts: List[str] = []
     if "pyproject.toml" in available:
         text = read_text("pyproject.toml")
         m = re.search(r"(?ms)^\[project\.scripts\]\s*(.*?)(?:^\[|\Z)", text)
@@ -338,10 +357,28 @@ def _cli_commands_from_tree(
             for line in m.group(1).splitlines():
                 key = line.split("=", 1)[0].strip().strip('"')
                 if key and not key.startswith("#"):
-                    names.append(key)
-                    if len(names) >= _DURABLE_METADATA_ENTRY_LIMIT:
+                    console_scripts.append(key)
+                    if len(console_scripts) >= _DURABLE_METADATA_ENTRY_LIMIT:
                         break
-    return sorted(set(names))[:_DURABLE_METADATA_ENTRY_LIMIT]
+    return (
+        sorted(set(console_scripts))[:_DURABLE_METADATA_ENTRY_LIMIT],
+        sorted(set(repository_scripts))[:_DURABLE_METADATA_ENTRY_LIMIT],
+    )
+
+
+def _cli_commands_from_tree(
+    available: set[str],
+    read_text: Callable[[str], str],
+) -> List[str]:
+    """All legitimate command-like references retained for verifier compatibility."""
+
+    console_scripts, repository_scripts = _command_references_from_tree(
+        available,
+        read_text,
+    )
+    return sorted(set(console_scripts) | set(repository_scripts))[
+        :_DURABLE_METADATA_ENTRY_LIMIT
+    ]
 
 
 def _install_commands(
@@ -396,7 +433,13 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
 
         version = _version_from_tree(available, read_text)
         tools = _mcp_tools_from_config(available, read_text)
-        cli_commands = _cli_commands_from_tree(available, read_text)
+        console_scripts, repository_scripts = _command_references_from_tree(
+            available,
+            read_text,
+        )
+        cli_commands = sorted(set(console_scripts) | set(repository_scripts))[
+            :_DURABLE_METADATA_ENTRY_LIMIT
+        ]
         install_commands = _install_commands(root, available, read_text)
         readme_preview = read_text("README.md")[:1500]
         skills = _list_skills(
@@ -415,7 +458,8 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
         version=version,
         skills=skills,
         tools=tools,
-        cli_commands=cli_commands,
+        console_scripts=console_scripts,
+        repository_scripts=repository_scripts,
         install_commands=install_commands,
         has_license=has_license,
         readme_preview=readme_preview,
@@ -437,6 +481,8 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
         "skills": skills,
         "mcp_tools_detected": tools,
         "cli_commands": cli_commands,
+        "console_scripts": console_scripts,
+        "repository_scripts": repository_scripts,
         "install_commands": install_commands,
         "packages": packages,
         "has_license": has_license,
@@ -467,7 +513,8 @@ def _facts_as_text(
     version: str,
     skills: List[str],
     tools: List[str],
-    cli_commands: List[str],
+    console_scripts: List[str],
+    repository_scripts: List[str],
     install_commands: List[str],
     has_license: bool,
     readme_preview: str,
@@ -482,7 +529,14 @@ def _facts_as_text(
         f"License file present: {has_license}",
         f"Skills: {', '.join(skills) if skills else '[none detected]'}",
         f"MCP tools detected: {', '.join(tools) if tools else '[none detected in tree]'}",
-        f"CLI commands: {', '.join(cli_commands) if cli_commands else '[none detected]'}",
+        (
+            "Installed console scripts: "
+            f"{', '.join(console_scripts) if console_scripts else '[none detected]'}"
+        ),
+        (
+            "Repository Python scripts (run by path; not installed console scripts): "
+            f"{', '.join(repository_scripts) if repository_scripts else '[none detected]'}"
+        ),
         f"Install commands: {', '.join(install_commands) if install_commands else '[none detected]'}",
         "Repository files (deterministic bounded manifest):",
         "\n".join(repository_files) or "[none detected]",

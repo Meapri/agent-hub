@@ -1,5 +1,9 @@
 # Grok Codex
 
+> **보관용 snapshot입니다.** 현재 Agent Hub 설치·실행 경로가 아니며 아래 독립 플러그인 명령은
+> 통합 전 구조를 기록하기 위해 남아 있습니다. 실제 설치와 provider 관리는 저장소 루트의
+> `README.md`, `agent-hub-setup`, `agent-hub-connect`를 사용하세요.
+
 **버전 0.2.0** · OpenAI **Codex Desktop / GUI**용 플러그인 + **MCP stdio** leaf.
 
 xAI **Grok**를 Codex에서 직접 호출합니다. 오케스트레이션 플러그인의 leaf로 쓰기 좋게

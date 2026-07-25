@@ -198,6 +198,23 @@ def test_curated_models_include_opus_5(monkeypatch, tmp_path):
     assert any(item["id"] == "claude-opus-5" for item in result["models"])
 
 
+def test_live_model_failure_does_not_expose_exception_message(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setattr(auth, "has_credentials", lambda: True)
+    monkeypatch.setattr(
+        models.api,
+        "list_models_live",
+        lambda: (_ for _ in ()).throw(RuntimeError("secret-token /private/path")),
+    )
+
+    result = models.list_models({"probe": True})
+
+    assert result["warnings"] == ["live_list_failed:RuntimeError"]
+    assert "secret-token" not in json.dumps(result)
+    assert "/private/path" not in json.dumps(result)
+
+
 def test_dispatch_doctor(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")

@@ -36,7 +36,7 @@ def list_models(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
             if live:
                 source = "live"
         except Exception as exc:  # noqa: BLE001
-            warnings.append(f"live_list_failed: {type(exc).__name__}: {exc}")
+            warnings.append(f"live_list_failed:{type(exc).__name__}")
     models = live or list(CURATED)
     image_models = [item for item in models if "imagine-image" in str(item.get("id") or "")]
     text_models = [item for item in models if item not in image_models and "imagine-video" not in str(item.get("id") or "")]

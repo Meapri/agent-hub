@@ -5,7 +5,12 @@ import json
 import pytest
 
 from openai_codex import auth, client, mcp_server, models
-from openai_codex.errors import CodexSideEffectRefused
+from openai_codex.errors import (
+    CodexAuthenticationRequired,
+    CodexSideEffectRefused,
+    CodexSubscriptionRequired,
+    CodexTimeout,
+)
 
 
 def _jsonl(*events):
@@ -95,6 +100,31 @@ def test_exec_chat_fails_closed_on_side_effect_items(monkeypatch, tmp_path, item
     )
     with pytest.raises(CodexSideEffectRefused):
         client.run_exec_chat("do not act", cwd=str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("message", "error_type"),
+    [
+        ("request timed out while streaming", CodexTimeout),
+        ("deadline exceeded", CodexTimeout),
+        ("ChatGPT subscription login required", CodexSubscriptionRequired),
+        ("authentication required", CodexAuthenticationRequired),
+    ],
+)
+def test_exec_chat_classifies_turn_failures(monkeypatch, tmp_path, message, error_type):
+    monkeypatch.setattr(client, "codex_binary", lambda: "/test/codex")
+    monkeypatch.setattr(
+        client,
+        "run_bounded",
+        lambda *_args, **_kwargs: (
+            _jsonl({"type": "turn.failed", "error": {"message": message}}),
+            "",
+            1,
+        ),
+    )
+
+    with pytest.raises(error_type):
+        client.run_exec_chat("private prompt", cwd=str(tmp_path))
 
 
 def test_app_server_batch_uses_honest_client_identity(monkeypatch):
@@ -280,6 +310,24 @@ def test_leaf_chat_consent_cannot_be_bypassed(monkeypatch):
     result = mcp_server.dispatch_tool("openai_codex_chat", {"prompt": "hello"})
     assert result["success"] is False
     assert "consent" in result["text"].lower()
+
+
+def test_leaf_failure_does_not_expose_exception_message(monkeypatch):
+    monkeypatch.setattr(
+        mcp_server.chat,
+        "run_chat",
+        lambda _arguments: (_ for _ in ()).throw(
+            RuntimeError("secret-token /private/path")
+        ),
+    )
+
+    result = mcp_server.dispatch_tool("openai_codex_chat", {"prompt": "hello"})
+
+    assert result["success"] is False
+    assert result["error_type"] == "RuntimeError"
+    assert result["text"] == "GPT provider operation failed."
+    assert "secret-token" not in json.dumps(result)
+    assert "/private/path" not in json.dumps(result)
 
 
 def test_shared_logout_is_refused():

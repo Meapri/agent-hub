@@ -410,6 +410,24 @@ def test_gpt_chat_uses_canonical_agent_hub_envelope(monkeypatch):
     assert result["data"]["provider"] == "gpt"
 
 
+def test_model_catalog_failure_does_not_expose_exception_message(monkeypatch):
+    def fail_with_secret(_arguments):
+        raise RuntimeError("secret-token /private/path")
+
+    monkeypatch.setattr(operations.claude_models, "list_models", fail_with_secret)
+
+    result = operations.dispatch_tool(
+        "agent_hub_list_models",
+        {"provider": "claude"},
+    )
+
+    catalog = result["data"]["models"]["claude"]
+    assert catalog["error"]["type"] == "model_list_failed"
+    assert result["data"]["warnings"] == ["claude:model_list_failed:RuntimeError"]
+    assert "secret-token" not in str(result)
+    assert "/private/path" not in str(result)
+
+
 def test_gpt_status_models_and_gui_auth_guidance_use_canonical_envelopes(monkeypatch):
     status_refresh_args = []
 
@@ -601,6 +619,64 @@ def test_provider_settings_are_persistent_and_scoped(tmp_path, monkeypatch):
     assert provider_settings.get("grok") == {"api_mode": "responses"}
     operations.dispatch_tool("agent_hub_reset_settings", {"provider": "grok"})
     assert provider_settings.get("grok") == {}
+
+
+def test_settings_update_requires_an_explicit_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path))
+    spec = _spec("agent_hub_update_settings")
+    provider_schema = spec["inputSchema"]["properties"]["provider"]
+
+    assert spec["inputSchema"]["required"] == ["provider"]
+    assert provider_schema["enum"] == ["claude", "grok", "gemini", "gpt"]
+    assert "default" not in provider_schema
+
+    missing = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"model": "gemini-3.6-flash-high"},
+    )
+    automatic = operations.dispatch_tool(
+        "agent_hub_update_settings",
+        {"provider": "auto", "model": "gemini-3.6-flash-high"},
+    )
+
+    assert missing["success"] is False
+    assert automatic["success"] is False
+    assert provider_settings.get("gemini") == {}
+
+
+def test_settings_read_exposes_one_common_model_contract(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_CONFIG_DIR", str(tmp_path / "agent-hub"))
+    monkeypatch.setenv(
+        "GOOGLE_ANTIGRAVITY_CONFIG_DIR",
+        str(tmp_path / "google"),
+    )
+    provider_settings.update("claude", {"model": "claude-sonnet-5"})
+    operations.google_model_prefs.set_model(
+        model="gemini-3.6-flash-high",
+        task="chat",
+        validate=False,
+    )
+
+    loaded = operations.dispatch_tool("agent_hub_get_settings", {"provider": "all"})
+
+    assert loaded["success"] is True
+    for provider, value in loaded["data"]["providers"].items():
+        assert value["provider"] == provider
+        assert set(
+            (
+                "defaults",
+                "overrides",
+                "selected_model",
+                "model_source",
+                "model_overridden",
+                "settings_error",
+                "scope",
+            )
+        ) <= set(value)
+    assert loaded["data"]["providers"]["claude"]["selected_model"] == "claude-sonnet-5"
+    assert loaded["data"]["providers"]["gemini"]["selected_model"] == (
+        "gemini-3.6-flash-high"
+    )
 
 
 def test_all_provider_model_reset_preserves_non_model_settings(tmp_path, monkeypatch):

@@ -1139,22 +1139,26 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-25 README workflow에서 발견한 Agent Hub 구조 문제 수정
+## 2026-07-25 README 재작성과 문서 생성 경로 근본 개선
 
-- **원래 목표**: README 결과물보다 작성 과정에서 드러나는 Agent Hub 자체 문제를 재현하고, 장시간 adaptive 실행·provider 상태 표현·생성 결과 검토 경로의 근본 원인을 수정합니다.
-- **현재 단계**: README adaptive run `83f8781abda0`은 revision 3의 paused 상태로 재현 증거를 보존했습니다. README 최종 작성은 중단하고, 장시간 continue를 비차단 background 작업으로 접수하는 경로, Gemini quota tri-state, 생성 dependency 전용 `review_text` capability를 구현하고 전체 검증까지 마쳤습니다. 마지막 선행 커밋은 `d6bff4b`이며 이번 변경은 아직 커밋·push하지 않았습니다.
+- **원래 목표**: 재시작된 Agent Hub의 adaptive workflow로 저장소 근거를 다시 조사해 README를 완전히 재작성하고, 작성 과정에서 드러나는 Agent Hub 문제를 결과물보다 우선해 수정합니다.
+- **현재 단계**: adaptive run `d7c18dad90b3`은 revision 4, `completed`, leaf call 9회로 끝났고 생성된 README를 코드와 수동 대조해 보정했습니다. 발견한 구현 결함과 회귀 테스트까지 수정했으며 전체 검증을 통과했습니다. 작업 트리 변경은 아직 stage·commit·push하지 않았습니다.
 - **완료**:
-  - adaptive `agent_hub_continue_workflow(background=true)`가 revision과 lease를 먼저 claim한 뒤 bounded daemon worker로 wave를 실행하고 즉시 polling receipt를 반환합니다. 실행 중 `agent_hub_get_run`은 `continuation_status=running`, `lease_active=true`, 다음 동작으로 자기 자신을 반환합니다.
-  - background worker의 예상 밖 예외는 원문을 저장하지 않고 `background_worker_failed`로 redaction해 paused·retryable 상태로 commit합니다. 동시 worker 수는 provider 수로 제한하고 CAS/lease가 같은 run의 중복 실행을 막습니다.
-  - Gemini transport가 quota bucket을 제공하지 않는 상태를 `quota_state=unknown`, `quota_telemetry_available=false`, `quota_available=null`, `quota_exhausted=null`로 표현해 쿼터 소진과 구분합니다.
-  - adaptive 내부 `review_text`를 chat provider capability로 추가하고 dependency가 없는 계획은 거부합니다. `write` 결과를 `review_diff`로 검토하는 계획도 validator가 거부하며, adaptive `review_diff`의 빈 Git diff는 성공이 아니라 `adaptive_review_diff_empty`로 fail closed합니다.
-  - shared adaptive/document-write skill에 background 접수·polling·revision 재개 및 `review_text`/`review_diff` 구분을 기록하고 Codex·Claude Code 복사본을 동기화했습니다.
+  - README를 특징·장점·설치·GUI/CLI 인증·provider별 소유권·공개 도구 37개·모델 카탈로그·adaptive workflow·HANDOFF·보안·저장소 구조·문제 해결 중심으로 새로 작성했습니다.
+  - durable fact pack이 공개 `agent_hub_*` 도구, `hubs/shared/skills`와 host별 `route-to`, 설치 console script와 저장소 script를 서로 구분해 수집하도록 수정했습니다.
+  - `agent_hub_update_settings`가 provider 생략이나 `auto`를 Gemini로 조용히 처리하지 않고 `claude|grok|gemini|gpt` 중 하나를 필수로 요구하도록 고쳤습니다. 네 provider의 설정 조회 공통 필드도 정렬했습니다.
+  - adaptive fallback 성공 시 다음 단계에 `actual_provider`와 실패한 시도의 안정적인 오류 코드만 전달하고, 예외 원문·prompt·자격 문자열·로컬 경로는 숨기도록 수정했습니다.
+  - Claude/Grok live 모델 목록과 통합 catalog 조회 실패가 예외 메시지 원문을 노출하지 않고 오류 코드와 예외 유형만 반환하도록 수정했습니다.
+  - 더 이상 배포하지 않는 standalone bundle script는 잘못된 bundle을 만들지 않고 `python -m build`, `agent-hub-setup` 안내로 종료하며, 네 legacy plugin README에 보관용 snapshot 표시를 추가했습니다.
+  - README adaptive 실행에서 `background=true` continue가 즉시 반환하고 같은 MCP의 `agent_hub_get_run`이 실행 중에도 응답하는 것을 확인했습니다. 동일한 약 10만 byte GPT review 입력과 high reasoning은 120초 진단 제한을 넘어 `codex_timeout`으로 재현됐습니다.
+  - Codex의 내부 `turn.failed`가 timeout·로그인·구독 문제를 보고할 때 이를 generic `codex_process_error`가 아니라 각각의 안정적인 오류 타입으로 분류하고, GPT leaf 공개 응답에는 예외 원문을 넣지 않도록 수정했습니다.
 - **미완**:
-  - 실행 중인 Codex Desktop MCP는 수정 전 module과 tool schema를 적재했으므로 재시작 전에는 `background` 입력과 `review_text` planner 규칙을 사용하지 않습니다.
-  - 보존한 README run은 기존 잘못된 plan과 결과를 포함하므로 이어서 완성하지 않습니다. 새 MCP에서 수정 계약을 실호출로 확인한 뒤 README workflow를 새로 계획해야 합니다.
-- **변경 파일**: 실행은 `src/agent_hub/{operations.py,orchestrator.py}`, Gemini 상태는 `src/google_antigravity_codex/quota.py`, skill은 `hubs/{shared,codex,claude-code}/skills/{adaptive-orchestrate,document-write}/SKILL.md`, 회귀는 `tests/agent_hub/{test_adaptive_orchestration.py,test_provider_expansion.py,test_server.py}`와 `tests/google_antigravity_codex/test_quota.py`입니다.
-- **검증 실행 결과**: 집중 회귀 `134 passed`; 최종 전체 pytest `723 passed, 2 skipped`; `./.venv/bin/ruff check .`, `git diff --check`, `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`, `./scripts/test-phase1.sh` 모두 통과했습니다.
-- **현재 리스크**: daemon worker는 MCP process 수명에 속하므로 host가 종료되면 lease 만료 뒤 재개해야 하며, provider 요청 자체의 원격 취소까지 보장하지 않습니다. background 접수 직후 매우 빠른 wave가 끝나면 receipt의 `status=running`보다 저장 상태가 먼저 완료될 수 있으므로 정본은 항상 후속 `agent_hub_get_run` 결과입니다. quota unknown은 사용 가능을 보장하지 않고 단지 telemetry 부재를 뜻합니다.
-- **Do-Not-Repeat**: MCP 호출 제한을 내부 provider timeout 숫자만 늘려 해결하지 마세요. single-threaded stdio 요청을 장시간 점유하면 같은 서버의 상태 polling도 막힙니다. `quota_available=false`로 telemetry 부재를 quota 소진처럼 표현하지 마세요. 아직 파일로 쓰지 않은 생성 초안을 Git working-tree 전용 `review_diff`로 검토하지 마세요.
-- **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새 adaptive 2-wave fixture에서 첫 `agent_hub_continue_workflow(background=true)`를 호출하고, 같은 MCP의 `agent_hub_get_run`이 호출 제한 안에 응답하며 `lease_active=false`와 증가한 `store_revision`을 반환하는지 실호출로 확인하세요.
+  - 현재 Codex Desktop MCP process는 이번 세션 중 추가한 fallback provenance, catalog 오류 redaction, GPT 실패 분류 코드를 재시작 전까지 적재하지 않습니다.
+  - 기존 adaptive run에 기록된 `codex_process_error`의 원문은 의도적으로 보존하지 않아 이번에 재현한 120초 timeout과 완전히 같은 원인이었다고 소급 확정할 수 없습니다.
+  - adaptive wave 내부의 개별 step 진행률은 wave commit 전까지 `agent_hub_get_run`에 나타나지 않고 lease 상태만 보입니다.
+- **변경 파일**: `README.md`, `plugins/{antigravity-codex,claude-codex,grok-codex,orchestrate-codex}/README.md`, `scripts/build_plugin_bundle.py`, `src/agent_hub/operations.py`, `src/{claude_codex,grok_codex}/models.py`, `src/openai_codex/{client.py,mcp_server.py}`, `src/orchestrate_codex/gather.py`, `tests/agent_hub/{test_adaptive_orchestration.py,test_hub_plugins.py,test_provider_expansion.py}`, `tests/{claude_codex,grok_codex,openai_codex}/test_core.py`, `tests/orchestrate_codex/test_core.py`입니다.
+- **검증 실행 결과**: GPT 분류 포함 집중 회귀 `139 passed`; README 복사 가능 명령 회귀 `3 passed`; 최종 전체 pytest `736 passed, 2 skipped`; `agent_hub_verify(user_facing=true, doc_class=durable)`, `python -m orchestrate_codex.document_quality README.md`, `ruff check .`, `git diff --check`, `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`, `./scripts/test-phase1.sh` 모두 통과했습니다.
+- **현재 리스크**: adaptive 최종 합성은 이제 fallback provenance를 받지만 provider review 자체의 과신을 결정론적으로 판별하지는 못하므로 로컬 품질 검사와 코드 대조가 계속 필요합니다. 큰 GPT high-reasoning 검토는 짧은 caller timeout에서 정상적으로 시간 제한에 걸릴 수 있습니다. live catalog 표시, 연결됨 상태, 실제 생성 성공은 서로 다른 상태입니다.
+- **Do-Not-Repeat**: README 품질 검사만 통과했다고 기능 목록이 완전하거나 사실이라고 판단하지 마세요. `tests/agent_hub/test_readme_copy.py`가 요구하는 실제 설치·동의·로그인·plugin·빌드 명령과 공개 도구 37개를 생략하지 마세요. fallback review를 원래 provider의 독립 검토 성공으로 표현하거나 catalog fallback을 live 응답으로 표현하지 마세요. 예외 문자열 원문을 workflow dependency, provider leaf 응답, model catalog 응답, HANDOFF에 넣지 마세요.
+- **다음 한 걸음**: Codex Desktop을 완전히 종료한 뒤 다시 실행해 현재 MCP process가 `src/agent_hub/operations.py`와 `src/openai_codex/mcp_server.py`의 최신 schema·오류 분류 코드를 다시 적재하게 하세요.
 <!-- agent-hub:handoff:v1:end -->

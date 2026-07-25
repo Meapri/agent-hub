@@ -631,8 +631,15 @@ def _list_models(args: Dict[str, Any]) -> Dict[str, Any]:
                     google_mcp.dispatch_tool("google_antigravity_list_models", {})
                 )
         except Exception as exc:  # noqa: BLE001
-            listed[provider] = {"success": False, "error": str(exc)}
-            warnings.append(f"{provider}:model_list_failed")
+            error_type = type(exc).__name__
+            listed[provider] = {
+                "success": False,
+                "error": {
+                    "type": "model_list_failed",
+                    "message": f"{provider} model catalog unavailable.",
+                },
+            }
+            warnings.append(f"{provider}:model_list_failed:{error_type}")
     raw = {
         "success": True,
         "text": f"Model catalogs returned for {len(listed)} provider(s).",
@@ -1420,26 +1427,67 @@ def _get_settings(args: Dict[str, Any]) -> Dict[str, Any]:
     providers = _selected_providers(requested)
     values: Dict[str, Any] = {}
     if "claude" in providers:
+        state = _provider_model_state(
+            "claude",
+            fallback=claude_models.DEFAULT_MODEL,
+            environment_name="CLAUDE_CODEX_MODEL",
+        )
         values["claude"] = {
+            "provider": "claude",
             "defaults": {"model": claude_models.DEFAULT_MODEL},
             "overrides": provider_settings.get("claude"),
+            "selected_model": state["default_model"],
+            "model_source": state["model_source"],
+            "model_overridden": state["model_overridden"],
+            "settings_error": state["settings_error"],
             "scope": capabilities.provider_capabilities("claude")["settings"]["scope"],
         }
     if "grok" in providers:
+        state = _provider_model_state(
+            "grok",
+            fallback=grok_models.DEFAULT_MODEL,
+            environment_name="GROK_CODEX_MODEL",
+        )
         values["grok"] = {
+            "provider": "grok",
             "defaults": {"model": grok_models.DEFAULT_MODEL, "api_mode": "chat"},
             "overrides": provider_settings.get("grok"),
+            "selected_model": state["default_model"],
+            "model_source": state["model_source"],
+            "model_overridden": state["model_overridden"],
+            "settings_error": state["settings_error"],
             "scope": capabilities.provider_capabilities("grok")["settings"]["scope"],
         }
     if "gpt" in providers:
+        state = _provider_model_state(
+            "gpt",
+            fallback=openai_models.DEFAULT_MODEL,
+        )
         values["gpt"] = {
+            "provider": "gpt",
             "defaults": {"model": openai_models.DEFAULT_MODEL},
             "overrides": provider_settings.get("gpt"),
+            "selected_model": state["default_model"],
+            "model_source": state["model_source"],
+            "model_overridden": state["model_overridden"],
+            "settings_error": state["settings_error"],
             "scope": capabilities.provider_capabilities("gpt")["settings"]["scope"],
             "auth_owner": "official-codex",
         }
     if "gemini" in providers:
+        state = _gemini_model_state()
         values["gemini"] = {
+            "provider": "gemini",
+            "defaults": {"model": state["base_default_model"]},
+            "overrides": (
+                {"model": state["default_model"]}
+                if state["model_overridden"]
+                else {}
+            ),
+            "selected_model": state["default_model"],
+            "model_source": state["model_source"],
+            "model_overridden": state["model_overridden"],
+            "settings_error": state["settings_error"],
             "model_preferences": google_model_prefs.get_prefs_tool({}),
             "session": google_session_prefs.get_session_prefs({}),
             "profiles": google_profiles.list_profiles_tool({}),
@@ -1494,9 +1542,7 @@ def _validate_text_model(provider: str, model: Any) -> str:
 
 
 def _update_settings(args: Dict[str, Any]) -> Dict[str, Any]:
-    provider = _normalize_provider(args.get("provider") or "gemini", allow_auto=True)
-    if provider == "auto":
-        provider = "gemini"
+    provider = _normalize_provider(args.get("provider"))
     validate = bool(args.get("validate", True))
     if provider in {"claude", "grok", "gpt"}:
         requested = {
@@ -2118,6 +2164,35 @@ def _render_compare_dependency(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _dependency_fallback_provenance(result: Dict[str, Any]) -> str | None:
+    attempts = result.get("attempts")
+    if not isinstance(attempts, list):
+        return None
+
+    failed: List[str] = []
+    safe_chars = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or attempt.get("success"):
+            continue
+        provider = str(attempt.get("provider") or "unknown")
+        if provider not in PROVIDERS:
+            provider = "unknown"
+        error = str(attempt.get("error") or "operation_error")
+        if not error or len(error) > 64 or any(char not in safe_chars for char in error):
+            error = "operation_error"
+        failed.append(f"{provider}:{error}")
+    if not failed:
+        return None
+
+    actual_provider = str(result.get("provider") or "unknown")
+    if actual_provider not in PROVIDERS:
+        actual_provider = "unknown"
+    return (
+        f"Dependency provenance — actual_provider={actual_provider}; "
+        f"failed_attempts={','.join(failed)}"
+    )
+
+
 def _render_dependency_outputs(
     dependencies: Dict[str, Dict[str, Any]],
     *,
@@ -2130,6 +2205,9 @@ def _render_dependency_outputs(
             body = _render_compare_dependency(result)
         else:
             body = str(result.get("text") or "")
+            provenance = _dependency_fallback_provenance(result)
+            if provenance:
+                body = f"{provenance}\n{body}"
         bounded = body[:ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS]
         if len(body) > ADAPTIVE_DEPENDENCY_ITEM_MAX_CHARS:
             bounded += "\n[dependency output truncated]"
@@ -3909,10 +3987,13 @@ TOOL_SPECS: List[Dict[str, Any]] = [
     _spec(
         "agent_hub_update_settings",
         "Update Settings",
-        "Update model, transport, or profile preferences.",
+        "Update one explicitly selected provider's model, transport, or profile preferences.",
         _object(
             {
-                "provider": _provider_property(auto=True),
+                "provider": {
+                    "type": "string",
+                    "enum": list(PROVIDERS),
+                },
                 "model": {"type": "string"},
                 "temperature": {"type": "number"},
                 "max_tokens": {"type": "integer", "minimum": 1},
@@ -3926,7 +4007,8 @@ TOOL_SPECS: List[Dict[str, Any]] = [
                 "apply_model_pref": {"type": "boolean", "default": True},
                 "apply_provider": {"type": "boolean", "default": True},
                 "save_profile": {"type": "object"},
-            }
+            },
+            required=("provider",),
         ),
         read_only=False,
         destructive=True,
