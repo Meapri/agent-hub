@@ -138,6 +138,27 @@ def test_chat_maps_reasoning_effort_to_responses(monkeypatch, tmp_path):
     assert result["diagnostics"]["reasoning_effort"] == "high"
 
 
+def test_responses_text_prefers_last_assistant_message_over_progress_output():
+    payload = {
+        "output_text": "Searching now...Final answer",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Searching now..."}],
+            },
+            {"type": "web_search_call", "status": "completed"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Final answer"}],
+            },
+        ],
+    }
+
+    assert chat._extract_responses_text(payload) == "Final answer"
+
+
 def test_chat_rejects_reasoning_effort_for_unsupported_model(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")

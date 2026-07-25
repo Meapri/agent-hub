@@ -143,18 +143,29 @@ def _extract_chat_text(payload: Dict[str, Any]) -> str:
 
 
 def _extract_responses_text(payload: Dict[str, Any]) -> str:
-    # Responses API variants: output_text or output[].content[].text
-    if isinstance(payload.get("output_text"), str) and payload["output_text"].strip():
-        return payload["output_text"].strip()
-    parts: List[str] = []
+    # Tool-backed Responses may contain user-visible progress messages before
+    # the final assistant message. Prefer the last structured assistant message
+    # instead of concatenating those intermediate messages through output_text.
+    message_texts: List[str] = []
+    fallback_parts: List[str] = []
     for item in payload.get("output") or []:
         if not isinstance(item, dict):
             continue
+        item_parts: List[str] = []
         for block in item.get("content") or []:
             if isinstance(block, dict) and block.get("type") in {"output_text", "text"}:
-                parts.append(str(block.get("text") or ""))
-    if parts:
-        return "".join(parts).strip()
+                item_parts.append(str(block.get("text") or ""))
+        if not item_parts:
+            continue
+        fallback_parts.extend(item_parts)
+        if item.get("type") == "message" and item.get("role") in {None, "assistant"}:
+            message_texts.append("".join(item_parts))
+    if message_texts:
+        return message_texts[-1].strip()
+    if isinstance(payload.get("output_text"), str) and payload["output_text"].strip():
+        return payload["output_text"].strip()
+    if fallback_parts:
+        return "".join(fallback_parts).strip()
     return _extract_chat_text(payload)
 
 

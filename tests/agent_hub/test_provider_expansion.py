@@ -1018,7 +1018,7 @@ def test_grok_search_uses_web_and_x_tools(monkeypatch):
         return {
             "status": "completed",
             "model": "grok-test",
-            "output_text": "answer",
+            "output_text": f"answer\n{grok_search.SEARCH_COMPLETE_MARKER}",
             "citations": ["https://x.com/example/status/1"],
         }
 
@@ -1026,6 +1026,97 @@ def test_grok_search_uses_web_and_x_tools(monkeypatch):
     result = grok_search.run_search({"query": "q", "source": "both", "model": "grok-test"})
     assert [tool["type"] for tool in captured["tools"]] == ["web_search", "x_search"]
     assert result["sources"][0]["url"].startswith("https://x.com/")
+    assert result["text"] == "answer"
+    assert result["success"] is True
+
+
+def test_grok_search_retries_and_replaces_incomplete_answer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(grok_search.security, "require_consent", lambda: None)
+    monkeypatch.setattr(grok_search.auth, "resolve_auth", lambda: {"mode": "api_key"})
+
+    def fake_response(body, **_kwargs):
+        calls.append(body)
+        if len(calls) == 1:
+            return {
+                "status": "completed",
+                "model": "grok-test",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "partial"}],
+                    }
+                ],
+                "citations": ["https://x.com/example/status/1"],
+                "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            }
+        return {
+            "status": "completed",
+            "model": "grok-test",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "complete answer\n"
+                                f"{grok_search.SEARCH_COMPLETE_MARKER}"
+                            ),
+                            "annotations": [{"url": "https://official.test"}],
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 20, "output_tokens": 4, "total_tokens": 24},
+        }
+
+    monkeypatch.setattr(grok_search.api, "responses_create", fake_response)
+
+    result = grok_search.run_search(
+        {"query": "q", "source": "both", "model": "grok-test", "retry_count": 1}
+    )
+
+    assert len(calls) == 2
+    assert "previous attempt" in calls[1]["input"][0]["content"]
+    assert result["text"] == "complete answer"
+    assert result["success"] is True
+    assert result["finish_reason"] == "completed"
+    assert result["warnings"] == ["search_completion_recovered:1"]
+    assert result["usage"] == {
+        "prompt_tokens": 30,
+        "completion_tokens": 6,
+        "total_tokens": 36,
+    }
+    assert [item["url"] for item in result["sources"]] == ["https://official.test"]
+    assert result["diagnostics"]["completion_attempts"] == 2
+
+
+def test_grok_search_fails_closed_when_completion_marker_never_arrives(monkeypatch):
+    monkeypatch.setattr(grok_search.security, "require_consent", lambda: None)
+    monkeypatch.setattr(grok_search.auth, "resolve_auth", lambda: {"mode": "api_key"})
+    monkeypatch.setattr(
+        grok_search.api,
+        "responses_create",
+        lambda *_args, **_kwargs: {
+            "status": "completed",
+            "model": "grok-test",
+            "output_text": "partial answer",
+            "citations": ["https://x.com/example/status/1"],
+        },
+    )
+
+    result = grok_search.run_search(
+        {"query": "q", "model": "grok-test", "retry_count": 0}
+    )
+
+    assert result["success"] is False
+    assert result["finish_reason"] == "incomplete"
+    assert result["warnings"] == [
+        "incomplete_search_answer:missing_completion_marker"
+    ]
 
 
 def test_grok_image_generation_caches_base64(tmp_path, monkeypatch):

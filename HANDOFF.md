@@ -11,7 +11,60 @@
 
 - **현재 단계**
 
-  **[2026-07-25 Agent Hub 1.4.3 Gemini 3.6 실제 실행 복구 — 이 블록이 최신]**
+  **[2026-07-25 Grok X·웹 검색 최종 답변 완결성 복구 — 이 블록이 최신]**
+
+  - **원래 목표**: `agent_hub_search(provider="grok")`가 X 검색을 실제로 사용하는지 확인하고,
+    xAI Responses API가 검색 도중 문장과 잘린 최종 답변을 `completed`로 반환해도 Agent Hub가
+    성공으로 전달하지 않도록 근본적으로 고칩니다.
+  - **현재 단계**: Grok의 `source="x"`는 xAI `x_search`, `source="both"`는 `web_search`와
+    `x_search`를 함께 사용합니다. Responses 출력에서 마지막 assistant message만 최종 답변으로
+    선택하고, 완결 계약을 확인한 뒤에만 성공하도록 구현·실호출 검증했습니다.
+  - **완료**:
+    - `output_text`가 검색 진행 문장과 최종 답변을 합쳐도 구조화된 `output`의 마지막 assistant
+      message만 반환합니다.
+    - 검색 prompt가 도구 호출·조사 진행을 서술하지 않고 하나의 완결된 사용자용 답변만 반환하도록
+      요구합니다. 내부 완료 마커는 응답 끝에서 검사한 뒤 사용자 결과에서 제거합니다.
+    - xAI가 `status=completed`를 반환해도 완료 마커가 없으면 기본 1회 bounded retry를 수행합니다.
+      재시도까지 불완전하면 `finish_reason=incomplete`와
+      `incomplete_search_answer:missing_completion_marker`로 fail closed합니다.
+    - 성공한 최종 시도의 source만 반환해 이전 불완전 답변의 citation이 섞이지 않게 하고, 재시도한
+      모든 호출의 token usage는 합산합니다. 원문 prompt·응답·token은 diagnostics에 저장하지 않습니다.
+    - 실제 `grok-4.5`, `source=both`, `max_tokens=1600` 호출에서 한 번의 시도로 완결된 한국어 3개
+      bullet과 X·GitHub source 2개를 받았고, 진행 문장과 내부 완료 마커는 반환되지 않았습니다.
+  - **미완**:
+    - 이미 실행 중인 Codex Desktop MCP process는 Python module을 적재한 상태이므로 새 추출·재시도
+      동작을 확실히 사용하려면 host 또는 MCP process를 재시작해야 합니다.
+    - xAI 검색 품질과 source 내용은 외부 서비스 상태에 따라 달라집니다. 이번 수정은 답변 완결성과
+      성공 판정을 보장하며, 개별 검색 결과의 사실성을 대신 보장하지 않습니다.
+  - **변경 파일**:
+    - 실행: `src/grok_codex/{chat.py,search.py}`
+    - 회귀 테스트: `tests/grok_codex/test_core.py`,
+      `tests/agent_hub/test_provider_expansion.py`
+    - 운영 기록: `HANDOFF.md`
+  - **검증 실행 결과**:
+    - 관련 suite → `94 passed`
+    - provider credential 경로를 임시 디렉터리로 격리한 전체 pytest →
+      `709 passed, 2 skipped`
+    - `./.venv/bin/python -m ruff check .`, `git diff --check` → 통과
+    - `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`,
+      `./scripts/test-phase1.sh` → 통과
+    - `./.venv/bin/python -m orchestrate_codex.document_quality HANDOFF.md` → 통과
+    - `agent_hub_verify(user_facing=true)` 최신 블록 → 경고 0건. 누적 문서 전체 검증은 이전 기록에
+      남은 다른 checkout 경로와 내부 용어까지 현재 저장소 기준으로 검사해 기존 경고 43건을 반환했습니다.
+    - 실제 Grok 검색 → `success=true`, `finish_reason=completed`,
+      `completion_marker_seen=true`, `completion_attempts=1`, source 2개, 마커 비노출
+  - **현재 리스크**: 완료 마커가 누락된 xAI 응답은 `retry_count`만큼 검색을 다시 수행하므로
+    provider 사용량이 추가될 수 있습니다. `retry_count=0`이면 재시도 없이 불완전 상태로 반환합니다.
+  - **Do-Not-Repeat**: Responses API의 최상위 `output_text`를 도구 기반 검색의 최종 답변으로 무조건
+    사용하지 마세요. xAI의 `status=completed`만 보고 사용자 답변이 완결됐다고 판단하지 마세요.
+    불완전 답변을 성공 처리하거나 내부 완료 마커를 사용자에게 노출하지 마세요.
+  - **다음 한 걸음**: Codex Desktop을 재시작한 뒤
+    `agent_hub_search(provider="grok", source="x", query="최근 @Teknium의 Hermes Agent 관련 게시물")`
+    를 한 번 호출해 새 MCP process에서도 `completion_marker_seen=true`인지 확인하세요.
+
+  ---
+
+  **[2026-07-25 Agent Hub 1.4.3 Gemini 3.6 실제 실행 복구 — 이전 기록]**
 
   - **원래 목표**: 동적 catalog에 표시되는 `gemini-3.6-flash-{high,medium,low}`를 Agent Hub의
     공통 provider 경로와 연결 관리 GUI에서 실제로 실행하고, 단순 로그인·목록 조회와 실제 생성 성공을
