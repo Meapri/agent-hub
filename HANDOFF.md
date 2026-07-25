@@ -11,7 +11,57 @@
 
 - **현재 단계**
 
-  **[2026-07-25 provider·workflow 최대 실행 예산 통합 — 이 블록이 최신]**
+  **[2026-07-25 Claude Opus 5 adaptive planner 복구 — 이 블록이 최신]**
+
+  - **원래 목표**: Agent Hub의 Claude Opus 5를 선택한 adaptive workflow가
+    `temperature is deprecated for this model` 400 Bad Request로 중단되는 문제를 근본적으로
+    수정합니다.
+  - **현재 단계**: Claude 모델별 요청 capability에 Opus 5를 반영해 deprecated
+    `temperature`는 전송하지 않고 `reasoning_effort`를 Anthropic `output_config.effort`로
+    전달합니다. live catalog를 사용할 수 없을 때의 curated 모델 목록에도 Opus 5를 추가했습니다.
+    마지막 선행 커밋은 `540951e`이며, 이번 수정은 아직 원격에 push하지 않았습니다.
+  - **완료**:
+    - `supports_temperature("claude-opus-5")`가 false를 반환해 호출자가 temperature를
+      지정해도 API body에서 제외하고 `temperature_ignored_by_model` 경고를 반환합니다.
+    - `supports_reasoning_effort("claude-opus-5")`가 true를 반환해 high effort 요청을
+      `output_config={"effort": "high"}`로 전송합니다. 예전 모델용 explicit
+      `thinking={"type": "adaptive"}` 필드는 함께 보내지 않습니다.
+    - 새 Python process의 실제 `agent_hub_chat` 호출은 400 Bad Request 없이
+      `model=claude-opus-5`, `finish_reason=end_turn`로 응답했습니다.
+    - 같은 새 process에서 `agent_hub_plan_workflow(workflow_id="adaptive",
+      planner_provider="claude", planner_model="claude-opus-5")`가 JSON repair 1회 뒤
+      3단계 계획을 정상 생성했습니다.
+  - **미완**:
+    - 현재 실행 중인 Codex Desktop Agent Hub MCP는 수정 전 Python module을 적재했으므로
+      같은 planner 호출을 즉시 반복하면 이전 400이 재현될 수 있습니다. host 또는 MCP process를
+      재시작해야 새 capability 판정이 적용됩니다.
+    - 사용자가 Claude 수정을 먼저 요청해 README 전면 재작성 workflow는 시작하지 않았습니다.
+  - **변경 파일**:
+    - `src/claude_codex/chat.py`
+    - `src/claude_codex/models.py`
+    - `tests/claude_codex/test_core.py`
+    - `tests/agent_hub/test_provider_expansion.py`
+    - `HANDOFF.md`
+  - **검증 실행 결과**:
+    - Claude·provider expansion 관련 suite → `73 passed`
+    - 전체 pytest → `715 passed, 2 skipped`
+    - 변경 파일 Ruff, `git diff --check` → 통과
+    - `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`,
+      `./scripts/test-phase1.sh` → 통과
+    - 실제 Claude Opus 5 chat·adaptive planner 호출 → 정상 완료
+  - **현재 리스크**: Claude 신규 모델의 temperature·effort 지원 여부는 현재 adapter의 명시적
+    capability 목록에 추가해야 합니다. live catalog는 모델 ID를 동적으로 찾지만 API 요청 필드의
+    호환성까지 설명하지 않으므로, 새 모델은 짧은 실호출과 회귀 테스트로 확인해야 합니다.
+  - **Do-Not-Repeat**: 모델이 응답 본문에서 주장하는 자기 버전은 라우팅 증거로 사용하지 마세요.
+    요청 모델 ID, API 성공 여부와 finish reason을 확인하세요. high reasoning을 256 token처럼 작은
+    예산으로 시험하면 추론이 예산을 소진해 빈 본문과 `max_tokens`가 나올 수 있습니다.
+  - **다음 한 걸음**: Codex Desktop을 완전히 재시작한 뒤 새 작업에서
+    `agent_hub_plan_workflow(workflow_id="adaptive", planner_provider="claude",
+    planner_model="claude-opus-5")`를 한 번 호출해 실행 중 MCP에도 수정이 적재됐는지 확인하세요.
+
+  ---
+
+  **[2026-07-25 provider·workflow 최대 실행 예산 통합 — 이전 기록]**
 
   - **원래 목표**: Agent Hub 전체의 token, timeout, retry, 검색·workflow 예산을 provider와 MCP가
     실제로 받아들이는 최대 안전 상한까지 올리고, 직접 leaf와 통합 workflow 사이의 서로 다른 기본값을

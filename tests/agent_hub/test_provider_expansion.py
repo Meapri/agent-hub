@@ -67,6 +67,7 @@ def test_public_schemas_expose_real_provider_capabilities():
     [
         ("claude", "claude-haiku-4-5-20251001", False),
         ("claude", "claude-sonnet-5", True),
+        ("claude", "claude-opus-5", True),
         ("grok", "grok-4.3", False),
         ("grok", "grok-4.5", True),
         ("gemini", "claude-sonnet-4-6-thinking", False),

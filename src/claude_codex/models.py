@@ -9,6 +9,7 @@ from . import api, auth, response, security
 DEFAULT_MODEL = "claude-sonnet-5"
 CURATED: List[Dict[str, str]] = [
     {"id": "claude-sonnet-5", "display": "Claude Sonnet 5", "source": "curated"},
+    {"id": "claude-opus-5", "display": "Claude Opus 5", "source": "curated"},
     {"id": "claude-fable-5", "display": "Claude Fable 5", "source": "curated"},
     {"id": "claude-opus-4-8", "display": "Claude Opus 4.8", "source": "curated"},
     {"id": "claude-opus-4-7", "display": "Claude Opus 4.7", "source": "curated"},

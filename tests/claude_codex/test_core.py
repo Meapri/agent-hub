@@ -118,6 +118,32 @@ def test_chat_maps_reasoning_effort_to_adaptive_thinking(monkeypatch, tmp_path):
     assert seen["thinking"] == {"type": "adaptive"}
 
 
+def test_opus_5_uses_effort_without_deprecated_temperature(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+    monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
+    seen = {}
+
+    def fake_request(method, url, headers, body, timeout):
+        seen.update(body)
+        return chat_fake_response(body)
+
+    with patch.object(chat.api, "http_json", side_effect=fake_request):
+        result = chat.run_chat(
+            {
+                "prompt": "plan",
+                "model": "claude-opus-5",
+                "temperature": 0.1,
+                "reasoning_effort": "high",
+            }
+        )
+
+    assert "temperature" not in seen
+    assert seen["output_config"] == {"effort": "high"}
+    assert "thinking" not in seen
+    assert "temperature_ignored_by_model" in result["warnings"]
+
+
 def test_chat_rejects_reasoning_effort_for_unsupported_model(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
@@ -161,6 +187,15 @@ def test_mcp_initialize_and_tools_list():
     assert init["result"]["serverInfo"]["name"]
     listed = handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     assert any(t["name"] == "claude_codex_chat" for t in listed["result"]["tools"])
+
+
+def test_curated_models_include_opus_5(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
+
+    result = models.list_models()
+
+    assert any(item["id"] == "claude-opus-5" for item in result["models"])
 
 
 def test_dispatch_doctor(monkeypatch, tmp_path):
