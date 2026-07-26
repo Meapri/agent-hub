@@ -24,7 +24,12 @@
 DB schema migration은 기존 DB integrity check, SQLite backup, migration, 사후 integrity check 순서로
 수행합니다. 실패하면 pre-migration backup으로 복구합니다. release candidate는 현재 DB의 복사본으로
 기동해 schema compatibility를 확인하며, rollback slot은 LaunchAgent와 migration 전 DB snapshot을
-같이 보존합니다.
+같이 보존합니다. 실제 전환 직전에도 emergency DB snapshot을 만들고, DB restore·candidate
+bootstrap·health check가 실패하면 이전 LaunchAgent, DB, daemon을 순서대로 복구합니다. 이전 daemon
+health check까지 성공해야 `release_activation_failed`를 반환하며, 보상이 불완전하면
+`release_recovery_failed`와 실패 단계만 안전하게 노출합니다. 보상이 불완전한 경우 emergency DB
+snapshot은 rollback slot 옆에 남기고, 후속 release switch는 해당 snapshot이 검토될 때까지
+`release_recovery_pending`으로 차단합니다.
 
 ## Egress and provider isolation
 

@@ -4,7 +4,7 @@ Agent Hub는 Claude, Grok, Gemini, GPT를 하나의 로컬 실행 환경에서 �
 멀티 모델 작업 플랫폼입니다. MCP 호스트에는 가벼운 bridge만 연결하고, 계획·실행·복구·정책·
 artifact 관리는 장기 실행 daemon이 맡습니다.
 
-- 현재 버전: `2.1.0`
+- 현재 버전: `2.1.3`
 - Python: 3.10 이상
 - 우선 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -120,7 +120,7 @@ staging한 뒤 그 경로로 setup하세요.
 
 # 3. 결과의 runtime_root를 host와 LaunchAgent에 연결
 ./.venv/bin/agent-hub setup --repo-root . \
-  --runtime-root ~/.agent-hub/releases/2.1.0-소스_DIGEST \
+  --runtime-root ~/.agent-hub/releases/2.1.3-소스_DIGEST \
   --json
 ```
 
@@ -390,7 +390,11 @@ dry-run입니다.
 `update` health check는 빈 DB가 아니라 현재 DB의 SQLite backup을 임시 위치에 복사해 candidate
 daemon을 실행합니다. update 적용 전에는 실행 파일과 DB snapshot을 함께 rollback slot에
 보존합니다. 구버전으로 돌아갈 때 DB schema도 낮춰야 한다면 daemon을 먼저 중지한 뒤 snapshot을
-복원하며, 재시작 실패 시 실행 파일과 전환 직전 DB를 함께 되돌립니다.
+복원합니다. DB 복원, candidate 기동, health check 중 하나라도 실패하면 전환 직전 LaunchAgent와
+DB를 복구하고 이전 daemon의 health check까지 통과해야 rollback 완료로 판정합니다. 복구 자체가
+완료되지 않으면 성공처럼 표시하지 않고 `release_recovery_failed`와 `agent-hub doctor` 안내를
+반환합니다. 이때 전환 직전 DB snapshot은 rollback slot 옆에 보존하며, 검토되지 않은 다음 전환이
+그 snapshot을 덮어쓰지 못합니다.
 
 설치되는 주요 entrypoint는 다음과 같습니다.
 

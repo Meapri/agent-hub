@@ -31,6 +31,7 @@ def test_exec_argv_is_prompt_free_and_isolated(monkeypatch, tmp_path):
     assert "--ignore-rules" in argv
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert "shell_tool" in argv
+    assert argv[argv.index("plugins") - 1] == "--disable"
     assert 'web_search="disabled"' in argv
     assert argv[-1] == "-"
     assert "private prompt" not in argv

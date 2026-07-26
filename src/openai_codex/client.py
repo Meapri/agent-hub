@@ -420,6 +420,8 @@ def exec_argv(
         "read-only",
         "--disable",
         "shell_tool",
+        "--disable",
+        "plugins",
         "-c",
         'web_search="disabled"',
         "-c",

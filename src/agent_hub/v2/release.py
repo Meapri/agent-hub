@@ -513,6 +513,124 @@ def _wait_installed_stopped(before: bytes, *, timeout: float = 5.0) -> bool:
     return False
 
 
+def _remove_database_files(path: Path) -> None:
+    for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _database_files_exist(path: Path) -> bool:
+    return any(candidate.exists() for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")))
+
+
+def _emergency_database_path(rollback_path: Path) -> Path:
+    return rollback_path.with_name(rollback_path.name + ".emergency.state.sqlite3")
+
+
+def _stop_launch_agent(payload: bytes) -> tuple[bool, int | None]:
+    returncode: int | None = None
+    try:
+        result = subprocess.run(
+            [
+                "/bin/launchctl",
+                "bootout",
+                f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+        returncode = result.returncode
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if returncode != 0:
+        try:
+            loaded = subprocess.run(
+                [
+                    "/bin/launchctl",
+                    "print",
+                    f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, returncode
+        if loaded.returncode == 0:
+            return False, returncode
+    try:
+        return _wait_installed_stopped(payload), returncode
+    except Exception:  # noqa: BLE001 - this is a release recovery boundary
+        return False, returncode
+
+
+def _start_launch_agent(launch_path: Path, payload: bytes) -> tuple[bool, int | None]:
+    try:
+        result = subprocess.run(
+            [
+                "/bin/launchctl",
+                "bootstrap",
+                f"gui/{os.getuid()}",
+                str(launch_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, None
+    if result.returncode != 0:
+        return False, result.returncode
+    try:
+        return _wait_installed_health(payload), result.returncode
+    except Exception:  # noqa: BLE001 - this is a release recovery boundary
+        return False, result.returncode
+
+
+def _recover_previous_install(
+    *,
+    launch_path: Path,
+    previous_payload: bytes,
+    candidate_payload: bytes,
+    state_db: Path,
+    emergency_db: Path,
+    emergency_snapshot: Mapping[str, Any],
+    candidate_may_be_running: bool,
+) -> tuple[bool, str]:
+    if candidate_may_be_running:
+        try:
+            stopped, _ = _stop_launch_agent(candidate_payload)
+        except Exception:  # noqa: BLE001 - report the recovery stage, not raw errors
+            stopped = False
+        if not stopped:
+            try:
+                _atomic_write(launch_path, previous_payload)
+            except OSError:
+                pass
+            return False, "candidate_stop"
+    try:
+        _atomic_write(launch_path, previous_payload)
+    except OSError:
+        return False, "launch_agent_restore"
+    try:
+        if emergency_snapshot["present"]:
+            _restore_database_snapshot(emergency_db, state_db)
+        else:
+            _remove_database_files(state_db)
+    except Exception:  # noqa: BLE001 - preserve a safe recovery-stage contract
+        return False, "database_restore"
+    active, _ = _start_launch_agent(launch_path, previous_payload)
+    if not active:
+        return False, "daemon_restart"
+    return True, "complete"
+
+
 def apply_switch(
     proposal: Mapping[str, Any],
     *,
@@ -602,6 +720,17 @@ def apply_switch(
             "A schema rollback must stop the daemon before restoring its database.",
             scope="release",
         )
+    emergency_db = _emergency_database_path(rollback)
+    if _database_files_exist(emergency_db):
+        raise HubV2Error(
+            "release_recovery_pending",
+            "A preserved emergency database must be reviewed before another release switch.",
+            scope="release",
+            next_action={
+                "type": "local_cli",
+                "command": "agent-hub doctor",
+            },
+        )
     health_source = (
         rollback_database
         if proposal.get("mode") == "rollback" and proposal.get("rollback_db_schema") is not None
@@ -626,90 +755,87 @@ def apply_switch(
         )
         _atomic_write(rollback, before)
     activation = {"attempted": False, "success": False}
-    with tempfile.TemporaryDirectory(prefix="agent-hub-release-emergency-") as directory:
-        emergency_db = Path(directory) / "state.sqlite3"
-        emergency_snapshot = _database_snapshot(state_db, emergency_db)
+    emergency_snapshot = _database_snapshot(state_db, emergency_db)
+    preserve_emergency = False
+    try:
         _atomic_write(launch_path, after)
         if activate:
-            stop_result = subprocess.run(
-                [
-                    "/bin/launchctl",
-                    "bootout",
-                    f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15.0,
-            )
-            if stop_result.returncode != 0 and not _wait_installed_stopped(before):
+            stopped, stop_returncode = _stop_launch_agent(before)
+            if not stopped:
                 _atomic_write(launch_path, before)
                 raise HubV2Error(
                     "release_daemon_stop_failed",
                     "The running daemon could not be stopped; no database restore was attempted.",
                     scope="release",
                     retryable=True,
+                    safe_details={"returncode": stop_returncode},
                 )
-            if proposal.get("mode") == "rollback" and restore_required:
-                _restore_database_snapshot(rollback_database, state_db)
-            result = subprocess.run(
-                [
-                    "/bin/launchctl",
-                    "bootstrap",
-                    f"gui/{os.getuid()}",
-                    str(launch_path),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15.0,
-            )
-            active = result.returncode == 0 and _wait_installed_health(after)
+            failure_stage: str | None = None
+            candidate_may_be_running = False
+            activation_returncode: int | None = None
+            try:
+                if proposal.get("mode") == "rollback" and restore_required:
+                    _restore_database_snapshot(rollback_database, state_db)
+                candidate_may_be_running = True
+                active, activation_returncode = _start_launch_agent(launch_path, after)
+                if not active:
+                    failure_stage = (
+                        "candidate_bootstrap"
+                        if activation_returncode != 0
+                        else "candidate_health"
+                    )
+            except Exception:  # noqa: BLE001 - all activation failures must compensate
+                active = False
+                failure_stage = (
+                    "candidate_bootstrap"
+                    if candidate_may_be_running
+                    else "database_restore"
+                )
             activation = {
                 "attempted": True,
                 "success": active,
-                "returncode": result.returncode,
+                "returncode": activation_returncode,
             }
             if not active:
-                rollback_stop = subprocess.run(
-                    [
-                        "/bin/launchctl",
-                        "bootout",
-                        f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}",
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=15.0,
+                recovered, recovery_stage = _recover_previous_install(
+                    launch_path=launch_path,
+                    previous_payload=before,
+                    candidate_payload=after,
+                    state_db=state_db,
+                    emergency_db=emergency_db,
+                    emergency_snapshot=emergency_snapshot,
+                    candidate_may_be_running=candidate_may_be_running,
                 )
-                if rollback_stop.returncode != 0 and not _wait_installed_stopped(after):
+                if not recovered:
+                    preserve_emergency = bool(emergency_snapshot["present"])
                     raise HubV2Error(
-                        "release_daemon_stop_failed",
-                        "The candidate daemon could not be stopped; automatic database rollback was not attempted.",
+                        "release_recovery_failed",
+                        "The release failed and the previous installation could not be fully restarted.",
                         scope="release",
-                        retryable=True,
+                        retryable=False,
+                        safe_details={
+                            "failure_stage": failure_stage,
+                            "recovery_stage": recovery_stage,
+                            "emergency_snapshot_preserved": preserve_emergency,
+                        },
+                        next_action={
+                            "type": "local_cli",
+                            "command": "agent-hub doctor",
+                        },
                     )
-                _atomic_write(launch_path, before)
-                if emergency_snapshot["present"]:
-                    _restore_database_snapshot(emergency_db, state_db)
-                subprocess.run(
-                    [
-                        "/bin/launchctl",
-                        "bootstrap",
-                        f"gui/{os.getuid()}",
-                        str(launch_path),
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=15.0,
-                )
                 raise HubV2Error(
                     "release_activation_failed",
-                    "The daemon restart failed and executable and database state were rolled back.",
+                    "The release failed; the previous executable, database, and daemon were restored.",
                     scope="release",
                     retryable=True,
+                    safe_details={
+                        "failure_stage": failure_stage,
+                        "recovery_stage": recovery_stage,
+                    },
                 )
+    finally:
+        if not preserve_emergency:
+            _remove_database_files(emergency_db)
     rollback_available = rollback.exists() and rollback_metadata.exists()
     if rollback_snapshot and rollback_snapshot["present"]:
         rollback_available = rollback_available and rollback_database.exists()
