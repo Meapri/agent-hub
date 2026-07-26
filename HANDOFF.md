@@ -11,19 +11,18 @@
   정본 원칙: 모든 상태는 Git에 커밋되는 파일에 산다. 도구는 소모품이다.
 
 <!-- agent-hub:handoff:v1:start -->
-- **원래 목표**: Agent Hub v2를 실제 사용 가능한 local-first multi-provider runtime으로 발전시키고, 구현·검증·설치·Git 반영까지 완료합니다.
-- **현재 단계**: 반복되던 Gemini access token 만료가 실제 세션 단절처럼 라우팅을 막던 원인을 수정한 v2.1.4를 설치했고, 검증된 변경을 commit/push하는 단계입니다.
+- **원래 목표**: Agent Hub 자체의 코드와 공개 계약을 근거로, 특징·강점·구조를 쉽게 설명하는 자연스러운 한국어 README를 처음부터 다시 작성하고 검증된 결과를 GitHub에 반영합니다.
+- **현재 단계**: Agent Hub document-write run과 로컬 검증을 마쳤으며 `README.md`와 이 인계 기록을 같은 커밋으로 `main`에 반영하는 단계입니다.
 - **완료**:
-  - Gemini의 access token이 만료돼도 refresh token과 사용 동의가 유효하면 `provider_runtime.status`가 read-only 상태인 `ready=false`, `refreshable=true`를 유지하면서 실행 가능성만 `invocation_ready=true`, `auto_refresh_on_invoke=true`로 분리해 보고하도록 했습니다.
-  - `HubService` 라우터가 `invocation_ready`를 실행 eligibility에 사용하게 해 provider worker가 실제 요청 직전에 기존 `valid_credentials(refresh=True)` 경로로 토큰을 자동 갱신할 수 있게 했습니다. status의 `ready` 의미는 바꾸지 않았고 invoke·catalog 뒤 status cache를 무효화하거나 갱신합니다.
-  - 연결 GUI가 자동 갱신 가능한 Gemini를 세션 단절로 표현하지 않고, 실제 연결 테스트와 live model catalog 조회가 수동 갱신 버튼 없이 자동 갱신 경로를 사용하도록 바꿨습니다.
-  - 사용 동의가 없는 refreshable 계정은 `invocation_ready=false`로 유지하는 provider contract test, 만료 상태를 캐시한 뒤에도 Gemini invoke를 허용하고 갱신 후 ready 상태를 다시 읽는 service test, GUI/connection manager 회귀 테스트를 추가했습니다.
-  - package·Codex plugin·Claude plugin 버전을 2.1.4로 동기화하고 immutable runtime `/Users/naen/.agent-hub/releases/2.1.4-d3a6e3a58b81`을 staging·활성화했습니다. Codex와 Claude Code plugin도 2.1.4로 갱신했습니다.
-  - 설치된 v2.1.4 daemon에서 Gemini `gemini-3.6-flash-high`가 실제 `AGENT_HUB_GEMINI_OK` generation을 반환했습니다.
-- **미완**: refresh token 자체가 폐기되거나 계정 권한이 회수된 경우에는 보안상 자동 복구하지 않고 GUI 재로그인이 필요합니다. dependency lock/hash 기반 offline staging, incremental context index, planner validation 진단도 남아 있습니다.
-- **변경 파일**: `src/agent_hub/v2/provider_runtime.py`, `src/agent_hub/v2/service.py`, `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/app.js`, 관련 provider/service/GUI 테스트, `README.md`, package/plugin version manifest를 변경했습니다.
-- **검증 실행 결과**: 전체 pytest `558 passed, 2 skipped`; 전체 Ruff check; release version sync 2.1.4; Ruler sync; Hub plugin sync; README `user_facing=true` verify와 document quality; JavaScript syntax; `git diff --check`를 통과했습니다. 설치된 doctor는 `6 pass, 0 warn, 0 fail`, DB schema 7/WAL/integrity OK이며 LaunchAgent는 v2.1.4 daemon으로 실행 중입니다. 실제 Gemini generation canary도 통과했습니다.
-- **현재 리스크**: 만료 access token 경로는 실제 credential을 강제로 변조하지 않고 회귀 fixture로 검증했습니다. live canary 시점에는 자동 갱신 뒤 token이 이미 유효했으므로, 다음 자연 만료 때 자동 갱신 관측을 한 번 더 확인할 가치가 있습니다.
-- **Do-Not-Repeat**: read-only status 조회에서 토큰을 갱신하지 마세요. `logged_in`, `refreshable`, `ready`, `invocation_ready`, 실제 generation 성공을 같은 상태로 표현하지 마세요. 다른 provider까지 `refreshable`만으로 일반화하지 말고 worker의 자동 갱신 계약을 먼저 증명하세요. active external step에 중복 continue를 보내지 마세요.
-- **다음 한 걸음**: `src/agent_hub/v2/provider_runtime.py::plan`이 최종 `plan_validation_failed` 전에 수집한 validation 오류를 raw plan 없이 안전한 reason taxonomy로 집계하고 `tests/agent_hub/test_v2_provider_runtime.py`에 malformed planner 응답의 repair·최종 진단 fixture를 추가하세요.
+  - `agent_hub_plan`의 승인된 fact pack으로 저장소 구조와 공개 계약을 조사하고 durable run `adb57d0b406f8ff6` revision 16을 완료했습니다.
+  - Claude `claude-opus-5`가 초안과 최종 문서를 작성하고 Gemini `gemini-3.6-flash-high`가 사실성·구성·문체를 검토했습니다.
+  - 최종 Agent Hub artifact `art_21384b76dc0ce3ca07a901f3`의 content digest `5666a23e792e8cdeca53f38cd2274beae7915cd29ba72c2f0cfed761b8811e16`과 암호화 content 인증을 확인했습니다.
+  - 기존 475줄 README를 340줄로 재구성해 주요 특징, 빠른 시작, 구조, provider 상태, 실행 흐름, 14개 MCP 도구, 라우팅·정책, 보안, artifact·HANDOFF, 복구, 지원 범위를 쉬운 문장으로 정리했습니다.
+  - 검증 완료 후 `final_readme` step에 `verified`, rating 5 feedback을 기록했습니다.
+- **미완**: 저장소 전체 Ruff format 기준선에는 기존 Python 파일 79개의 포맷 차이가 남아 있습니다. README 작업 중 발견한 대형 dependency artifact 중복 전달 문제도 후속 수정이 필요합니다.
+- **변경 파일**: `README.md`, `HANDOFF.md`를 변경합니다.
+- **검증 실행 결과**: README user-facing verify와 document quality를 통과했습니다. `tests/agent_hub/test_readme_copy.py`와 `tests/agent_hub/test_hub_plugins.py`는 12 passed, Ruler sync·Hub plugin sync·release version 2.1.4·`git diff --check`를 통과했습니다. 전체 pytest는 README 재적용 전 실행에서 558 passed, 2 skipped였고 package build도 성공했습니다. 전체 Ruff check는 통과했지만 `ruff format --check src tests`는 기존 79개 Python 파일 때문에 실패했습니다.
+- **현재 리스크**: 첫 광범위 plan은 중복된 대형 inspect artifact를 downstream provider에 전달해 실패했습니다. 축약 plan은 성공했지만 `src/agent_hub/v2/service.py`에 dependency artifact 중복 제거와 provider context 크기 제한이 없어 같은 문제가 다시 생길 수 있습니다. 또한 전체 pytest와 build를 병렬 실행한 뒤 미커밋 README가 HEAD 내용으로 돌아온 현상을 관측했으나 원인 command는 아직 특정하지 못했습니다.
+- **Do-Not-Repeat**: active external step에 중복 continue를 보내지 마세요. 대형 동일 source scope의 inspect step을 여러 개 만들지 마세요. 원인을 격리하기 전에는 미커밋 작업이 있는 현재 checkout에서 전체 pytest와 package build를 병렬 실행하지 마세요. 기존 79개 파일을 README 작업에 섞어 자동 포맷하지 마세요.
+- **다음 한 걸음**: `src/agent_hub/v2/service.py`의 downstream artifact 조립 경로에 동일 fact pack digest 중복 제거와 provider context 크기 검사를 추가하고 `tests/agent_hub/test_v2_service.py`에 대형 중복 inspect artifact 회귀 fixture를 작성하세요.
 <!-- agent-hub:handoff:v1:end -->
