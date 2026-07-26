@@ -18,7 +18,7 @@ from agent_hub import __version__
 from agent_hub.core import handoff as handoff_state
 from agent_hub.doctor import run_doctor
 
-from .context import index_project, search_fact_pack
+from .context import collect_scoped_fact_pack, index_project, search_fact_pack
 from .contracts import (
     PLAN_SCHEMA,
     TASK_SCHEMA,
@@ -29,7 +29,7 @@ from .contracts import (
     validate_task,
 )
 from .crypto import ArtifactCipher, MacOSKeychainKeyProvider
-from .egress import prepare_egress, verify_egress_approval
+from .egress import prepare_egress, redact_secret_lines, verify_egress_approval
 from .errors import HubV2Error, public_failure, safe_unexpected_error
 from .policy import (
     apply_policy_update,
@@ -81,6 +81,7 @@ def _planner_manifest_summary(manifest: Mapping[str, Any]) -> str:
         "fact_pack_sha256": str(manifest.get("fact_pack_sha256") or ""),
         "entry_count": len(safe_entries),
         "total_chars": int(manifest.get("total_chars") or 0),
+        "destinations": list(manifest.get("destinations") or []),
         "entries": [],
         "entries_truncated": False,
     }
@@ -130,13 +131,23 @@ class HubService:
                 operation=name,
             )
         handler = getattr(self, f"_tool_{name.removeprefix('agent_hub_')}")
+        started = time.monotonic()
         try:
             data = handler(dict(arguments))
-            return {"success": True, "operation": name, "error": None, "data": data}
+            response = {"success": True, "operation": name, "error": None, "data": data}
         except HubV2Error as exc:
-            return public_failure(exc, operation=name)
+            response = public_failure(exc, operation=name)
         except Exception:  # noqa: BLE001
-            return safe_unexpected_error(operation=name)
+            response = safe_unexpected_error(operation=name)
+        try:
+            self.store.record_operation_metric(
+                operation=name,
+                success=response.get("success") is True,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return response
 
     def _worker(self, provider: str) -> ProviderWorkerClient:
         manifest_for(provider)
@@ -289,6 +300,7 @@ class HubService:
             "version": __version__,
             "protocol_version": "2.0",
             "store": self.store.health(),
+            "observability": self.store.operation_metrics(),
             "providers": {
                 provider: {
                     "manifest": next(item for item in manifests if item["provider_id"] == provider),
@@ -385,32 +397,47 @@ class HubService:
                 next_action={"type": "call_tool", "tool": "agent_hub_start"},
             )
         project_root = arguments.get("project_root")
-        if isinstance(project_root, str):
-            task, _ = self._enforce_task_policy(
-                task,
-                project_root=project_root,
-                provider=str(arguments.get("provider") or "") or None,
-                model=str(arguments.get("model") or "") or None,
+        if not isinstance(project_root, str) or not project_root:
+            raise HubV2Error(
+                "invalid_project_root",
+                "project_root is required so project policy can be enforced.",
+                scope="project",
             )
+        task, _ = self._enforce_task_policy(
+            task,
+            project_root=project_root,
+            provider=str(arguments.get("provider") or "") or None,
+            model=str(arguments.get("model") or "") or None,
+        )
         if task["capability"] == "inspect":
-            if not isinstance(project_root, str):
-                raise HubV2Error(
-                    "invalid_project_root",
-                    "project_root is required for local inspection.",
-                    scope="context",
+            inspection = task.get("output_contract") or {}
+            source_paths = list(inspection.get("source_paths") or [])
+            if source_paths:
+                indexed = None
+                facts = collect_scoped_fact_pack(
+                    project_root=project_root,
+                    source_paths=source_paths,
                 )
-            indexed = index_project(self.store, project_root=project_root)
-            facts = search_fact_pack(
-                self.store,
-                project_root=project_root,
-                query=task["inline_input"] or task["intent"],
-            )
+            else:
+                indexed = index_project(self.store, project_root=project_root)
+                facts = search_fact_pack(
+                    self.store,
+                    project_root=project_root,
+                    query=task["inline_input"] or task["intent"],
+                )
             return {
                 "schema": "agent_hub_execution_v2",
                 "provider": "local",
                 "routing_decision": None,
                 "result": {"index": indexed, "fact_pack": facts},
             }
+        if task.get("input_artifacts"):
+            raise HubV2Error(
+                "egress_approval_required",
+                "Stored artifact input must use agent_hub_plan prepare/apply before external execution.",
+                scope="egress",
+                next_action={"type": "call_tool", "tool": "agent_hub_plan"},
+            )
         allowed = task["constraints"]["provider_allowlist"] or [
             item["provider_id"] for item in builtin_provider_manifests()
         ]
@@ -475,6 +502,20 @@ class HubService:
         policy = load_policy(project_root)
         provider = str(arguments.get("provider") or "claude")
         model = arguments.get("model")
+        task, _ = self._enforce_task_policy(
+            task,
+            project_root=project_root,
+            provider=provider,
+            model=str(model) if model else None,
+        )
+        destination_providers = list(
+            dict.fromkeys(
+                [
+                    provider,
+                    *task["constraints"]["provider_allowlist"],
+                ]
+            )
+        )
         if mode == "prepare":
             source_paths = list(arguments.get("source_paths") or [])
             if source_paths and policy.policy["egress"].get("repository_content") == "denied":
@@ -483,15 +524,35 @@ class HubService:
                     "Project policy denies repository content egress.",
                     scope="policy",
                 )
+            artifact_ids = list(task.get("input_artifacts") or [])
+            if artifact_ids and policy.policy["egress"].get("artifact_content") == "denied":
+                raise HubV2Error(
+                    "egress_policy_denied",
+                    "Project policy denies stored artifact egress.",
+                    scope="policy",
+                )
+            artifact_sources = []
+            for artifact_id in artifact_ids:
+                artifact = self.store.get_artifact(artifact_id, include_content=False)
+                artifact_sources.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "content": self._artifact_text(artifact_id),
+                        "content_sha256": artifact["content_sha256"],
+                        "sensitivity": artifact["sensitivity"],
+                    }
+                )
             proposal = prepare_egress(
                 project_root=project_root,
                 provider=provider,
                 model=str(model) if model else None,
+                destination_providers=destination_providers,
                 source_paths=source_paths,
                 policy_revision=policy.policy["revision"],
                 estimated_max_tokens=int(
                     task["constraints"].get("max_tokens") or policy.policy["budgets"]["max_tokens"]
                 ),
+                artifact_sources=artifact_sources,
             )
             proposal["task"] = task
             proposal["provider"] = provider
@@ -552,6 +613,18 @@ class HubService:
             approved_manifest_sha256=str(proposal.get("manifest", {}).get("manifest_sha256") or ""),
             expected_policy_revision=expected_policy_revision,
         )
+        self.store.record_egress_approval(
+            project_root=project_root,
+            manifest=verified["manifest"],
+        )
+        approved_paths = {
+            str(entry.get("path_alias") or "")
+            for entry in verified["manifest"].get("entries") or []
+            if isinstance(entry, Mapping) and str(entry.get("path_alias") or "")
+        }
+        approved_destinations = {
+            str(item) for item in verified["manifest"].get("destinations") or []
+        }
         planner_prompt = (
             task["intent"] + "\n\nApproved project manifest (source contents are intentionally "
             "excluded from this planning call):\n"
@@ -565,7 +638,6 @@ class HubService:
             "plan",
             {
                 "task": task,
-                "project_root": project_root,
                 "planner_prompt": planner_prompt,
                 "model": model,
             },
@@ -596,6 +668,32 @@ class HubService:
                 capability = "review"
             elif capability == "inspect_codebase":
                 capability = "inspect"
+            output_contract = dict(step.get("output_contract") or {})
+            planned_provider = str(step.get("provider") or provider)
+            planned_fallbacks = [
+                str(item) for item in step.get("fallback_providers") or step.get("fallbacks") or []
+            ]
+            if not {planned_provider, *planned_fallbacks}.issubset(approved_destinations):
+                raise HubV2Error(
+                    "planner_egress_violation",
+                    "The planner selected a provider outside the approved destinations.",
+                    scope="planner",
+                )
+            if capability == "inspect":
+                requested_sources = list(output_contract.get("source_paths") or [])
+                if requested_sources and not set(requested_sources).issubset(approved_paths):
+                    raise HubV2Error(
+                        "planner_scope_violation",
+                        "The planner requested inspection sources outside the approved manifest.",
+                        scope="planner",
+                    )
+                output_contract.update(
+                    {
+                        "type": "fact_pack_v2",
+                        "source_paths": requested_sources or sorted(approved_paths),
+                        "require_complete": bool(requested_sources or approved_paths),
+                    }
+                )
             steps.append(
                 {
                     "id": str(step.get("id") or f"step_{index + 1}"),
@@ -605,12 +703,10 @@ class HubService:
                         step.get("instruction") or step.get("prompt") or task["intent"]
                     ),
                     "routing_requirements": {
-                        "planner_provider": step.get("provider") or provider,
-                        "fallbacks": list(
-                            step.get("fallback_providers") or step.get("fallbacks") or []
-                        ),
+                        "planner_provider": planned_provider,
+                        "fallbacks": planned_fallbacks,
                     },
-                    "output_contract": dict(step.get("output_contract") or {}),
+                    "output_contract": output_contract,
                     "verifier": dict(step.get("verifier") or {}),
                 }
             )
@@ -632,8 +728,15 @@ class HubService:
             "egress_manifest": verified["manifest"],
         }
 
-    def _seal_plan(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+    def _seal_plan(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        request_plan_sha256: str,
+    ) -> dict[str, Any]:
         sealed = deepcopy(dict(plan))
+        sealed["inline_consent_artifacts"] = []
+        sealed["request_plan_sha256"] = request_plan_sha256
         task = deepcopy(dict(sealed["task"]))
         inline = str(task.get("inline_input") or "")
         if inline:
@@ -656,17 +759,23 @@ class HubService:
                 *task.get("input_artifacts", []),
                 artifact["artifact_id"],
             ]
+            sealed["inline_consent_artifacts"] = [artifact["artifact_id"]]
         sealed["task"] = task
         sealed.pop("plan_sha256", None)
         return validate_plan(sealed)
 
     def _tool_start(self, arguments: dict[str, Any]) -> dict[str, Any]:
         idempotency_key = str(arguments.get("idempotency_key") or "")
-        existing = self.store.get_run_by_idempotency_key(idempotency_key)
-        if existing is not None:
-            return existing
         plan = validate_plan(arguments.get("plan"))
         project_root = str(arguments.get("project_root") or "")
+        request_plan_sha256 = str(plan["plan_sha256"])
+        existing = self.store.get_run_by_idempotency_key(
+            idempotency_key,
+            expected_project_root=project_root,
+            expected_request_plan_sha256=request_plan_sha256,
+        )
+        if existing is not None:
+            return existing
         policy = load_policy(project_root).policy
         if plan["policy_revision"] != policy["revision"]:
             raise HubV2Error(
@@ -681,6 +790,7 @@ class HubService:
                 "The plan exceeds the project leaf-call budget.",
                 scope="policy",
             )
+        self._validate_inspection_approval(plan, project_root=project_root)
         model_allowlist = set(policy["model_allowlist"])
         for step in plan["steps"]:
             requested_model = str((step.get("routing_requirements") or {}).get("model") or "")
@@ -697,13 +807,123 @@ class HubService:
             model=None,
         )
         enforced_task = validate_task({**enforced_task, "retention": policy["artifact_retention"]})
-        plan = validate_plan({**plan, "task": enforced_task})
-        sealed = self._seal_plan(plan)
+        effective_plan = {**plan, "task": enforced_task}
+        effective_plan.pop("plan_sha256", None)
+        plan = validate_plan(effective_plan)
+        sealed = self._seal_plan(
+            plan,
+            request_plan_sha256=request_plan_sha256,
+        )
         return self.store.create_run(
             plan=sealed,
             project_root=project_root,
             idempotency_key=idempotency_key,
         )
+
+    def _validate_inspection_approval(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        project_root: str,
+    ) -> None:
+        steps = list(plan.get("steps") or [])
+        dependents: dict[str, list[Mapping[str, Any]]] = {str(step["id"]): [] for step in steps}
+        for step in steps:
+            for dependency in step.get("depends_on") or []:
+                dependents.setdefault(str(dependency), []).append(step)
+
+        def reaches_external(step_id: str) -> bool:
+            pending = list(dependents.get(step_id, []))
+            seen: set[str] = set()
+            while pending:
+                candidate = pending.pop()
+                candidate_id = str(candidate["id"])
+                if candidate_id in seen:
+                    continue
+                seen.add(candidate_id)
+                if candidate["capability"] != "inspect":
+                    return True
+                pending.extend(dependents.get(candidate_id, []))
+            return False
+
+        scoped_steps = []
+        for step in steps:
+            if step["capability"] != "inspect":
+                continue
+            contract = step.get("output_contract") or {}
+            paths = list(contract.get("source_paths") or [])
+            if reaches_external(str(step["id"])) and not paths:
+                raise HubV2Error(
+                    "egress_approval_required",
+                    "An inspection feeding an external step requires approved source paths.",
+                    scope="egress",
+                )
+            if paths:
+                scoped_steps.append((str(step["id"]), paths))
+        external_steps = [step for step in steps if step["capability"] != "inspect"]
+        input_artifacts = set(plan.get("task", {}).get("input_artifacts") or [])
+        inline_consent = set(plan.get("inline_consent_artifacts") or [])
+        stored_input_artifacts = input_artifacts - inline_consent
+        if not scoped_steps and not (external_steps and stored_input_artifacts):
+            return
+        manifest_sha = str(plan.get("egress_manifest_sha256") or "")
+        approval = self.store.get_egress_approval(manifest_sha)
+        if approval is None:
+            raise HubV2Error(
+                "egress_approval_required",
+                "The plan does not reference a recorded egress approval.",
+                scope="egress",
+            )
+        root = str(Path(project_root).expanduser().resolve(strict=True))
+        if approval["project_root"] != root or approval["policy_revision"] != int(
+            plan["policy_revision"]
+        ):
+            raise HubV2Error(
+                "egress_approval_conflict",
+                "The recorded egress approval belongs to a different project or policy.",
+                scope="egress",
+            )
+        approved_paths = {
+            str(entry["path_alias"])
+            for entry in approval["entries"]
+            if entry.get("kind") == "repository"
+        }
+        approved_artifacts = {
+            str(entry["artifact_id"])
+            for entry in approval["entries"]
+            if entry.get("kind") == "artifact"
+        }
+        approved_destinations = set(approval["destinations"])
+        for step in steps:
+            if step["capability"] == "inspect":
+                continue
+            requirements = step.get("routing_requirements") or {}
+            destinations = {
+                str(requirements.get("planner_provider") or ""),
+                *(str(item) for item in requirements.get("fallbacks") or []),
+            }
+            destinations.discard("")
+            if not destinations.issubset(approved_destinations):
+                raise HubV2Error(
+                    "egress_approval_conflict",
+                    "A provider step exceeds the approved egress destinations.",
+                    scope="egress",
+                    safe_details={"step_id": str(step["id"])},
+                )
+        for step_id, paths in scoped_steps:
+            if not set(paths).issubset(approved_paths):
+                raise HubV2Error(
+                    "egress_approval_conflict",
+                    "An inspection step exceeds the approved source scope.",
+                    scope="egress",
+                    safe_details={"step_id": step_id},
+                )
+        if external_steps and not stored_input_artifacts.issubset(approved_artifacts):
+            raise HubV2Error(
+                "egress_approval_conflict",
+                "A stored input artifact is outside the approved egress manifest.",
+                scope="egress",
+            )
 
     def _artifact_text(self, artifact_id: str) -> str:
         artifact = self.store.get_artifact(artifact_id, include_content=True)
@@ -768,21 +988,72 @@ class HubService:
             )
         )
         if step["capability"] == "inspect":
-            index_project(self.store, project_root=run["project_root"])
-            facts = search_fact_pack(
-                self.store,
-                project_root=run["project_root"],
-                query=step["instruction"],
-            )
+            inspection = step.get("output_contract") or {}
+            source_paths = list(inspection.get("source_paths") or [])
+            if source_paths:
+                approval = self.store.get_egress_approval(
+                    str(plan.get("egress_manifest_sha256") or "")
+                )
+                expected_sources = {
+                    str(entry["path_alias"]): str(entry["sha256"])
+                    for entry in (approval or {}).get("entries", [])
+                }
+                facts = collect_scoped_fact_pack(
+                    project_root=run["project_root"],
+                    source_paths=source_paths,
+                    expected_sources=expected_sources,
+                )
+            else:
+                index_project(self.store, project_root=run["project_root"])
+                facts = search_fact_pack(
+                    self.store,
+                    project_root=run["project_root"],
+                    query=step["instruction"],
+                )
+            if inspection.get("require_complete") is True and not facts.get("coverage", {}).get(
+                "complete"
+            ):
+                raise HubV2Error(
+                    "inspection_incomplete",
+                    "The inspection could not collect every approved source completely.",
+                    scope="context",
+                    retryable=True,
+                )
             text = json.dumps(facts, ensure_ascii=False)
             provider = "local"
             model = None
             media_type = "application/json"
-            checkpoint: dict[str, Any] = {"retrieval": "sqlite_fts5"}
+            checkpoint: dict[str, Any] = {"retrieval": str(facts.get("retrieval") or "unknown")}
         else:
-            dependency_text = "\n\n".join(
-                self._artifact_text(artifact_id) for artifact_id in source_refs
-            )
+            input_artifacts = set(plan["task"].get("input_artifacts") or [])
+            inline_consent = set(plan.get("inline_consent_artifacts") or [])
+            approval = self.store.get_egress_approval(str(plan.get("egress_manifest_sha256") or ""))
+            artifact_entries = {
+                str(entry.get("artifact_id") or ""): entry
+                for entry in (approval or {}).get("entries", [])
+                if entry.get("kind") == "artifact"
+            }
+            dependency_parts = []
+            for artifact_id in source_refs:
+                artifact_text = self._artifact_text(artifact_id)
+                if artifact_id in input_artifacts and artifact_id not in inline_consent:
+                    entry = artifact_entries.get(artifact_id)
+                    artifact = self.store.get_artifact(artifact_id, include_content=False)
+                    if entry is None or entry.get("source_sha256") != artifact["content_sha256"]:
+                        raise HubV2Error(
+                            "egress_approval_conflict",
+                            "A stored input artifact no longer matches its egress approval.",
+                            scope="egress",
+                        )
+                    artifact_text, _ = redact_secret_lines(artifact_text)
+                    if sha256(artifact_text.encode("utf-8")).hexdigest() != entry.get("sha256"):
+                        raise HubV2Error(
+                            "egress_approval_conflict",
+                            "A stored input artifact changed after egress approval.",
+                            scope="egress",
+                        )
+                dependency_parts.append(artifact_text)
+            dependency_text = "\n\n".join(dependency_parts)
             task = validate_task(
                 {
                     "schema": TASK_SCHEMA,
@@ -799,40 +1070,87 @@ class HubService:
             routing_requirements = step.get("routing_requirements") or {}
             requested_model = str(routing_requirements.get("model") or "") or None
             planner_provider = str(routing_requirements.get("planner_provider") or allowed[0])
-            readiness, _ = self._readiness(allowed)
+            declared_fallbacks = [
+                str(item)
+                for item in routing_requirements.get("fallbacks") or []
+                if str(item) in allowed and str(item) != planner_provider
+            ]
+            declared_chain = list(
+                dict.fromkeys(
+                    [
+                        planner_provider,
+                        *declared_fallbacks,
+                    ]
+                )
+            )
+            routing_allowlist = (
+                [item for item in declared_chain if item in allowed]
+                if routing_requirements.get("fallbacks") is not None
+                else allowed
+            )
+            if planner_provider not in routing_allowlist:
+                raise HubV2Error(
+                    "provider_policy_denied",
+                    "The planned primary provider is outside the task provider allowlist.",
+                    scope="routing",
+                )
+            readiness, _ = self._readiness(routing_allowlist)
             decision = route(
                 store=self.store,
                 task=task,
                 planner_provider=planner_provider,
                 routing_mode=plan["routing_mode"],
-                provider_allowlist=allowed,
+                provider_allowlist=routing_allowlist,
                 readiness=readiness,
                 circuit_open={
                     provider_id: self.store.provider_health(provider_id)["circuit_open"]
-                    for provider_id in allowed
+                    for provider_id in routing_allowlist
                 },
                 run_id=run_id,
                 step_id=step["id"],
                 policy_revision=plan["policy_revision"],
                 models={planner_provider: requested_model or ""},
             )
-            provider_order = [decision["selected_provider"]] + [
-                item["provider"]
-                for item in sorted(
-                    (
-                        item
-                        for item in decision["candidates"]
-                        if item["eligible"] and item["provider"] != decision["selected_provider"]
-                    ),
-                    key=lambda item: (-item["score"], item["provider"]),
-                )
-            ]
+            eligible = {
+                str(item["provider"]) for item in decision["candidates"] if item["eligible"]
+            }
+            if routing_requirements.get("fallbacks") is not None:
+                provider_order = [
+                    item
+                    for item in dict.fromkeys([decision["selected_provider"], *declared_chain])
+                    if item in eligible
+                ]
+            else:
+                provider_order = [decision["selected_provider"]] + [
+                    item["provider"]
+                    for item in sorted(
+                        (
+                            item
+                            for item in decision["candidates"]
+                            if item["eligible"]
+                            and item["provider"] != decision["selected_provider"]
+                        ),
+                        key=lambda item: (-item["score"], item["provider"]),
+                    )
+                ]
             result = None
             provider = provider_order[0]
             last_error: HubV2Error | None = None
             for candidate in provider_order:
                 provider = candidate
                 worker = self._worker(provider)
+                attempt_started = time.monotonic()
+                correlation_id = f"{run_id}.{step['id']}.{provider}"
+                self.store.record_runtime_event(
+                    run_id,
+                    event_type="provider_attempt_started",
+                    details={
+                        "step_id": str(step["id"]),
+                        "provider": provider,
+                        "capability": str(step["capability"]),
+                        "correlation_id": correlation_id,
+                    },
+                )
                 with self._active_lock:
                     self._active.setdefault(run_id, []).append(worker)
                 try:
@@ -840,8 +1158,25 @@ class HubService:
                         "invoke",
                         {"task": task, "model": requested_model},
                         timeout=float(task["constraints"].get("timeout_seconds") or 1790),
+                        request_id=correlation_id,
                     )
                 except HubV2Error as exc:
+                    exc.safe_details = {
+                        **dict(exc.safe_details or {}),
+                        "provider": provider,
+                    }
+                    self.store.record_runtime_event(
+                        run_id,
+                        event_type="provider_attempt_failed",
+                        details={
+                            "step_id": str(step["id"]),
+                            "provider": provider,
+                            "error_code": exc.code,
+                            "retryable": exc.retryable,
+                            "correlation_id": correlation_id,
+                            "elapsed_ms": int((time.monotonic() - attempt_started) * 1000),
+                        },
+                    )
                     self.store.record_provider_outcome(
                         provider=provider,
                         success=False,
@@ -857,6 +1192,16 @@ class HubService:
                     if not exc.retryable:
                         raise
                     continue
+                self.store.record_runtime_event(
+                    run_id,
+                    event_type="provider_attempt_completed",
+                    details={
+                        "step_id": str(step["id"]),
+                        "provider": provider,
+                        "correlation_id": correlation_id,
+                        "elapsed_ms": int((time.monotonic() - attempt_started) * 1000),
+                    },
+                )
                 self.store.record_provider_outcome(provider=provider, success=True)
                 break
             if result is None:
@@ -927,7 +1272,11 @@ class HubService:
                 model=model,
                 capability=step["capability"],
                 success=True,
-                quality=1.0,
+                quality=(
+                    1.0
+                    if (step.get("verifier") or {}).get("type") in {"json", "contains", "sha256"}
+                    else None
+                ),
                 latency_ms=checkpoint["elapsed_ms"],
                 total_tokens=total_tokens,
                 signal_weight=3.0,
@@ -937,8 +1286,35 @@ class HubService:
             "provider": provider,
             "model": model,
             "artifact_id": artifact["artifact_id"],
+            "input_artifact_ids": source_refs,
             "checkpoint": checkpoint,
         }
+
+    @staticmethod
+    def _critical_path_elapsed_ms(
+        plan: Mapping[str, Any],
+        run: Mapping[str, Any],
+    ) -> int:
+        durations = {
+            str(step["step_id"]): int(step["checkpoint"].get("elapsed_ms") or 0)
+            for step in run["steps"]
+        }
+        dependencies = {
+            str(step["id"]): [str(item) for item in step["depends_on"]] for step in plan["steps"]
+        }
+        totals: dict[str, int] = {}
+
+        def cumulative(step_id: str) -> int:
+            if step_id in totals:
+                return totals[step_id]
+            upstream = max(
+                (cumulative(dependency) for dependency in dependencies.get(step_id, [])),
+                default=0,
+            )
+            totals[step_id] = upstream + durations.get(step_id, 0)
+            return totals[step_id]
+
+        return max((cumulative(step_id) for step_id in dependencies), default=0)
 
     def _run_wave(
         self,
@@ -947,11 +1323,18 @@ class HubService:
         claim_token: str,
         claim_revision: int,
         max_waves: int,
+        lease_seconds: float,
     ) -> None:
         current_revision = claim_revision
         try:
             plan = self.store.get_plan(run_id)
             for _ in range(max_waves):
+                self.store.renew_claim(
+                    run_id,
+                    claim_token=claim_token,
+                    expected_revision=current_revision,
+                    lease_seconds=lease_seconds,
+                )
                 run = self.store.get_run(run_id)
                 ready = self._ready_steps(plan, run)
                 if not ready:
@@ -981,7 +1364,6 @@ class HubService:
                     )
                     current_revision = updated["revision"]
                 execution_run = self.store.get_run(run_id)
-                outcomes: dict[str, dict[str, Any]] = {}
                 errors: dict[str, HubV2Error] = {}
                 with ThreadPoolExecutor(max_workers=min(4, len(ready))) as executor:
                     futures = {
@@ -995,58 +1377,72 @@ class HubService:
                         for step in ready
                     }
                     for future in as_completed(futures):
+                        step_id = futures[future]
                         try:
                             outcome = future.result()
                         except HubV2Error as exc:
-                            errors[futures[future]] = exc
+                            errors[step_id] = exc
+                            ambiguous = exc.code in {
+                                "provider_timeout",
+                                "provider_worker_failed",
+                                "provider_protocol_error",
+                            }
+                            updated = self.store.update_step(
+                                run_id,
+                                step_id=step_id,
+                                expected_run_revision=current_revision,
+                                status="outcome_unknown" if ambiguous else "failed",
+                                provider=str((exc.safe_details or {}).get("provider") or "")
+                                or None,
+                                checkpoint={
+                                    "phase": (
+                                        "outcome_unknown" if ambiguous else "provider_failed"
+                                    ),
+                                    "retry_safe": False,
+                                    "error_code": exc.code,
+                                },
+                            )
+                            current_revision = updated["revision"]
                         else:
-                            outcomes[outcome["step_id"]] = outcome
-                for step in ready:
-                    outcome = outcomes.get(step["id"])
-                    if outcome is None:
-                        continue
-                    updated = self.store.update_step(
-                        run_id,
-                        step_id=outcome["step_id"],
-                        expected_run_revision=current_revision,
-                        status="completed",
-                        provider=outcome["provider"],
-                        model=outcome["model"],
-                        output_artifact_ids=[outcome["artifact_id"]],
-                        checkpoint=outcome["checkpoint"],
-                    )
-                    current_revision = updated["revision"]
-                for step in ready:
-                    error = errors.get(step["id"])
-                    if error is None:
-                        continue
-                    ambiguous = error.code in {
-                        "provider_timeout",
-                        "provider_worker_failed",
-                        "provider_protocol_error",
-                    }
-                    updated = self.store.update_step(
-                        run_id,
-                        step_id=step["id"],
-                        expected_run_revision=current_revision,
-                        status="outcome_unknown" if ambiguous else "failed",
-                        checkpoint={
-                            "phase": ("outcome_unknown" if ambiguous else "provider_failed"),
-                            "retry_safe": False,
-                            "error_code": error.code,
-                        },
-                    )
-                    current_revision = updated["revision"]
+                            updated = self.store.update_step(
+                                run_id,
+                                step_id=outcome["step_id"],
+                                expected_run_revision=current_revision,
+                                status="completed",
+                                provider=outcome["provider"],
+                                model=outcome["model"],
+                                input_artifact_ids=outcome["input_artifact_ids"],
+                                output_artifact_ids=[outcome["artifact_id"]],
+                                checkpoint=outcome["checkpoint"],
+                            )
+                            current_revision = updated["revision"]
+                        self.store.renew_claim(
+                            run_id,
+                            claim_token=claim_token,
+                            expected_revision=current_revision,
+                            lease_seconds=lease_seconds,
+                        )
                 if errors:
-                    raise next(iter(errors.values()))
+                    ambiguous_errors = [
+                        errors[step["id"]]
+                        for step in ready
+                        if step["id"] in errors
+                        and errors[step["id"]].code
+                        in {
+                            "provider_timeout",
+                            "provider_worker_failed",
+                            "provider_protocol_error",
+                        }
+                    ]
+                    if ambiguous_errors:
+                        raise ambiguous_errors[0]
+                    raise next(errors[step["id"]] for step in ready if step["id"] in errors)
                 run = self.store.get_run(run_id)
                 total_tokens = sum(
                     int((item["checkpoint"].get("usage") or {}).get("total_tokens") or 0)
                     for item in run["steps"]
                 )
-                elapsed_ms = sum(
-                    int(item["checkpoint"].get("elapsed_ms") or 0) for item in run["steps"]
-                )
+                elapsed_ms = self._critical_path_elapsed_ms(plan, run)
                 if total_tokens > int(plan["task"]["constraints"]["max_tokens"]):
                     raise HubV2Error(
                         "run_token_budget_exhausted",
@@ -1076,7 +1472,12 @@ class HubService:
                 current = self.store.get_run(run_id)
                 status = (
                     "outcome_unknown"
-                    if exc.code in {"provider_timeout", "provider_worker_failed"}
+                    if exc.code
+                    in {
+                        "provider_timeout",
+                        "provider_worker_failed",
+                        "provider_protocol_error",
+                    }
                     else "paused"
                 )
                 finalized = self.store.finalize_claim(
@@ -1097,8 +1498,47 @@ class HubService:
                         run=finalized,
                         error_code=exc.code,
                     )
-            except HubV2Error:
-                pass
+            except HubV2Error as finalize_error:
+                try:
+                    self.store.record_runtime_event(
+                        run_id,
+                        event_type="run_finalize_failed",
+                        details={
+                            "error_code": finalize_error.code,
+                            "reason_code": exc.code,
+                            "retryable": finalize_error.retryable,
+                        },
+                    )
+                except HubV2Error:
+                    pass
+        except Exception:  # noqa: BLE001
+            try:
+                current = self.store.get_run(run_id)
+                self.store.finalize_claim(
+                    run_id,
+                    claim_token=claim_token,
+                    expected_revision=current["revision"],
+                    status="paused",
+                    event_type="run_paused",
+                    details={
+                        "error_code": "run_internal_error",
+                        "retryable": False,
+                        "reason_code": "internal_error",
+                    },
+                )
+            except HubV2Error as finalize_error:
+                try:
+                    self.store.record_runtime_event(
+                        run_id,
+                        event_type="run_finalize_failed",
+                        details={
+                            "error_code": finalize_error.code,
+                            "reason_code": "run_internal_error",
+                            "retryable": finalize_error.retryable,
+                        },
+                    )
+                except HubV2Error:
+                    pass
         finally:
             with self._active_lock:
                 self._active.pop(run_id, None)
@@ -1138,11 +1578,6 @@ class HubService:
             ]
             fallback = next((item for item in declared if item != current), None)
             if fallback is None:
-                fallback = next(
-                    (item for item in policy["provider_allowlist"] if item != current),
-                    None,
-                )
-            if fallback is None:
                 continue
             requirements["planner_provider"] = fallback
             requirements["fallbacks"] = [item for item in declared if item != fallback]
@@ -1151,10 +1586,15 @@ class HubService:
         if not changed:
             return
         candidate.pop("plan_sha256", None)
+        validated_candidate = validate_plan(candidate)
+        self._validate_inspection_approval(
+            validated_candidate,
+            project_root=str(run["project_root"]),
+        )
         replanned = self.store.replace_pending_plan(
             run_id,
             expected_revision=int(run["revision"]),
-            candidate_plan=validate_plan(candidate),
+            candidate_plan=validated_candidate,
             reason_code=error_code,
         )
         timer = threading.Timer(
@@ -1202,6 +1642,7 @@ class HubService:
                 "claim_token": claim.claim_token,
                 "claim_revision": claim.revision,
                 "max_waves": max_waves,
+                "lease_seconds": lease_seconds,
             },
             daemon=False,
             name=f"agent-hub-v2-run-{run_id}",

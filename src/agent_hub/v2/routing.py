@@ -69,10 +69,7 @@ def _auto_gate(
         return False, "cold_start_preserves_planner"
     recommended_components = recommendation["components"]
     planner_components = planner["components"]
-    quality_delta = (
-        float(recommended_components["quality"])
-        - float(planner_components["quality"])
-    )
+    quality_delta = float(recommended_components["quality"]) - float(planner_components["quality"])
     recommended_failure = recommendation.get("failure_rate")
     planner_failure = planner.get("failure_rate")
     if recommended_failure is None or planner_failure is None:
@@ -122,9 +119,7 @@ def route(
     normalized = validate_task(task)
     capability = normalized["capability"]
     allowlist = set(provider_allowlist)
-    manifests = {
-        item["provider_id"]: item for item in builtin_provider_manifests()
-    }
+    manifests = {item["provider_id"]: item for item in builtin_provider_manifests()}
     candidates: list[dict[str, Any]] = []
     for provider, manifest in manifests.items():
         excluded_reason = None
@@ -185,6 +180,13 @@ def route(
         None,
     )
     if planner_candidate is None:
+        if routing_mode == "pinned":
+            raise HubV2Error(
+                "pinned_provider_unavailable",
+                "The pinned provider is not eligible for this task.",
+                scope="routing",
+                retryable=True,
+            )
         selected = recommendation
         reason_code = "planner_provider_ineligible"
     elif routing_mode == "auto":
@@ -204,9 +206,7 @@ def route(
         selected_provider=selected["provider"],
         planner_provider=planner_provider,
         candidates=candidates,
-        scores={
-            item["provider"]: item["score"] for item in candidates if item["eligible"]
-        },
+        scores={item["provider"]: item["score"] for item in candidates if item["eligible"]},
         sample_count=selected["sample_count"],
         policy_revision=policy_revision,
     )

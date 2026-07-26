@@ -96,9 +96,20 @@ def _package_check(
     )
 
 
-def _local_config_check(repo_root: Path) -> DoctorCheck:
+def _configured_hub_command(repo_root: Path) -> Path | None:
     try:
-        plan = local_setup.plan_setup(repo_root)
+        payload = json.loads((repo_root / ".mcp.json").read_text(encoding="utf-8"))
+        value = payload["mcpServers"]["agent-hub"]["command"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    path = Path(str(value)).expanduser()
+    return path if path.is_absolute() else None
+
+
+def _local_config_check(repo_root: Path) -> DoctorCheck:
+    configured = _configured_hub_command(repo_root)
+    try:
+        plan = local_setup.plan_setup(repo_root, hub_command=configured)
     except local_setup.SetupError as exc:
         return DoctorCheck("local_config", "fail", str(exc))
     if plan.changed:
@@ -111,17 +122,21 @@ def _local_config_check(repo_root: Path) -> DoctorCheck:
     return DoctorCheck(
         "local_config",
         "pass",
-        "Machine-local MCP config matches this checkout.",
+        "Machine-local MCP config consistently references an executable bridge.",
+        {"bridge": str(configured)} if configured is not None else None,
     )
 
 
 def _hub_executable_check(repo_root: Path) -> DoctorCheck:
-    executable = repo_root / ".venv" / "bin" / "agent-hub-mcp"
-    if executable.is_file() and os.access(executable, os.X_OK):
+    executable = _configured_hub_command(repo_root) or (
+        repo_root / ".venv" / "bin" / "agent-hub-mcp"
+    )
+    if executable.is_file() and not executable.is_symlink() and os.access(executable, os.X_OK):
         return DoctorCheck(
             "agent_hub_mcp",
             "pass",
             "agent-hub-mcp console script is executable.",
+            {"path": str(executable)},
         )
     return DoctorCheck(
         "agent_hub_mcp",

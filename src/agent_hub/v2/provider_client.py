@@ -5,16 +5,107 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from typing import Any, Callable, Mapping
 
+from .contracts import require_identifier
 from .errors import HubV2Error
 from .egress_proxy import ProviderEgressProxy
 from .provider_manifests import manifest_for
 
 MAX_WORKER_RESPONSE_BYTES = 32 * 1024 * 1024
+_COMMON_ENVIRONMENT = frozenset(
+    {
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "AGENT_HUB_CONFIG_DIR",
+        "AGENT_HUB_CACHE_DIR",
+    }
+)
+_PROVIDER_ENVIRONMENT_PREFIXES = {
+    "claude": ("CLAUDE_CODEX_", "CLAUDE_CONFIG_DIR"),
+    "grok": ("GROK_CODEX_",),
+    "gemini": ("GOOGLE_ANTIGRAVITY_",),
+    "gpt": ("CODEX_HOME", "OPENAI_CODEX_"),
+}
+
+
+def _worker_environment(provider: str) -> dict[str, str]:
+    prefixes = _PROVIDER_ENVIRONMENT_PREFIXES.get(provider, ())
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in _COMMON_ENVIRONMENT or any(key.startswith(prefix) for prefix in prefixes)
+    }
+    environment.update(
+        {
+            "HOME": environment.get("HOME") or str(Path.home()),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    return environment
+
+
+def _sandbox_profile(
+    *,
+    provider: str,
+    runtime_directory: str,
+    environment: Mapping[str, str],
+    proxy_port: int,
+) -> str:
+    home = Path(environment.get("HOME") or Path.home())
+    config_prefix = {
+        "claude": ("CLAUDE_CODEX_CONFIG_DIR", home / ".config" / "claude-codex"),
+        "grok": ("GROK_CODEX_CONFIG_DIR", home / ".config" / "grok-codex"),
+        "gemini": (
+            "GOOGLE_ANTIGRAVITY_CONFIG_DIR",
+            home / ".config" / "google-antigravity-codex",
+        ),
+        "gpt": ("OPENAI_CODEX_CONFIG_DIR", home / ".config" / "openai-codex"),
+    }
+    cache_prefix = {
+        "claude": ("CLAUDE_CODEX_CACHE_DIR", home / ".cache" / "claude-codex"),
+        "grok": ("GROK_CODEX_CACHE_DIR", home / ".cache" / "grok-codex"),
+        "gemini": (
+            "GOOGLE_ANTIGRAVITY_CACHE_DIR",
+            home / ".cache" / "google-antigravity-codex",
+        ),
+        "gpt": ("OPENAI_CODEX_CACHE_DIR", home / ".cache" / "openai-codex"),
+    }
+    writable = [Path(runtime_directory)]
+    for prefix, default in (config_prefix[provider], cache_prefix[provider]):
+        writable.append(Path(environment.get(prefix) or default).expanduser())
+    if provider == "claude":
+        writable.append(home / ".claude")
+    if provider == "gpt":
+        writable.append(Path(environment.get("CODEX_HOME") or home / ".codex").expanduser())
+    writable_filters = " ".join(
+        f"(subpath {json.dumps(str(path.resolve(strict=False)))})"
+        for path in dict.fromkeys(writable)
+    )
+    return (
+        "(version 1) (allow default) "
+        f"(deny file-write* (require-not (require-any {writable_filters}))) "
+        '(deny network-outbound (remote tcp "*:*") (remote udp "*:*") '
+        '(with message "agent-hub-egress-denied")) '
+        f'(allow network-outbound (remote tcp "localhost:{proxy_port}"))'
+    )
 
 
 class ProviderWorkerClient:
@@ -31,9 +122,7 @@ class ProviderWorkerClient:
         self.python_executable = python_executable or sys.executable
         self._process_factory = process_factory
         self._enforce_egress = (
-            process_factory is subprocess.Popen
-            if enforce_egress is None
-            else bool(enforce_egress)
+            process_factory is subprocess.Popen if enforce_egress is None else bool(enforce_egress)
         )
         self._lock = threading.Lock()
         self._active: subprocess.Popen[str] | None = None
@@ -44,17 +133,17 @@ class ProviderWorkerClient:
         params: Mapping[str, Any] | None = None,
         *,
         timeout: float = 30.0,
+        request_id: str = "request",
     ) -> dict[str, Any]:
+        correlation_id = require_identifier(request_id, field="provider_request_id")
         request = {
-            "id": "request",
+            "id": correlation_id,
             "method": method,
             "params": dict(params or {}),
         }
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in {"PYTHONINSPECT", "PYTHONSTARTUP"}
-        }
+        env = _worker_environment(self.provider)
+        runtime_directory = tempfile.TemporaryDirectory(prefix=f"agent-hub-{self.provider}-worker-")
+        env["TMPDIR"] = runtime_directory.name
         proxy = (
             ProviderEgressProxy(self.manifest["allowed_domains"]).start()
             if self._enforce_egress
@@ -84,16 +173,17 @@ class ProviderWorkerClient:
             sandbox = Path("/usr/bin/sandbox-exec")
             if sys.platform != "darwin" or not sandbox.exists():
                 proxy.close()
+                runtime_directory.cleanup()
                 raise HubV2Error(
                     "provider_egress_unavailable",
                     "OS-level provider egress enforcement is unavailable.",
                     scope="provider",
                 )
-            profile = (
-                '(version 1) (allow default) '
-                '(deny network-outbound (remote tcp "*:*") (remote udp "*:*") '
-                '(with message "agent-hub-egress-denied")) '
-                '(allow network-outbound (remote tcp "localhost:*"))'
+            profile = _sandbox_profile(
+                provider=self.provider,
+                runtime_directory=runtime_directory.name,
+                environment=env,
+                proxy_port=proxy.port,
             )
             worker_command = [str(sandbox), "-p", profile, *worker_command]
         try:
@@ -105,11 +195,13 @@ class ProviderWorkerClient:
                 text=True,
                 encoding="utf-8",
                 env=env,
-                cwd=str(Path.cwd()),
+                cwd=runtime_directory.name,
+                start_new_session=os.name == "posix",
             )
         except OSError as exc:
             if proxy is not None:
                 proxy.close()
+            runtime_directory.cleanup()
             raise HubV2Error(
                 "provider_worker_unavailable",
                 "The provider worker could not be started.",
@@ -125,12 +217,7 @@ class ProviderWorkerClient:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            process.terminate()
-            try:
-                process.communicate(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
+            self._terminate_process(process, wait=True)
             raise HubV2Error(
                 "provider_timeout",
                 "The provider worker exceeded its time budget.",
@@ -144,6 +231,7 @@ class ProviderWorkerClient:
                     self._active = None
             if proxy is not None:
                 proxy.close()
+            runtime_directory.cleanup()
         if process.returncode != 0:
             raise HubV2Error(
                 "provider_worker_failed",
@@ -181,6 +269,13 @@ class ProviderWorkerClient:
                 "The provider worker response must be an object.",
                 scope="provider",
             )
+        if parsed.get("id") != correlation_id:
+            raise HubV2Error(
+                "provider_protocol_error",
+                "The provider worker response correlation ID does not match.",
+                scope="provider",
+                retryable=True,
+            )
         if parsed.get("success") is not True:
             error = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
             raise HubV2Error(
@@ -201,10 +296,45 @@ class ProviderWorkerClient:
             )
         return result
 
+    @staticmethod
+    def _signal_process(process: subprocess.Popen[str], signal_number: int) -> None:
+        process_id = getattr(process, "pid", None)
+        if os.name == "posix" and isinstance(process_id, int) and process_id > 0:
+            try:
+                os.killpg(process_id, signal_number)
+                return
+            except ProcessLookupError:
+                return
+            except OSError:
+                pass
+        try:
+            if signal_number == signal.SIGKILL:
+                process.kill()
+            else:
+                process.terminate()
+        except OSError:
+            pass
+
+    @classmethod
+    def _terminate_process(
+        cls,
+        process: subprocess.Popen[str],
+        *,
+        wait: bool,
+    ) -> None:
+        cls._signal_process(process, signal.SIGTERM)
+        if not wait:
+            return
+        try:
+            process.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            cls._signal_process(process, signal.SIGKILL)
+            process.communicate()
+
     def cancel(self) -> bool:
         with self._lock:
             process = self._active
         if process is None or process.poll() is not None:
             return False
-        process.terminate()
+        self._terminate_process(process, wait=False)
         return True

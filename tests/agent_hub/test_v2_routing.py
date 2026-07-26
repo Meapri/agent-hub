@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from agent_hub.v2.contracts import TASK_SCHEMA
+from agent_hub.v2.errors import HubV2Error
 from agent_hub.v2.routing import route, routing_context
 from agent_hub.v2.store import HubStore
 
@@ -48,6 +51,24 @@ def test_pinned_routing_keeps_the_explicit_provider(tmp_path):
 
     assert decision["selected_provider"] == "gpt"
     assert decision["reason_code"] == "pinned_preserves_planner"
+
+
+def test_pinned_routing_fails_when_explicit_provider_is_ineligible(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    readiness = _ready()
+    readiness["gpt"] = False
+
+    with pytest.raises(HubV2Error) as error:
+        route(
+            store=store,
+            task=_task(),
+            planner_provider="gpt",
+            routing_mode="pinned",
+            provider_allowlist=list(readiness),
+            readiness=readiness,
+        )
+
+    assert error.value.code == "pinned_provider_unavailable"
 
 
 def test_auto_preserves_planner_until_exact_context_has_twenty_samples(tmp_path):

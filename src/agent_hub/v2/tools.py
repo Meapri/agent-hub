@@ -71,7 +71,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "record": boolean,
                     "project_root": text,
                 },
-                required=["task"],
+                required=["task", "project_root"],
             ),
         ),
         (
@@ -174,9 +174,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "run_id": text,
                     "step_id": text,
                     "expected_revision": integer,
-                    "outcome": {
-                        "enum": ["accepted", "partial", "rejected", "verified", "failed"]
-                    },
+                    "outcome": {"enum": ["accepted", "partial", "rejected", "verified", "failed"]},
                     "rating": {"type": "integer", "minimum": 1, "maximum": 5},
                 },
                 required=["run_id", "expected_revision", "outcome"],

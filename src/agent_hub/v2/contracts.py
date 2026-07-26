@@ -185,14 +185,43 @@ def _string_list(
             f"{field} must be an array with at most {maximum_items} items.",
             scope="contract",
         )
-    return [
-        require_string(item, field=f"{field}[]", maximum=item_maximum)
-        for item in value
-    ]
+    return [require_string(item, field=f"{field}[]", maximum=item_maximum) for item in value]
+
+
+def _reject_unknown_fields(
+    value: Mapping[str, Any],
+    *,
+    allowed: set[str],
+    field: str,
+    code: str = "invalid_request",
+    scope: str = "contract",
+) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise HubV2Error(
+            code,
+            f"{field} contains unsupported fields.",
+            scope=scope,
+            safe_details={"fields": unknown},
+        )
 
 
 def validate_task(raw: Any) -> dict[str, Any]:
     value = require_object(raw, field="task")
+    _reject_unknown_fields(
+        value,
+        allowed={
+            "schema",
+            "intent",
+            "capability",
+            "inline_input",
+            "input_artifacts",
+            "constraints",
+            "output_contract",
+            "retention",
+        },
+        field="task",
+    )
     schema = value.get("schema", TASK_SCHEMA)
     if schema != TASK_SCHEMA:
         raise HubV2Error("unsupported_schema", "task schema is not supported.", scope="contract")
@@ -221,6 +250,11 @@ def validate_task(raw: Any) -> dict[str, Any]:
     if inline_input is None and not input_artifacts:
         inline_input = ""
     constraints = require_object(value.get("constraints", {}), field="constraints")
+    _reject_unknown_fields(
+        constraints,
+        allowed={"provider_allowlist", "max_tokens", "max_leaf_calls", "timeout_seconds"},
+        field="task.constraints",
+    )
     provider_allowlist = _string_list(
         constraints.get("provider_allowlist"),
         field="constraints.provider_allowlist",
@@ -257,6 +291,23 @@ def validate_task(raw: Any) -> dict[str, Any]:
 
 def validate_plan(raw: Any) -> dict[str, Any]:
     value = require_object(raw, field="plan")
+    _reject_unknown_fields(
+        value,
+        allowed={
+            "schema",
+            "task",
+            "steps",
+            "routing_mode",
+            "policy_revision",
+            "egress_manifest_sha256",
+            "inline_consent_artifacts",
+            "request_plan_sha256",
+            "plan_sha256",
+        },
+        field="plan",
+        code="invalid_plan",
+        scope="planner",
+    )
     if value.get("schema") != PLAN_SCHEMA:
         raise HubV2Error("unsupported_schema", "plan schema is not supported.", scope="contract")
     steps_raw = value.get("steps")
@@ -270,6 +321,21 @@ def validate_plan(raw: Any) -> dict[str, Any]:
     ids: set[str] = set()
     for index, raw_step in enumerate(steps_raw):
         step = require_object(raw_step, field=f"steps[{index}]")
+        _reject_unknown_fields(
+            step,
+            allowed={
+                "id",
+                "capability",
+                "depends_on",
+                "instruction",
+                "routing_requirements",
+                "output_contract",
+                "verifier",
+            },
+            field=f"plan.steps[{index}]",
+            code="invalid_plan",
+            scope="planner",
+        )
         step_id = require_identifier(step.get("id"), field=f"steps[{index}].id")
         if step_id in ids:
             raise HubV2Error("invalid_plan", "plan step ids must be unique.", scope="planner")
@@ -347,6 +413,12 @@ def validate_plan(raw: Any) -> dict[str, Any]:
             field="policy_revision",
         ),
         "egress_manifest_sha256": value.get("egress_manifest_sha256"),
+        "inline_consent_artifacts": _string_list(
+            value.get("inline_consent_artifacts"),
+            field="inline_consent_artifacts",
+            maximum_items=100,
+        ),
+        "request_plan_sha256": value.get("request_plan_sha256"),
     }
     if normalized["routing_mode"] not in ROUTING_MODES:
         raise HubV2Error("invalid_plan", "routing_mode is not supported.", scope="planner")
@@ -355,12 +427,46 @@ def validate_plan(raw: Any) -> dict[str, Any]:
             normalized["egress_manifest_sha256"],
             field="egress_manifest_sha256",
         )
-    normalized["plan_sha256"] = digest_json(normalized)
+    if normalized["request_plan_sha256"] is not None:
+        normalized["request_plan_sha256"] = require_digest(
+            normalized["request_plan_sha256"],
+            field="request_plan_sha256",
+        )
+    calculated = digest_json(normalized)
+    supplied = value.get("plan_sha256")
+    if supplied is not None and require_digest(supplied, field="plan_sha256") != calculated:
+        raise HubV2Error(
+            "plan_digest_conflict",
+            "The plan changed after its digest was prepared.",
+            scope="planner",
+        )
+    normalized["plan_sha256"] = calculated
     return normalized
 
 
 def validate_provider_manifest(raw: Any) -> dict[str, Any]:
     value = require_object(raw, field="provider_manifest")
+    _reject_unknown_fields(
+        value,
+        allowed={
+            "schema",
+            "provider_id",
+            "adapter_version",
+            "protocol_version",
+            "capabilities",
+            "reasoning_effort",
+            "auth_owner",
+            "auth_mode",
+            "allowed_domains",
+            "supports_cancel",
+            "supports_streaming",
+            "supports_idempotency",
+            "settings_schema",
+        },
+        field="provider_manifest",
+        code="invalid_provider_manifest",
+        scope="provider",
+    )
     if value.get("schema") != PROVIDER_MANIFEST_SCHEMA:
         raise HubV2Error(
             "unsupported_schema",
@@ -378,6 +484,13 @@ def validate_provider_manifest(raw: Any) -> dict[str, Any]:
         field="protocol_version",
         maximum=32,
     )
+    if protocol_version != "2.0":
+        raise HubV2Error(
+            "unsupported_protocol_version",
+            "provider worker protocol version is not supported.",
+            scope="provider",
+            safe_details={"supported": ["2.0"]},
+        )
     capabilities = _string_list(
         value.get("capabilities"),
         field="capabilities",

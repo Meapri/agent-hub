@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import secrets
-import shutil
 import sqlite3
 import stat
 import tempfile
@@ -34,13 +33,65 @@ from .contracts import (
     safe_usage,
 )
 from .errors import HubV2Error
+from .metrics import summarize_operation_metrics
 
-STORE_SCHEMA_VERSION = 4
+STORE_SCHEMA_VERSION = 7
 DEFAULT_STATE_DIR = Path("~/.agent-hub").expanduser()
 DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_SAFE_STRING = 256
+_REQUIRED_SCHEMA_COLUMNS = {
+    "runs": {
+        "run_id",
+        "project_root",
+        "status",
+        "revision",
+        "plan_sha256",
+        "plan_json",
+        "policy_revision",
+        "routing_mode",
+        "idempotency_key",
+        "lease_token_sha256",
+        "lease_expires_at",
+    },
+    "steps": {
+        "run_id",
+        "step_id",
+        "status",
+        "revision",
+        "provider",
+        "model",
+        "attempt",
+        "input_artifact_ids",
+        "output_artifact_ids",
+        "checkpoint_state",
+    },
+    "artifacts": {
+        "artifact_id",
+        "content_sha256",
+        "sensitivity",
+        "encrypted",
+        "content",
+        "source_refs_json",
+        "verification_json",
+        "retention",
+    },
+    "egress_approvals": {
+        "manifest_sha256",
+        "project_root",
+        "policy_revision",
+        "destinations_json",
+        "entries_json",
+    },
+    "operation_metrics": {
+        "metric_id",
+        "operation",
+        "success",
+        "duration_ms",
+        "recorded_at",
+    },
+}
 _SAFE_EVENT_FIELDS = frozenset(
     {
         "provider",
@@ -58,6 +109,7 @@ _SAFE_EVENT_FIELDS = frozenset(
         "usage",
         "previous_status",
         "routing_mode",
+        "correlation_id",
     }
 )
 
@@ -151,6 +203,21 @@ def _safe_event_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
     return safe
 
 
+def _assert_required_schema(connection: sqlite3.Connection) -> None:
+    for table, required in _REQUIRED_SCHEMA_COLUMNS.items():
+        actual = {
+            str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        missing = sorted(required - actual)
+        if missing:
+            raise HubV2Error(
+                "store_migration_failed",
+                "The migrated database is missing required schema fields.",
+                scope="store",
+                safe_details={"table": table, "missing": ",".join(missing)[:128]},
+            )
+
+
 class HubStore:
     def __init__(
         self,
@@ -159,9 +226,7 @@ class HubStore:
         clock: Callable[[], float] = time.time,
     ) -> None:
         requested = (
-            Path(path).expanduser()
-            if path is not None
-            else DEFAULT_STATE_DIR / DEFAULT_DB_NAME
+            Path(path).expanduser() if path is not None else DEFAULT_STATE_DIR / DEFAULT_DB_NAME
         )
         directory = _safe_state_dir(requested.parent)
         self.path = directory / requested.name
@@ -199,9 +264,10 @@ class HubStore:
     def _migration_backup_if_needed(self) -> Path | None:
         if not self.path.exists() or self.path.stat().st_size == 0:
             return None
-        source = sqlite3.connect(self.path)
+        source = sqlite3.connect(self.path, timeout=10.0)
         source.row_factory = sqlite3.Row
         try:
+            source.execute("PRAGMA busy_timeout = 10000")
             integrity = str(source.execute("PRAGMA quick_check").fetchone()[0])
             if integrity != "ok":
                 raise HubV2Error(
@@ -219,10 +285,15 @@ class HubStore:
                     "The existing database is not an Agent Hub v2 store.",
                     scope="store",
                 )
-            row = source.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
+            row = source.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
             current = int(row["value"]) if row is not None else 0
+            if current < 3:
+                raise HubV2Error(
+                    "unsupported_store_schema",
+                    "The local state database is too old for a safe in-place migration.",
+                    scope="store",
+                    safe_details={"current": current, "minimum": 3},
+                )
             if current > STORE_SCHEMA_VERSION:
                 raise HubV2Error(
                     "unsupported_store_schema",
@@ -244,21 +315,37 @@ class HubStore:
                 output.close()
             os.chmod(target, 0o600)
             return target
+        except sqlite3.DatabaseError as exc:
+            raise HubV2Error(
+                "store_integrity_failed",
+                "The local state database is unreadable.",
+                scope="store",
+            ) from exc
         finally:
             source.close()
 
     def _restore_migration_backup(self, backup: Path) -> None:
-        for candidate in (
-            self.path,
-            Path(f"{self.path}-wal"),
-            Path(f"{self.path}-shm"),
-        ):
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.restore-",
+            dir=self.path.parent,
+        )
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "wb") as output, backup.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chmod(temp, 0o600)
+            os.replace(temp, self.path)
+        finally:
+            if temp.exists():
+                temp.unlink()
+        for candidate in (Path(f"{self.path}-wal"), Path(f"{self.path}-shm")):
             try:
                 candidate.unlink()
             except FileNotFoundError:
                 pass
-        shutil.copy2(backup, self.path)
-        os.chmod(self.path, 0o600)
 
     def _initialize(self) -> None:
         existed = self.path.exists()
@@ -441,6 +528,15 @@ class HubStore:
                     tokenize = 'unicode61'
                 );
 
+                CREATE TABLE IF NOT EXISTS egress_approvals (
+                    manifest_sha256 TEXT PRIMARY KEY,
+                    project_root TEXT NOT NULL,
+                    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+                    destinations_json TEXT NOT NULL DEFAULT '[]',
+                    entries_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS provider_health (
                     provider TEXT PRIMARY KEY,
                     consecutive_failures INTEGER NOT NULL DEFAULT 0
@@ -458,6 +554,16 @@ class HubStore:
                     verified_at REAL NOT NULL,
                     PRIMARY KEY(provider, model)
                 );
+
+                CREATE TABLE IF NOT EXISTS operation_metrics (
+                    metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    operation TEXT NOT NULL,
+                    success INTEGER NOT NULL CHECK (success IN (0, 1)),
+                    duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                    recorded_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS operation_metrics_recorded
+                    ON operation_metrics(recorded_at, metric_id);
                 """
             )
             connection.execute("BEGIN IMMEDIATE")
@@ -481,10 +587,20 @@ class HubStore:
                 )
             elif int(current["value"]) < STORE_SCHEMA_VERSION:
                 connection.execute("DROP TABLE IF EXISTS legacy_imports")
+                columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(egress_approvals)").fetchall()
+                }
+                if "destinations_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE egress_approvals "
+                        "ADD COLUMN destinations_json TEXT NOT NULL DEFAULT '[]'"
+                    )
                 connection.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                     (str(STORE_SCHEMA_VERSION),),
                 )
+            _assert_required_schema(connection)
             connection.execute("COMMIT")
             integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
             if integrity != "ok":
@@ -538,6 +654,63 @@ class HubStore:
             "path": str(self.path),
         }
 
+    def record_operation_metric(
+        self,
+        *,
+        operation: str,
+        success: bool,
+        duration_ms: int,
+    ) -> None:
+        name = str(operation)
+        if (
+            not name.startswith("agent_hub_")
+            or len(name) > 64
+            or isinstance(duration_ms, bool)
+            or duration_ms < 0
+        ):
+            return
+        now = self._clock()
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO operation_metrics(
+                    operation, success, duration_ms, recorded_at
+                ) VALUES(?, ?, ?, ?)
+                """,
+                (name, int(success), int(duration_ms), now),
+            )
+            connection.execute(
+                "DELETE FROM operation_metrics WHERE recorded_at < ?",
+                (now - (90 * 86400),),
+            )
+            connection.execute(
+                """
+                DELETE FROM operation_metrics
+                WHERE metric_id IN (
+                    SELECT metric_id FROM operation_metrics
+                    ORDER BY metric_id DESC
+                    LIMIT -1 OFFSET 20000
+                )
+                """
+            )
+
+    def operation_metrics(self, *, limit: int = 10_000) -> dict[str, Any]:
+        bounded = min(max(int(limit), 1), 10_000)
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT operation, success, duration_ms
+                FROM operation_metrics
+                ORDER BY metric_id DESC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return summarize_operation_metrics(rows)
+
     def backup(self, destination: str | Path | None = None) -> dict[str, Any]:
         if destination is None:
             backup_dir = _safe_state_dir(self.path.parent / "backups")
@@ -568,8 +741,7 @@ class HubStore:
             "sha256": sha256(target.read_bytes()).hexdigest(),
         }
 
-    @staticmethod
-    def _public_run(row: sqlite3.Row, steps: list[dict[str, Any]]) -> dict[str, Any]:
+    def _public_run(self, row: sqlite3.Row, steps: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "schema": row["schema_name"],
             "run_id": row["run_id"],
@@ -584,7 +756,7 @@ class HubStore:
             "lease_active": bool(
                 row["lease_token_sha256"]
                 and row["lease_expires_at"]
-                and row["lease_expires_at"] > time.time()
+                and row["lease_expires_at"] > self._clock()
             ),
             "lease_expires_at": row["lease_expires_at"],
             "created_at": row["created_at"],
@@ -637,7 +809,13 @@ class HubStore:
             )
         return self._public_run(row, steps)
 
-    def get_run_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+    def get_run_by_idempotency_key(
+        self,
+        idempotency_key: str,
+        *,
+        expected_project_root: str | None = None,
+        expected_request_plan_sha256: str | None = None,
+    ) -> dict[str, Any] | None:
         key = require_identifier(idempotency_key, field="idempotency_key")
         connection = self._connect()
         try:
@@ -648,6 +826,19 @@ class HubStore:
             if row is None:
                 return None
             run_row, steps = self._load_run(connection, row["run_id"])
+            stored_plan = _json_object(run_row["plan_json"])
+            if (
+                expected_project_root is not None
+                and run_row["project_root"] != canonical_project_root(expected_project_root)
+            ) or (
+                expected_request_plan_sha256 is not None
+                and stored_plan.get("request_plan_sha256") != expected_request_plan_sha256
+            ):
+                raise HubV2Error(
+                    "idempotency_key_conflict",
+                    "The idempotency key belongs to a different project or plan.",
+                    scope="run",
+                )
             return self._public_run(run_row, steps)
         finally:
             connection.close()
@@ -685,6 +876,15 @@ class HubStore:
             ).fetchone()
             if existing is not None:
                 row, public_steps = self._load_run(connection, existing["run_id"])
+                existing_plan = _json_object(row["plan_json"])
+                if row["project_root"] != root or existing_plan.get(
+                    "request_plan_sha256"
+                ) != plan.get("request_plan_sha256"):
+                    raise HubV2Error(
+                        "idempotency_key_conflict",
+                        "The idempotency key belongs to a different project or plan.",
+                        scope="run",
+                    )
                 return self._public_run(row, public_steps)
             connection.execute(
                 """
@@ -761,6 +961,24 @@ class HubStore:
         ).lastrowid
         return int(cursor)
 
+    def record_runtime_event(
+        self,
+        run_id: str,
+        *,
+        event_type: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> int:
+        with self._transaction() as connection:
+            row, _ = self._load_run(connection, run_id)
+            return self._append_event_tx(
+                connection,
+                run_id=run_id,
+                run_revision=int(row["revision"]),
+                event_type=event_type,
+                occurred_at=self._clock(),
+                details=details,
+            )
+
     def events(
         self,
         run_id: str,
@@ -770,7 +988,11 @@ class HubStore:
         project_root: str | None = None,
     ) -> dict[str, Any]:
         after = require_non_negative_int(after_cursor, field="after_cursor")
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_EVENT_LIMIT:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_EVENT_LIMIT
+        ):
             raise HubV2Error(
                 "invalid_request",
                 f"limit must be between 1 and {MAX_EVENT_LIMIT}.",
@@ -779,9 +1001,8 @@ class HubStore:
         connection = self._connect()
         try:
             row, _ = self._load_run(connection, run_id)
-            if (
-                project_root is not None
-                and row["project_root"] != canonical_project_root(project_root)
+            if project_root is not None and row["project_root"] != canonical_project_root(
+                project_root
             ):
                 raise HubV2Error(
                     "project_scope_mismatch",
@@ -894,6 +1115,42 @@ class HubStore:
                 run=self._public_run(claimed_row, steps),
             )
 
+    def renew_claim(
+        self,
+        run_id: str,
+        *,
+        claim_token: str,
+        expected_revision: int,
+        lease_seconds: float,
+    ) -> float:
+        expected = require_non_negative_int(expected_revision, field="expected_revision")
+        duration = min(max(float(lease_seconds), 1.0), 3600.0)
+        token_sha = sha256(claim_token.encode("ascii")).hexdigest()
+        now = self._clock()
+        expires_at = now + duration
+        with self._transaction() as connection:
+            row, _ = self._load_run(connection, run_id)
+            if (
+                row["revision"] != expected
+                or row["status"] != "running"
+                or row["lease_token_sha256"] != token_sha
+            ):
+                raise HubV2Error(
+                    "lease_lost",
+                    "The run lease cannot be renewed.",
+                    scope="run",
+                    retryable=True,
+                )
+            connection.execute(
+                """
+                UPDATE runs
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE run_id = ? AND revision = ? AND lease_token_sha256 = ?
+                """,
+                (expires_at, now, run_id, expected, token_sha),
+            )
+        return expires_at
+
     def finalize_claim(
         self,
         run_id: str,
@@ -956,6 +1213,7 @@ class HubStore:
         status: str,
         provider: str | None = None,
         model: str | None = None,
+        input_artifact_ids: list[str] | None = None,
         output_artifact_ids: list[str] | None = None,
         checkpoint: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -995,25 +1253,42 @@ class HubStore:
                     scope="run",
                 )
             attempt_delta = int(
-                status == "running"
-                or (row["status"] == "queued" and status == "completed")
+                status == "running" or (row["status"] == "queued" and status == "completed")
             )
+            next_input_artifacts = (
+                input_artifact_ids
+                if input_artifact_ids is not None
+                else _json_list(row["input_artifact_ids"])
+            )
+            next_output_artifacts = (
+                output_artifact_ids
+                if output_artifact_ids is not None
+                else _json_list(row["output_artifact_ids"])
+            )
+            next_provider = provider if provider is not None else row["provider"]
+            next_model = model if model is not None else row["model"]
+            next_checkpoint = {
+                **_json_object(row["checkpoint_state"]),
+                **dict(checkpoint or {}),
+            }
             next_revision = expected + 1
             connection.execute(
                 """
                 UPDATE steps
                 SET status = ?, revision = revision + 1, provider = ?, model = ?,
-                    attempt = attempt + ?, output_artifact_ids = ?,
+                    attempt = attempt + ?, input_artifact_ids = ?,
+                    output_artifact_ids = ?,
                     checkpoint_state = ?, updated_at = ?
                 WHERE run_id = ? AND step_id = ?
                 """,
                 (
                     status,
-                    provider,
-                    model,
+                    next_provider,
+                    next_model,
                     attempt_delta,
-                    canonical_json(output_artifact_ids or []),
-                    canonical_json(dict(checkpoint or {})),
+                    canonical_json(next_input_artifacts),
+                    canonical_json(next_output_artifacts),
+                    canonical_json(next_checkpoint),
                     now,
                     run_id,
                     identifier,
@@ -1031,8 +1306,8 @@ class HubStore:
                 occurred_at=now,
                 details={
                     "step_id": identifier,
-                    "provider": provider,
-                    "model": model,
+                    "provider": next_provider,
+                    "model": next_model,
                     "reason_code": status,
                 },
             )
@@ -1052,7 +1327,13 @@ class HubStore:
                     retryable=True,
                     safe_details={"expected": expected, "current": row["revision"]},
                 )
-            if row["status"] in {"completed", "failed", "cancelled", "archived"}:
+            if row["status"] in {
+                "completed",
+                "failed",
+                "cancelled",
+                "archived",
+                "outcome_unknown",
+            }:
                 raise HubV2Error(
                     "run_not_cancellable",
                     "The run is already terminal.",
@@ -1223,10 +1504,13 @@ class HubStore:
             normalized_refs = list(dict.fromkeys(source_refs or []))
             for source_id in normalized_refs:
                 require_identifier(source_id, field="source_ref")
-                if connection.execute(
-                    "SELECT 1 FROM artifacts WHERE artifact_id = ?",
-                    (source_id,),
-                ).fetchone() is None:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM artifacts WHERE artifact_id = ?",
+                        (source_id,),
+                    ).fetchone()
+                    is None
+                ):
                     raise HubV2Error(
                         "artifact_source_not_found",
                         "An artifact source reference was not found.",
@@ -1363,10 +1647,13 @@ class HubStore:
         export_id = f"export_{secrets.token_hex(12)}"
         now = self._clock()
         with self._transaction() as connection:
-            if connection.execute(
-                "SELECT 1 FROM artifacts WHERE artifact_id = ?",
-                (identifier,),
-            ).fetchone() is None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM artifacts WHERE artifact_id = ?",
+                    (identifier,),
+                ).fetchone()
+                is None
+            ):
                 raise HubV2Error(
                     "artifact_not_found",
                     "The requested artifact was not found.",
@@ -1403,13 +1690,35 @@ class HubStore:
     def prune_expired_artifacts(self) -> dict[str, Any]:
         now = self._clock()
         with self._transaction() as connection:
-            cursor = connection.execute(
-                "DELETE FROM artifacts WHERE delete_after IS NOT NULL AND delete_after <= ?",
+            rows = connection.execute(
+                """
+                SELECT artifact_id, verification_json
+                FROM artifacts
+                WHERE delete_after IS NOT NULL AND delete_after <= ?
+                  AND content IS NOT NULL
+                ORDER BY artifact_id
+                """,
                 (now,),
-            )
+            ).fetchall()
+            for row in rows:
+                verification = _json_object(row["verification_json"])
+                verification["content_pruned"] = True
+                verification["content_pruned_at"] = now
+                connection.execute(
+                    """
+                    UPDATE artifacts
+                    SET content = NULL,
+                        verification_json = ?,
+                        retention = 'metadata_only',
+                        delete_after = NULL
+                    WHERE artifact_id = ?
+                    """,
+                    (canonical_json(verification), row["artifact_id"]),
+                )
         return {
-            "schema": "agent_hub_artifact_retention_v1",
-            "deleted_count": max(0, int(cursor.rowcount)),
+            "schema": "agent_hub_artifact_retention_v2",
+            "pruned_content_count": len(rows),
+            "deleted_metadata_count": 0,
             "evaluated_at": now,
         }
 
@@ -1698,9 +2007,7 @@ class HubStore:
             "provider": provider,
             "sample_count": sample_count,
             "reliability": weighted_success / (weighted_success + weighted_failure),
-            "failure_rate": (
-                observed_failure / observed_total if observed_total else None
-            ),
+            "failure_rate": (observed_failure / observed_total if observed_total else None),
             "quality": quality_total / quality_weight if quality_weight else 0.5,
             "latency_ms": latency_total / latency_weight if latency_weight else None,
             "total_tokens": tokens_total / tokens_weight if tokens_weight else None,
@@ -1828,6 +2135,144 @@ class HubStore:
             "indexed_at": now,
         }
 
+    def prune_context_documents(
+        self,
+        *,
+        project_identity: str,
+        namespace: str,
+        keep_path_aliases: list[str],
+    ) -> int:
+        keep = set(keep_path_aliases)
+        with self._transaction() as connection:
+            rows = connection.execute(
+                """
+                SELECT document_id, path_alias
+                FROM context_documents
+                WHERE project_identity = ? AND namespace = ?
+                """,
+                (project_identity, namespace),
+            ).fetchall()
+            stale = [str(row["document_id"]) for row in rows if str(row["path_alias"]) not in keep]
+            for document_id in stale:
+                connection.execute(
+                    "DELETE FROM context_fts WHERE document_id = ?",
+                    (document_id,),
+                )
+                connection.execute(
+                    "DELETE FROM context_documents WHERE document_id = ?",
+                    (document_id,),
+                )
+        return len(stale)
+
+    def record_egress_approval(
+        self,
+        *,
+        project_root: str,
+        manifest: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        digest = str(manifest.get("manifest_sha256") or "")
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise HubV2Error(
+                "invalid_egress_manifest",
+                "The approved egress manifest digest is invalid.",
+                scope="egress",
+            )
+        root = canonical_project_root(project_root)
+        entries = []
+        for raw in manifest.get("entries") or []:
+            if not isinstance(raw, Mapping):
+                continue
+            entries.append(
+                {
+                    "kind": str(raw.get("kind") or "repository"),
+                    "artifact_id": str(raw.get("artifact_id") or ""),
+                    "path_alias": str(raw.get("path_alias") or ""),
+                    "sha256": str(raw.get("sha256") or ""),
+                    "source_sha256": str(raw.get("source_sha256") or ""),
+                    "chars": int(raw.get("chars") or 0),
+                    "classification": str(raw.get("classification") or ""),
+                }
+            )
+        policy_revision = require_non_negative_int(
+            manifest.get("policy_revision"),
+            field="policy_revision",
+        )
+        destinations = list(
+            dict.fromkeys(
+                str(item)
+                for item in manifest.get("destinations") or [manifest.get("provider")]
+                if str(item or "")
+            )
+        )
+        encoded = canonical_json(entries)
+        encoded_destinations = canonical_json(destinations)
+        created_at = self._clock()
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM egress_approvals WHERE manifest_sha256 = ?",
+                (digest,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["project_root"] != root
+                    or int(existing["policy_revision"]) != policy_revision
+                    or existing["destinations_json"] != encoded_destinations
+                    or existing["entries_json"] != encoded
+                ):
+                    raise HubV2Error(
+                        "egress_approval_conflict",
+                        "The approved egress manifest conflicts with stored metadata.",
+                        scope="egress",
+                    )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO egress_approvals(
+                        manifest_sha256, project_root, policy_revision,
+                        destinations_json, entries_json, created_at
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        digest,
+                        root,
+                        policy_revision,
+                        encoded_destinations,
+                        encoded,
+                        created_at,
+                    ),
+                )
+        return {
+            "schema": "agent_hub_egress_approval_v1",
+            "manifest_sha256": digest,
+            "project_root": root,
+            "policy_revision": policy_revision,
+            "destinations": destinations,
+            "entries": entries,
+            "created_at": created_at if existing is None else float(existing["created_at"]),
+        }
+
+    def get_egress_approval(self, manifest_sha256: str) -> dict[str, Any] | None:
+        digest = str(manifest_sha256 or "")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM egress_approvals WHERE manifest_sha256 = ?",
+                (digest,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        return {
+            "schema": "agent_hub_egress_approval_v1",
+            "manifest_sha256": row["manifest_sha256"],
+            "project_root": row["project_root"],
+            "policy_revision": int(row["policy_revision"]),
+            "destinations": _json_list(row["destinations_json"]),
+            "entries": _json_list(row["entries_json"]),
+            "created_at": float(row["created_at"]),
+        }
+
     def search_context(
         self,
         *,
@@ -1857,7 +2302,7 @@ class HubStore:
             if namespace:
                 rows = connection.execute(
                     """
-                    SELECT f.document_id, f.path_alias, f.namespace,
+                    SELECT f.document_id, f.path_alias, f.namespace, f.content,
                            snippet(context_fts, 4, '', '', ' … ', 40) AS excerpt,
                            bm25(context_fts) AS rank,
                            d.content_sha256, d.complete, d.indexed_at
@@ -1866,7 +2311,7 @@ class HubStore:
                     WHERE context_fts MATCH ?
                       AND f.project_identity = ?
                       AND f.namespace = ?
-                    ORDER BY rank
+                    ORDER BY rank, f.path_alias, f.document_id
                     LIMIT ?
                     """,
                     (match, project_identity, namespace, limit),
@@ -1874,7 +2319,7 @@ class HubStore:
             else:
                 rows = connection.execute(
                     """
-                    SELECT f.document_id, f.path_alias, f.namespace,
+                    SELECT f.document_id, f.path_alias, f.namespace, f.content,
                            snippet(context_fts, 4, '', '', ' … ', 40) AS excerpt,
                            bm25(context_fts) AS rank,
                            d.content_sha256, d.complete, d.indexed_at
@@ -1882,7 +2327,7 @@ class HubStore:
                     JOIN context_documents AS d ON d.document_id = f.document_id
                     WHERE context_fts MATCH ?
                       AND f.project_identity = ?
-                    ORDER BY rank
+                    ORDER BY rank, f.path_alias, f.document_id
                     LIMIT ?
                     """,
                     (match, project_identity, limit),
@@ -1895,6 +2340,7 @@ class HubStore:
                 "document_id": row["document_id"],
                 "path": row["path_alias"],
                 "namespace": row["namespace"],
+                "content": row["content"],
                 "excerpt": row["excerpt"],
                 "rank": row["rank"],
                 "content_sha256": row["content_sha256"],
@@ -2069,9 +2515,7 @@ class HubStore:
             "schema": "agent_hub_provider_health_v1",
             "provider": provider,
             "consecutive_failures": row["consecutive_failures"],
-            "circuit_open": bool(
-                row["circuit_open_until"] and row["circuit_open_until"] > now
-            ),
+            "circuit_open": bool(row["circuit_open_until"] and row["circuit_open_until"] > now),
             "circuit_open_until": row["circuit_open_until"],
             "last_error_code": row["last_error_code"],
             "updated_at": row["updated_at"],
@@ -2151,15 +2595,11 @@ class HubStore:
                     connection,
                     run_id=row["run_id"],
                     run_revision=next_revision,
-                    event_type=(
-                        "lease_outcome_unknown" if ambiguous else "lease_recovered"
-                    ),
+                    event_type=("lease_outcome_unknown" if ambiguous else "lease_recovered"),
                     occurred_at=now,
                     details={
                         "reason_code": (
-                            "external_outcome_unknown"
-                            if ambiguous
-                            else "retry_safe_local_step"
+                            "external_outcome_unknown" if ambiguous else "retry_safe_local_step"
                         ),
                         "retryable": not ambiguous,
                     },

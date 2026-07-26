@@ -11,9 +11,10 @@ from .context import index_project
 from .daemon import DEFAULT_SOCKET_PATH, HubDaemonClient
 from .errors import HubV2Error
 from .policy import apply_policy_update, load_policy, prepare_policy_update
-from .release import apply_switch, plan_rollback, plan_update
+from .release import ROLLBACK_PLIST, apply_switch, plan_rollback, plan_update
 from .repair import apply_repair, plan_repair
 from .setup import apply_setup, plan_setup
+from .stage import DEFAULT_RELEASES_ROOT, apply_stage, plan_stage
 from .store import DEFAULT_DB_NAME, DEFAULT_STATE_DIR, HubStore
 
 
@@ -34,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--target-root")
     setup.add_argument("--launch-agents-dir")
     setup.add_argument("--state-root")
+    setup.add_argument("--runtime-root")
     setup.add_argument("--apply", action="store_true")
     setup.add_argument("--proposal-sha256")
     setup.add_argument("--no-activate", action="store_true")
@@ -66,9 +68,18 @@ def _parser() -> argparse.ArgumentParser:
     update.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     update.add_argument("--candidate-root", required=True)
     update.add_argument("--launch-agent-path")
+    update.add_argument("--rollback-path")
     update.add_argument("--apply", action="store_true")
     update.add_argument("--proposal-sha256")
     update.add_argument("--no-activate", action="store_true")
+
+    stage = sub.add_parser("stage-release", help="Stage an immutable versioned runtime.")
+    stage.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    stage.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
+    stage.add_argument("--releases-root", default=str(DEFAULT_RELEASES_ROOT))
+    stage.add_argument("--python")
+    stage.add_argument("--apply", action="store_true")
+    stage.add_argument("--proposal-sha256")
 
     rollback = sub.add_parser("rollback", help="Prepare or apply the rollback slot.")
     rollback.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -106,6 +117,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             target_root=args.target_root,
             launch_agents_dir=args.launch_agents_dir,
             state_root=args.state_root,
+            runtime_root=args.runtime_root,
         )
         if not args.apply:
             public = dict(proposal)
@@ -129,9 +141,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "name": "agent_hub_doctor",
                 "arguments": {
-                    "project_root": str(
-                        Path(args.project_root).expanduser().resolve(strict=True)
-                    ),
+                    "project_root": str(Path(args.project_root).expanduser().resolve(strict=True)),
                     "live": args.live,
                     "repair": "prepare" if args.repair else "none",
                 },
@@ -160,6 +170,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         proposal = plan_update(
             args.candidate_root,
             launch_agent_path=args.launch_agent_path,
+            rollback_path=args.rollback_path or ROLLBACK_PLIST,
         )
         if not args.apply:
             public = dict(proposal)
@@ -176,6 +187,26 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             proposal,
             proposal_sha256=proposal["proposal_sha256"],
             activate=not args.no_activate,
+            rollback_path=args.rollback_path or ROLLBACK_PLIST,
+        )
+    if args.command == "stage-release":
+        kwargs = {
+            "releases_root": args.releases_root,
+        }
+        if args.python:
+            kwargs["python_executable"] = args.python
+        proposal = plan_stage(args.repo_root, **kwargs)
+        if not args.apply:
+            return proposal
+        if args.proposal_sha256 != proposal["proposal_sha256"]:
+            raise HubV2Error(
+                "proposal_digest_required",
+                "Pass the proposal_sha256 from the reviewed staging plan.",
+                scope="cli",
+            )
+        return apply_stage(
+            proposal,
+            proposal_sha256=proposal["proposal_sha256"],
         )
     if args.command == "rollback":
         kwargs: dict[str, Any] = {"launch_agent_path": args.launch_agent_path}

@@ -43,6 +43,7 @@ class ConfigChange:
     status: str
     expected_sha256: str | None
     rendered_sha256: str
+    before: bytes | None
     rendered: bytes
 
     def public(self) -> Dict[str, Any]:
@@ -168,9 +169,10 @@ def _hub_server(
     *,
     include_type: bool,
     hub_executable: str = "agent-hub-mcp",
+    hub_command: Path | None = None,
 ) -> Dict[str, Any]:
     server: Dict[str, Any] = {
-        "command": str(repo_root / ".venv" / "bin" / hub_executable),
+        "command": str(hub_command or repo_root / ".venv" / "bin" / hub_executable),
     }
     if include_type:
         server["type"] = "stdio"
@@ -186,6 +188,7 @@ def _merge_json_config(
     include_type: bool,
     gemini: bool = False,
     hub_executable: str = "agent-hub-mcp",
+    hub_command: Path | None = None,
 ) -> bytes:
     root = _json_object(existing, path=path)
     if gemini:
@@ -207,6 +210,7 @@ def _merge_json_config(
         repo_root,
         include_type=include_type,
         hub_executable=hub_executable,
+        hub_command=hub_command,
     )
     return (json.dumps(root, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
 
@@ -247,6 +251,7 @@ def _render_codex_config(
     path: Path,
     repo_root: Path,
     hub_executable: str = "agent-hub-mcp",
+    hub_command: Path | None = None,
 ) -> bytes:
     if existing is None:
         text = ""
@@ -256,12 +261,12 @@ def _render_codex_config(
         except UnicodeDecodeError as exc:
             raise SetupError(f"config is not valid UTF-8 TOML: {path}") from exc
     prefix = _strip_managed_toml(text)
-    hub_command = repo_root / ".venv" / "bin" / hub_executable
+    command = hub_command or repo_root / ".venv" / "bin" / hub_executable
     block = "\n".join(
         (
             MANAGED_TOML_BEGIN,
             "[mcp_servers.agent-hub]",
-            f"command = {_toml_string(str(hub_command))}",
+            f"command = {_toml_string(str(command))}",
             'type = "stdio"',
             MANAGED_TOML_END,
         )
@@ -277,6 +282,7 @@ def _render_one(
     target: Path,
     repo_root: Path,
     hub_executable: str = "agent-hub-mcp",
+    hub_command: Path | None = None,
 ) -> bytes:
     if relative_path == ".codex/config.toml":
         return _render_codex_config(
@@ -284,6 +290,7 @@ def _render_one(
             path=target,
             repo_root=repo_root,
             hub_executable=hub_executable,
+            hub_command=hub_command,
         )
     if relative_path == ".cursor/mcp.json":
         return _merge_json_config(
@@ -293,6 +300,7 @@ def _render_one(
             wrapper=True,
             include_type=True,
             hub_executable=hub_executable,
+            hub_command=hub_command,
         )
     if relative_path == ".gemini/settings.json":
         return _merge_json_config(
@@ -303,6 +311,7 @@ def _render_one(
             include_type=False,
             gemini=True,
             hub_executable=hub_executable,
+            hub_command=hub_command,
         )
     if relative_path == ".mcp.json":
         return _merge_json_config(
@@ -312,6 +321,7 @@ def _render_one(
             wrapper=True,
             include_type=True,
             hub_executable=hub_executable,
+            hub_command=hub_command,
         )
     if relative_path == "hubs/claude-code/.mcp.json":
         return _merge_json_config(
@@ -321,6 +331,7 @@ def _render_one(
             wrapper=True,
             include_type=False,
             hub_executable=hub_executable,
+            hub_command=hub_command,
         )
     if relative_path == "hubs/codex/.mcp.json":
         return _merge_json_config(
@@ -330,6 +341,7 @@ def _render_one(
             wrapper=False,
             include_type=False,
             hub_executable=hub_executable,
+            hub_command=hub_command,
         )
     raise SetupError(f"unsupported local config target: {relative_path}")
 
@@ -339,9 +351,27 @@ def plan_setup(
     *,
     target_root: str | os.PathLike[str] | None = None,
     hub_executable: str = "agent-hub-mcp",
+    hub_command: str | os.PathLike[str] | None = None,
 ) -> SetupPlan:
     if hub_executable != "agent-hub-mcp":
         raise SetupError("unsupported Agent Hub MCP executable")
+    resolved_hub_command = None
+    if hub_command is not None:
+        resolved_hub_command = Path(hub_command).expanduser()
+        if not resolved_hub_command.is_absolute():
+            raise SetupError("Agent Hub MCP command must be absolute")
+        try:
+            info = resolved_hub_command.lstat()
+        except FileNotFoundError as exc:
+            raise SetupError("Agent Hub MCP command does not exist") from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or not os.access(resolved_hub_command, os.X_OK)
+        ):
+            raise SetupError("Agent Hub MCP command must be a safe executable file")
+        resolved_hub_command = resolved_hub_command.resolve(strict=True)
     source = _canonical_directory(repo_root, label="repo_root")
     destination = _canonical_directory(
         target_root if target_root is not None else source,
@@ -361,6 +391,7 @@ def plan_setup(
             target=target,
             repo_root=source,
             hub_executable=hub_executable,
+            hub_command=resolved_hub_command,
         )
         expected_sha = _digest(existing) if existing is not None else None
         status = "create" if existing is None else "unchanged" if existing == rendered else "update"
@@ -371,6 +402,7 @@ def plan_setup(
                 status=status,
                 expected_sha256=expected_sha,
                 rendered_sha256=_digest(rendered),
+                before=existing,
                 rendered=rendered,
             )
         )
@@ -429,14 +461,28 @@ def apply_plan(plan: SetupPlan) -> Dict[str, Any]:
 
     changed = plan.changed
     for item in changed:
+        before_digest = _digest(item.before) if item.before is not None else None
+        if before_digest != item.expected_sha256 or _digest(item.rendered) != item.rendered_sha256:
+            raise SetupError(f"setup plan content digest mismatch: {item.relative_path}")
         if _current_digest(item.target, target_root=plan.target_root) != item.expected_sha256:
             raise SetupError(f"config changed after planning; rerun setup: {item.relative_path}")
-    for item in changed:
-        _atomic_write(
-            item.target,
-            item.rendered,
-            target_root=plan.target_root,
-        )
+    applied: list[ConfigChange] = []
+    try:
+        for item in changed:
+            _atomic_write(
+                item.target,
+                item.rendered,
+                target_root=plan.target_root,
+            )
+            applied.append(item)
+    except SetupError as exc:
+        try:
+            _restore_changes(plan, applied)
+        except SetupError as rollback_exc:
+            raise SetupError(
+                f"local setup failed and rollback was incomplete: {rollback_exc}"
+            ) from exc
+        raise
     result = plan.public()
     result.update(
         {
@@ -446,6 +492,32 @@ def apply_plan(plan: SetupPlan) -> Dict[str, Any]:
         }
     )
     return result
+
+
+def _restore_changes(plan: SetupPlan, changes: Sequence[ConfigChange]) -> None:
+    for item in reversed(tuple(changes)):
+        current = _read_optional(item.target, target_root=plan.target_root)
+        if current is None or _digest(current) != item.rendered_sha256:
+            raise SetupError(f"refusing to overwrite changed config during rollback: {item.target}")
+        if item.before is None:
+            item.target.unlink()
+        else:
+            _atomic_write(
+                item.target,
+                item.before,
+                target_root=plan.target_root,
+            )
+
+
+def restore_plan(plan: SetupPlan) -> Dict[str, Any]:
+    """Restore every changed file when each still matches the reviewed render."""
+
+    _restore_changes(plan, plan.changed)
+    return {
+        "schema": "agent_hub_local_setup_restore_v1",
+        "success": True,
+        "restored": len(plan.changed),
+    }
 
 
 def _parser() -> argparse.ArgumentParser:

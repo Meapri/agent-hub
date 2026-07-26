@@ -133,6 +133,10 @@ class ProviderEgressProxy:
         host, port = self._server.server_address
         return f"http://{host}:{port}"
 
+    @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
     def start(self) -> "ProviderEgressProxy":
         self._thread.start()
         return self

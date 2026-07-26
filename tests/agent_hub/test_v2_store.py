@@ -99,6 +99,69 @@ def test_claim_finalize_cas_and_token_fence(tmp_path):
     assert completed["revision"] == 2
 
 
+def test_step_failure_preserves_request_checkpoint_and_provider_identity(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    run = store.create_run(
+        plan=_plan(),
+        project_root=str(tmp_path),
+        idempotency_key="fixture.checkpoint",
+    )
+    claim = store.claim_run(run["run_id"], expected_revision=0)
+    running = store.update_step(
+        run["run_id"],
+        step_id="inspect",
+        expected_run_revision=claim.revision,
+        status="running",
+        provider="gpt",
+        checkpoint={
+            "phase": "provider_request_pending",
+            "request_sha256": "a" * 64,
+            "retry_safe": False,
+        },
+    )
+
+    unknown = store.update_step(
+        run["run_id"],
+        step_id="inspect",
+        expected_run_revision=running["revision"],
+        status="outcome_unknown",
+        checkpoint={"phase": "outcome_unknown", "error_code": "provider_timeout"},
+    )
+
+    step = unknown["steps"][0]
+    assert step["provider"] == "gpt"
+    assert step["checkpoint"]["request_sha256"] == "a" * 64
+    assert step["checkpoint"]["phase"] == "outcome_unknown"
+
+
+def test_claim_renewal_extends_lease_without_changing_revision(tmp_path):
+    clock = [100.0]
+    store = HubStore(tmp_path / "state.sqlite3", clock=lambda: clock[0])
+    run = store.create_run(
+        plan=_plan(),
+        project_root=str(tmp_path),
+        idempotency_key="fixture.renew",
+    )
+    claim = store.claim_run(run["run_id"], expected_revision=0, lease_seconds=10)
+    clock[0] = 105.0
+
+    expires = store.renew_claim(
+        run["run_id"],
+        claim_token=claim.claim_token,
+        expected_revision=claim.revision,
+        lease_seconds=10,
+    )
+
+    renewed = store.get_run(run["run_id"])
+    assert expires == 115.0
+    assert renewed["revision"] == claim.revision
+    assert renewed["lease_expires_at"] == 115.0
+    assert renewed["lease_active"] is True
+
+    clock[0] = 116.0
+    assert store.get_run(run["run_id"])["lease_active"] is False
+
+
 def test_expired_lease_without_dispatched_step_is_recovered_as_retryable(tmp_path):
     clock = [100.0]
     store = HubStore(tmp_path / "state.sqlite3", clock=lambda: clock[0])
@@ -171,8 +234,8 @@ def test_store_schema_is_backed_up_and_drops_retired_import_table(tmp_path):
 
     migrated = HubStore(path)
 
-    assert migrated.health()["schema_version"] == 4
-    assert list((tmp_path / "backups").glob("pre-migration-v3-to-v4-*.sqlite3"))
+    assert migrated.health()["schema_version"] == 7
+    assert list((tmp_path / "backups").glob("pre-migration-v3-to-v7-*.sqlite3"))
     connection = sqlite3.connect(path)
     try:
         retired = connection.execute(
@@ -181,6 +244,50 @@ def test_store_schema_is_backed_up_and_drops_retired_import_table(tmp_path):
     finally:
         connection.close()
     assert retired is None
+
+
+def test_store_records_only_egress_approval_metadata(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    digest = "a" * 64
+    approval = store.record_egress_approval(
+        project_root=str(tmp_path),
+        manifest={
+            "manifest_sha256": digest,
+            "policy_revision": 0,
+            "entries": [
+                {
+                    "path_alias": "src/module.py",
+                    "sha256": "b" * 64,
+                    "chars": 20,
+                    "classification": "project",
+                }
+            ],
+        },
+    )
+
+    assert approval["entries"][0]["path_alias"] == "src/module.py"
+    assert "content" not in str(approval)
+    assert store.get_egress_approval(digest) == approval
+
+
+def test_store_summarizes_bounded_content_free_operation_metrics(tmp_path):
+    clock = [1_000_000.0]
+    store = HubStore(tmp_path / "state.sqlite3", clock=lambda: clock[0])
+    for duration, success in ((10, True), (20, True), (30, False), (100, True)):
+        store.record_operation_metric(
+            operation="agent_hub_get",
+            success=success,
+            duration_ms=duration,
+        )
+
+    metrics = store.operation_metrics()
+
+    assert metrics["content_recorded"] is False
+    assert metrics["operations"]["agent_hub_get"] == {
+        "count": 4,
+        "success_rate": 0.75,
+        "latency_ms": {"p50": 20, "p95": 100, "max": 100},
+    }
 
 
 def test_events_drop_prompt_and_unknown_details(tmp_path):
@@ -230,6 +337,38 @@ def test_durable_artifact_requires_encrypted_content(tmp_path):
     stored = store.get_artifact(artifact["artifact_id"], include_content=True)
     assert stored["content"] == b"ciphertext"
     assert stored["content_sha256"] == "a" * 64
+
+
+def test_expired_artifact_prunes_content_but_preserves_provenance(tmp_path):
+    clock = [100.0]
+    store = HubStore(tmp_path / "state.sqlite3", clock=lambda: clock[0])
+    source = store.put_artifact(
+        content=b"encrypted source",
+        media_type="text/plain",
+        sensitivity="project",
+        encrypted=True,
+        delete_after=101.0,
+    )
+    derived = store.put_artifact(
+        content=b"encrypted derived",
+        media_type="text/plain",
+        sensitivity="project",
+        encrypted=True,
+        source_refs=[source["artifact_id"]],
+    )
+    clock[0] = 102.0
+
+    result = store.prune_expired_artifacts()
+    tombstone = store.get_artifact(source["artifact_id"], include_content=True)
+    child = store.get_artifact(derived["artifact_id"])
+
+    assert result["pruned_content_count"] == 1
+    assert result["deleted_metadata_count"] == 0
+    assert tombstone["content"] is None
+    assert tombstone["content_sha256"] == source["content_sha256"]
+    assert tombstone["verification"]["content_pruned"] is True
+    assert tombstone["retention"] == "metadata_only"
+    assert child["provenance"]["sources"] == [source["artifact_id"]]
 
 
 def test_feedback_is_revision_fenced_and_weighted(tmp_path):

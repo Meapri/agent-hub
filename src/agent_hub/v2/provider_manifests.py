@@ -16,7 +16,11 @@ _AUTH = {
     "gpt": ("codex", "chatgpt"),
 }
 _DOMAINS = {
-    "claude": ["api.anthropic.com"],
+    "claude": [
+        "api.anthropic.com",
+        "platform.claude.com",
+        "console.anthropic.com",
+    ],
     "grok": ["api.x.ai"],
     "gemini": [
         "accounts.google.com",

@@ -32,7 +32,7 @@ _SECRET_PATTERNS = (
     re.compile(
         r"""(?ix)
         ["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)["']?
-        \s*[:=]\s*["'][^"']{8,}["']
+        \s*[:=]\s*(?:["'][^"'\r\n]{8,}["']|[^\s#;,]{8,})
         """
     ),
 )
@@ -65,11 +65,7 @@ def _source_path(root: Path, relative: str) -> tuple[Path, str]:
             scope="egress",
         ) from exc
     info = resolved.lstat()
-    if (
-        stat.S_ISLNK(info.st_mode)
-        or not stat.S_ISREG(info.st_mode)
-        or info.st_nlink != 1
-    ):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise HubV2Error(
             "unsafe_source_file",
             "An egress source must be a safe regular file.",
@@ -86,7 +82,8 @@ def _source_path(root: Path, relative: str) -> tuple[Path, str]:
     return resolved, alias
 
 
-def _redact_lines(text: str) -> tuple[str, int]:
+def redact_secret_lines(text: str) -> tuple[str, int]:
+    """Redact whole lines containing credential-like values while preserving line numbers."""
     redacted: list[str] = []
     matches = 0
     for line in text.splitlines(keepends=True):
@@ -99,18 +96,35 @@ def _redact_lines(text: str) -> tuple[str, int]:
     return "".join(redacted), matches
 
 
+def _fact_pack_identity(fact_pack: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the content identity without collection-time metadata."""
+    identity = {key: value for key, value in fact_pack.items() if key not in {"collected_at"}}
+    items = fact_pack.get("items")
+    if isinstance(items, list):
+        identity["items"] = [
+            {key: value for key, value in item.items() if key not in {"collected_at"}}
+            if isinstance(item, Mapping)
+            else item
+            for item in items
+        ]
+    return identity
+
+
 def prepare_egress(
     *,
     project_root: str,
     provider: str,
     model: str | None,
+    destination_providers: Iterable[str] | None = None,
     source_paths: Iterable[str],
     policy_revision: int,
     estimated_max_tokens: int,
+    artifact_sources: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     root = Path(canonical_project_root(project_root))
     paths = list(source_paths)
-    if len(paths) > MAX_SOURCE_FILES:
+    artifacts = list(artifact_sources)
+    if len(paths) + len(artifacts) > MAX_SOURCE_FILES:
         raise HubV2Error(
             "too_many_sources",
             "The egress request contains too many files.",
@@ -134,7 +148,7 @@ def prepare_egress(
                 scope="egress",
                 safe_details={"path": alias},
             ) from exc
-        redacted, secret_candidates = _redact_lines(text)
+        redacted, secret_candidates = redact_secret_lines(text)
         total_chars += len(redacted)
         if total_chars > MAX_TOTAL_CHARS:
             raise HubV2Error(
@@ -159,9 +173,71 @@ def prepare_egress(
         )
         entries.append(
             {
+                "kind": "repository",
                 "path_alias": alias,
                 "classification": "project",
                 "chars": len(redacted),
+                "sha256": content_sha,
+                "secret_candidates_redacted": secret_candidates,
+            }
+        )
+    for source in artifacts:
+        artifact_id = str(source.get("artifact_id") or "")
+        text = source.get("content")
+        if not artifact_id.startswith("art_") or not isinstance(text, str):
+            raise HubV2Error(
+                "invalid_artifact_source",
+                "An egress artifact source is invalid.",
+                scope="egress",
+            )
+        if len(text.encode("utf-8")) > MAX_SOURCE_BYTES:
+            raise HubV2Error(
+                "source_too_large",
+                "An egress artifact exceeds the size limit.",
+                scope="egress",
+                safe_details={"artifact_id": artifact_id},
+            )
+        source_sha = str(source.get("content_sha256") or "")
+        if sha256(text.encode("utf-8")).hexdigest() != source_sha:
+            raise HubV2Error(
+                "artifact_source_changed",
+                "An egress artifact no longer matches its stored digest.",
+                scope="egress",
+            )
+        redacted, secret_candidates = redact_secret_lines(text)
+        total_chars += len(redacted)
+        if total_chars > MAX_TOTAL_CHARS:
+            raise HubV2Error(
+                "fact_pack_too_large",
+                "The approved fact pack would exceed the size limit.",
+                scope="egress",
+                safe_details={"maximum_chars": MAX_TOTAL_CHARS},
+            )
+        total_secret_candidates += secret_candidates
+        alias = f"artifact:{artifact_id}"
+        lines = redacted.splitlines()
+        content_sha = sha256(redacted.encode("utf-8")).hexdigest()
+        items.append(
+            {
+                "kind": "artifact",
+                "artifact_id": artifact_id,
+                "path": alias,
+                "start_line": 1,
+                "end_line": max(1, len(lines)),
+                "complete": True,
+                "collected_at": collected_at,
+                "content_sha256": content_sha,
+                "content": redacted,
+            }
+        )
+        entries.append(
+            {
+                "kind": "artifact",
+                "artifact_id": artifact_id,
+                "path_alias": alias,
+                "classification": str(source.get("sensitivity") or "project"),
+                "chars": len(redacted),
+                "source_sha256": source_sha,
                 "sha256": content_sha,
                 "secret_candidates_redacted": secret_candidates,
             }
@@ -173,20 +249,29 @@ def prepare_egress(
         "items": items,
         "total_chars": total_chars,
     }
+    destinations = list(
+        dict.fromkeys(
+            [
+                str(provider),
+                *(str(item) for item in (destination_providers or [])),
+            ]
+        )
+    )
     manifest = {
         "schema": EGRESS_MANIFEST_SCHEMA,
         "provider": str(provider),
         "model": ensure_public_model_id(model) if model else None,
+        "destinations": destinations,
         "policy_revision": int(policy_revision),
         "entries": entries,
         "total_chars": total_chars,
         "secret_candidates_redacted": total_secret_candidates,
         "estimated_max_tokens": int(estimated_max_tokens),
-        "fact_pack_sha256": sha256(canonical_json(fact_pack).encode("utf-8")).hexdigest(),
+        "fact_pack_sha256": sha256(
+            canonical_json(_fact_pack_identity(fact_pack)).encode("utf-8")
+        ).hexdigest(),
     }
-    manifest["manifest_sha256"] = sha256(
-        canonical_json(manifest).encode("utf-8")
-    ).hexdigest()
+    manifest["manifest_sha256"] = sha256(canonical_json(manifest).encode("utf-8")).hexdigest()
     return {
         "schema": "agent_hub_egress_proposal_v2",
         "project_root": str(root),
@@ -232,7 +317,7 @@ def verify_egress_approval(
             "The egress manifest changed after preparation.",
             scope="egress",
         )
-    fact_digest = sha256(canonical_json(fact_pack).encode("utf-8")).hexdigest()
+    fact_digest = sha256(canonical_json(_fact_pack_identity(fact_pack)).encode("utf-8")).hexdigest()
     if fact_digest != manifest.get("fact_pack_sha256"):
         raise HubV2Error(
             "egress_proposal_tampered",

@@ -92,6 +92,27 @@ def test_config_drift_is_a_failure(tmp_path):
     assert by_id["local_config"]["status"] == "fail"
 
 
+def test_doctor_accepts_consistent_versioned_runtime_bridge(tmp_path):
+    root = _healthy_repo(tmp_path)
+    runtime = tmp_path / "releases/2.1.0-fixture"
+    bridge = runtime / "bin/agent-hub-mcp"
+    bridge.parent.mkdir(parents=True)
+    bridge.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bridge.chmod(0o755)
+    local_setup.apply_plan(local_setup.plan_setup(root, hub_command=bridge))
+
+    result = doctor.run_doctor(
+        root,
+        which=_which,
+        find_spec=_find_spec,
+    )
+
+    checks = {item["id"]: item for item in result["checks"]}
+    assert result["success"] is True
+    assert checks["local_config"]["details"]["bridge"] == str(bridge)
+    assert checks["agent_hub_mcp"]["details"]["path"] == str(bridge)
+
+
 def test_live_doctor_uses_redacted_non_refreshing_status_contract(tmp_path):
     root = _healthy_repo(tmp_path)
     calls = 0

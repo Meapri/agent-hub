@@ -28,6 +28,8 @@
         "routing_mode": {"enum": ["pinned", "shadow", "advisory", "auto"]},
         "policy_revision": {"type": "integer", "minimum": 0},
         "egress_manifest_sha256": {"type": ["string", "null"]},
+        "inline_consent_artifacts": {"type": "array", "items": {"type": "string"}},
+        "request_plan_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       },
       "additionalProperties": false
@@ -95,10 +97,11 @@
     },
     "egress_manifest_v2": {
       "type": "object",
-      "required": ["schema", "provider", "policy_revision", "entries", "manifest_sha256"],
+      "required": ["schema", "provider", "destinations", "policy_revision", "entries", "manifest_sha256"],
       "properties": {
         "schema": {"const": "egress_manifest_v2"},
         "provider": {"type": "string"},
+        "destinations": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
         "model": {"type": ["string", "null"]},
         "policy_revision": {"type": "integer", "minimum": 0},
         "entries": {"type": "array", "items": {"type": "object"}},

@@ -37,6 +37,28 @@ def test_task_contract_normalizes_defaults():
     assert task["constraints"]["provider_allowlist"] == ["claude", "gpt"]
 
 
+@pytest.mark.parametrize(
+    ("payload", "code", "fields"),
+    [
+        ({**_task(), "retentin": "ephemeral"}, "invalid_request", ["retentin"]),
+        (
+            {
+                **_task(),
+                "constraints": {"provider_allowlist": ["gpt"], "max_token": 10},
+            },
+            "invalid_request",
+            ["max_token"],
+        ),
+    ],
+)
+def test_task_contract_rejects_unknown_fields(payload, code, fields):
+    with pytest.raises(HubV2Error) as error:
+        validate_task(payload)
+
+    assert error.value.code == code
+    assert error.value.safe_details == {"fields": fields}
+
+
 def test_plan_contract_rejects_cycles():
     with pytest.raises(HubV2Error, match="cycle"):
         validate_plan(
@@ -89,6 +111,53 @@ def test_plan_contract_hashes_validated_content():
     assert len(plan["plan_sha256"]) == 64
 
 
+def test_plan_contract_rejects_content_changed_after_digest():
+    plan = validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": _task(),
+            "steps": [
+                {
+                    "id": "review",
+                    "capability": "review",
+                    "instruction": "Review it.",
+                }
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+    plan["steps"][0]["instruction"] = "Changed after review."
+
+    with pytest.raises(HubV2Error) as error:
+        validate_plan(plan)
+
+    assert error.value.code == "plan_digest_conflict"
+
+
+def test_plan_contract_rejects_unknown_step_fields():
+    with pytest.raises(HubV2Error) as error:
+        validate_plan(
+            {
+                "schema": PLAN_SCHEMA,
+                "task": _task(),
+                "steps": [
+                    {
+                        "id": "review",
+                        "capability": "review",
+                        "instruction": "Review it.",
+                        "fallback_provider": "gpt",
+                    }
+                ],
+                "routing_mode": "shadow",
+                "policy_revision": 0,
+            }
+        )
+
+    assert error.value.code == "invalid_plan"
+    assert error.value.safe_details == {"fields": ["fallback_provider"]}
+
+
 def test_provider_manifest_rejects_domain_paths():
     with pytest.raises(HubV2Error, match="host names"):
         validate_provider_manifest(
@@ -105,6 +174,25 @@ def test_provider_manifest_rejects_domain_paths():
         )
 
 
+def test_provider_manifest_rejects_unsupported_worker_protocol():
+    with pytest.raises(HubV2Error) as error:
+        validate_provider_manifest(
+            {
+                "schema": PROVIDER_MANIFEST_SCHEMA,
+                "provider_id": "fixture",
+                "adapter_version": "1",
+                "protocol_version": "3.0",
+                "capabilities": ["chat"],
+                "auth_owner": "fixture",
+                "auth_mode": "none",
+                "allowed_domains": ["example.com"],
+            }
+        )
+
+    assert error.value.code == "unsupported_protocol_version"
+    assert error.value.safe_details == {"supported": ["2.0"]}
+
+
 def test_builtin_provider_manifests_are_v2_conformant():
     manifests = builtin_provider_manifests()
 
@@ -115,9 +203,10 @@ def test_builtin_provider_manifests_are_v2_conformant():
         "gpt",
     ]
     assert all(item["schema"] == PROVIDER_MANIFEST_SCHEMA for item in manifests)
-    assert "search" not in next(item for item in manifests if item["provider_id"] == "gpt")[
-        "capabilities"
-    ]
+    assert (
+        "search"
+        not in next(item for item in manifests if item["provider_id"] == "gpt")["capabilities"]
+    )
 
 
 @pytest.mark.parametrize("model", ["MODEL_PLACEHOLDER_M71", "model_internal", "foo-placeholder"])

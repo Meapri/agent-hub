@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -113,14 +114,13 @@ def test_policy_rejects_unknown_or_non_boolean_experimental_flags(tmp_path):
 def test_egress_prepare_redacts_secret_lines_and_uses_relative_aliases(tmp_path):
     source = tmp_path / "src"
     source.mkdir()
-    (source / "safe.txt").write_text(
-        "safe line\napi_key = '123456789-secret-value'\nlast line\n"
-    )
+    (source / "safe.txt").write_text("safe line\napi_key = '123456789-secret-value'\nlast line\n")
 
     proposal = prepare_egress(
         project_root=str(tmp_path),
         provider="claude",
         model="claude-opus-5",
+        destination_providers=["claude", "gemini"],
         source_paths=["src/safe.txt"],
         policy_revision=0,
         estimated_max_tokens=1024,
@@ -129,9 +129,27 @@ def test_egress_prepare_redacts_secret_lines_and_uses_relative_aliases(tmp_path)
     entry = proposal["manifest"]["entries"][0]
     content = proposal["fact_pack"]["items"][0]["content"]
     assert entry["path_alias"] == "src/safe.txt"
+    assert proposal["manifest"]["destinations"] == ["claude", "gemini"]
     assert str(tmp_path) not in str(proposal["manifest"])
     assert "123456789-secret-value" not in content
     assert entry["secret_candidates_redacted"] == 1
+
+
+def test_secret_redaction_catches_unquoted_assignment_values(tmp_path):
+    (tmp_path / "secrets.env").write_text("api_key=unquoted_secret_value_123456\nsafe=yes\n")
+
+    proposal = prepare_egress(
+        project_root=str(tmp_path),
+        provider="gpt",
+        model=None,
+        source_paths=["secrets.env"],
+        policy_revision=0,
+        estimated_max_tokens=100,
+    )
+
+    content = proposal["fact_pack"]["items"][0]["content"]
+    assert "unquoted_secret_value" not in content
+    assert content == "[REDACTED SECRET CANDIDATE]\nsafe=yes\n"
 
 
 def test_egress_apply_rejects_manifest_or_fact_pack_tampering(tmp_path):
@@ -156,6 +174,32 @@ def test_egress_apply_rejects_manifest_or_fact_pack_tampering(tmp_path):
     assert error.value.code == "egress_proposal_tampered"
 
 
+def test_egress_identity_is_stable_across_collection_times(tmp_path, monkeypatch):
+    (tmp_path / "safe.txt").write_text("stable source")
+    monkeypatch.setattr("agent_hub.v2.egress.time.time", lambda: 100.0)
+    first = prepare_egress(
+        project_root=str(tmp_path),
+        provider="gpt",
+        model="gpt-5.6-sol",
+        source_paths=["safe.txt"],
+        policy_revision=0,
+        estimated_max_tokens=100,
+    )
+    monkeypatch.setattr("agent_hub.v2.egress.time.time", lambda: 200.0)
+    second = prepare_egress(
+        project_root=str(tmp_path),
+        provider="gpt",
+        model="gpt-5.6-sol",
+        source_paths=["safe.txt"],
+        policy_revision=0,
+        estimated_max_tokens=100,
+    )
+
+    assert first["fact_pack"]["collected_at"] != second["fact_pack"]["collected_at"]
+    assert first["manifest"]["fact_pack_sha256"] == second["manifest"]["fact_pack_sha256"]
+    assert first["manifest"]["manifest_sha256"] == second["manifest"]["manifest_sha256"]
+
+
 def test_egress_rejects_path_escape(tmp_path):
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("safe")
@@ -170,3 +214,30 @@ def test_egress_rejects_path_escape(tmp_path):
             estimated_max_tokens=100,
         )
     assert error.value.code == "invalid_source_path"
+
+
+def test_egress_manifest_covers_redacted_artifact_content(tmp_path):
+    content = "safe\napi_key = '123456789-secret-value'\n"
+    proposal = prepare_egress(
+        project_root=str(tmp_path),
+        provider="gpt",
+        model=None,
+        source_paths=[],
+        policy_revision=0,
+        estimated_max_tokens=100,
+        artifact_sources=[
+            {
+                "artifact_id": "art_fixture",
+                "content": content,
+                "content_sha256": sha256(content.encode()).hexdigest(),
+                "sensitivity": "project",
+            }
+        ],
+    )
+
+    entry = proposal["manifest"]["entries"][0]
+    transmitted = proposal["fact_pack"]["items"][0]["content"]
+    assert entry["kind"] == "artifact"
+    assert entry["artifact_id"] == "art_fixture"
+    assert "secret-value" not in transmitted
+    assert entry["secret_candidates_redacted"] == 1
