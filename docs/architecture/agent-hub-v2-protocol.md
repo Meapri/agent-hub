@@ -31,7 +31,9 @@ repository source는 `agent_hub_plan(mode="prepare")`에서 `fact_pack_v2`와
 전달합니다. provider worker는 macOS sandbox에서 localhost 이외의 outbound TCP를 열 수 없으며,
 daemon의 임시 CONNECT proxy가 manifest에 선언된 domain만 전달합니다.
 
-## Compatibility
+## Public surface
 
-v1 데이터는 원본 JSON을 수정하지 않는 importer만 제공합니다. v1의 37개 도구가 필요한 경우
-별도 `agent-hub-v1-mcp` entrypoint를 사용합니다. v2 daemon의 공개 도구는 14개로 고정합니다.
+daemon의 공개 도구는 14개로 고정합니다. provider adapter, planner backend와 저장소 구현은
+worker·daemon 내부 경계이며 별도 MCP entrypoint로 노출하지 않습니다. worker는
+`agent_hub.v2.provider_runtime`만 통해 provider를 호출하며, 이전 다중 도구 dispatch 계층이나
+호환 MCP server를 포함하지 않습니다.

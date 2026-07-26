@@ -9,7 +9,7 @@ import argparse
 RETIRED_MESSAGE = (
     "The standalone Antigravity plugin bundle was retired after the Agent Hub "
     "monorepo integration. Build the Agent Hub package with `python -m build` "
-    "and install its host plugins with `agent-hub-setup`."
+    "and install its host plugins with `agent-hub setup`."
 )
 
 

@@ -21,7 +21,6 @@ class ProviderManifest:
     model_prefixes: Tuple[str, ...]
     capabilities: Mapping[str, Mapping[str, Any]]
     chat_tool: str
-    adapter: str
     settings_fields: Tuple[str, ...]
     planner_enabled: bool = True
     default_compare: bool = True
@@ -54,7 +53,6 @@ _MANIFESTS: Tuple[ProviderManifest, ...] = (
             },
         },
         chat_tool="claude_codex_chat",
-        adapter="agent_hub.providers.claude:claude_provider",
         settings_fields=("model", "temperature", "max_tokens"),
     ),
     ProviderManifest(
@@ -84,7 +82,6 @@ _MANIFESTS: Tuple[ProviderManifest, ...] = (
             },
         },
         chat_tool="grok_codex_chat",
-        adapter="agent_hub.providers.grok:grok_provider",
         settings_fields=("model", "temperature", "max_tokens", "api_mode"),
     ),
     ProviderManifest(
@@ -106,7 +103,6 @@ _MANIFESTS: Tuple[ProviderManifest, ...] = (
             },
         },
         chat_tool="google_antigravity_chat",
-        adapter="agent_hub.providers.antigravity:antigravity_provider",
         settings_fields=("model", "transport", "profile", "temperature", "max_tokens"),
     ),
     ProviderManifest(
@@ -134,7 +130,6 @@ _MANIFESTS: Tuple[ProviderManifest, ...] = (
             "settings": {"supported": True, "scope": ["model"]},
         },
         chat_tool="openai_codex_chat",
-        adapter="agent_hub.providers.openai:gpt_provider",
         settings_fields=("model",),
         planner_enabled=True,
         default_compare=False,
@@ -146,12 +141,8 @@ AVAILABLE_PROVIDERS: Tuple[str, ...] = tuple(MANIFESTS)
 DEFAULT_COMPARE_PROVIDERS: Tuple[str, ...] = tuple(
     item.id for item in _MANIFESTS if item.default_compare
 )
-PLANNER_PROVIDERS: Tuple[str, ...] = tuple(
-    item.id for item in _MANIFESTS if item.planner_enabled
-)
-ALIASES: Mapping[str, str] = {
-    alias: item.id for item in _MANIFESTS for alias in item.aliases
-}
+PLANNER_PROVIDERS: Tuple[str, ...] = tuple(item.id for item in _MANIFESTS if item.planner_enabled)
+ALIASES: Mapping[str, str] = {alias: item.id for item in _MANIFESTS for alias in item.aliases}
 
 
 def manifest(provider: str) -> ProviderManifest:

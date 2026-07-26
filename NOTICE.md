@@ -1,17 +1,18 @@
 # NOTICE
 
-agent-hub is a unified personal multi-model coding hub. It consolidates one
-substrate (instructions / handoff / memory), four formerly separate MIT
-packages, and an OpenAI GPT adapter backed by the official Codex CLI into a
-single project. Each source boundary keeps its own attribution below; the four
-original packages live at `github.com/Meapri/{orchestrate-codex,claude-codex,
-grok-codex,google-antigravity-codex}`.
+agent-hub is a unified personal multi-model coding hub. It consolidates its
+local-first V2 daemon, three formerly separate provider packages, retained
+provider-neutral document utilities, and an OpenAI GPT adapter backed by the
+official Codex CLI into a single project. Each source boundary keeps its own
+attribution below.
 
 All model/provider calls require explicit user consent, enforced per adapter.
 
 ## orchestrate-codex (`src/orchestrate_codex`)
 
-Original, provider-neutral orchestration MCP. No third-party source vendored.
+The former provider-neutral orchestration MCP has been retired. Only local
+document-quality, fact-gathering, and verification utilities remain under this
+package name; they do not expose an MCP server or execute provider workflows.
 
 ## claude-codex (`src/claude_codex`)
 

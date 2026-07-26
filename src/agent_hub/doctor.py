@@ -105,7 +105,7 @@ def _local_config_check(repo_root: Path) -> DoctorCheck:
         return DoctorCheck(
             "local_config",
             "fail",
-            "Machine-local MCP config is missing or stale; run agent-hub-setup --apply.",
+            "Machine-local MCP config is missing or stale; prepare and apply `agent-hub setup`.",
             {"changed": [item.relative_path for item in plan.changed]},
         )
     return DoctorCheck(
@@ -149,27 +149,6 @@ def _command_check(
         f"command_{name}",
         "fail" if required else "warn",
         message,
-    )
-
-
-def _memory_check(repo_root: Path, *, required: bool) -> DoctorCheck:
-    notes = repo_root / "memory" / "data"
-    count = 0
-    if notes.is_dir():
-        try:
-            count = sum(1 for item in notes.rglob("*.md") if item.is_file())
-        except OSError:
-            count = 0
-    if count:
-        return DoctorCheck(
-            "memory_notes",
-            "pass",
-            f"{count} local memory note(s) are available.",
-        )
-    return DoctorCheck(
-        "memory_notes",
-        "fail" if required else "warn",
-        "No local memory notes were found.",
     )
 
 
@@ -222,7 +201,6 @@ def run_doctor(
     *,
     strict: bool = False,
     live: bool = False,
-    require_memory: bool = False,
     which: Callable[[str], str | None] = shutil.which,
     find_spec: Callable[[str], Any] = importlib.util.find_spec,
     live_status: Callable[[], Dict[str, Any]] = _default_live_status,
@@ -264,16 +242,6 @@ def run_doctor(
             required=False,
             message="codex is unavailable; the GPT provider will remain offline.",
         ),
-        _command_check(
-            "uvx",
-            which=which,
-            required=require_memory,
-            message=(
-                "uvx is unavailable; shared memory is optional unless "
-                "--require-memory is set."
-            ),
-        ),
-        _memory_check(root, required=require_memory),
     ]
     if live:
         checks.append(_live_gpt_check(live_status))
@@ -314,11 +282,6 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read redacted Codex account status without refreshing or generating.",
     )
-    parser.add_argument(
-        "--require-memory",
-        action="store_true",
-        help="Treat uvx and local memory notes as required.",
-    )
     return parser
 
 
@@ -328,7 +291,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.repo_root,
         strict=args.strict,
         live=args.live,
-        require_memory=args.require_memory,
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -336,10 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for item in result["checks"]:
             print(f"{item['status'].upper():4} {item['id']}: {item['message']}")
         summary = result["summary"]
-        print(
-            "doctor: "
-            f"{summary['pass']} pass, {summary['warn']} warn, {summary['fail']} fail"
-        )
+        print(f"doctor: {summary['pass']} pass, {summary['warn']} warn, {summary['fail']} fail")
     return 0 if result["success"] else 1
 
 

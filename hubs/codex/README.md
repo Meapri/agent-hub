@@ -41,6 +41,3 @@ codex plugin list
 - 저장소 자료를 보내는 계획은 `agent_hub_plan` prepare/apply를 거칩니다.
 - durable run은 `agent_hub_start`, `agent_hub_continue`, `agent_hub_get`, `agent_hub_events`로 관리합니다.
 - 결과 본문은 event가 아니라 encrypted `artifact_v2`로 전달됩니다.
-
-`agent-hub-v1-mcp`는 이전 37개 도구가 꼭 필요한 마이그레이션 기간에만 직접 등록할 수 있는 호환
-entrypoint입니다.

@@ -148,12 +148,20 @@ def test_expired_external_step_is_fenced_as_outcome_unknown(tmp_path):
     assert recovered["steps"][0]["status"] == "outcome_unknown"
 
 
-def test_store_v1_is_backed_up_and_migrated_before_use(tmp_path):
+def test_store_schema_is_backed_up_and_drops_retired_import_table(tmp_path):
     path = tmp_path / "state.sqlite3"
     HubStore(path)
     connection = sqlite3.connect(path)
     try:
-        connection.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+        connection.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        connection.execute(
+            """
+            CREATE TABLE legacy_imports (
+                source_sha256 TEXT PRIMARY KEY,
+                source_name TEXT NOT NULL
+            )
+            """
+        )
         connection.execute("DROP TABLE artifact_exports")
         connection.execute("DROP TABLE provenance_edges")
         connection.execute("DROP TABLE routing_daily_aggregates")
@@ -163,8 +171,16 @@ def test_store_v1_is_backed_up_and_migrated_before_use(tmp_path):
 
     migrated = HubStore(path)
 
-    assert migrated.health()["schema_version"] == 3
-    assert list((tmp_path / "backups").glob("pre-migration-v1-to-v3-*.sqlite3"))
+    assert migrated.health()["schema_version"] == 4
+    assert list((tmp_path / "backups").glob("pre-migration-v3-to-v4-*.sqlite3"))
+    connection = sqlite3.connect(path)
+    try:
+        retired = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'legacy_imports'"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert retired is None
 
 
 def test_events_drop_prompt_and_unknown_details(tmp_path):

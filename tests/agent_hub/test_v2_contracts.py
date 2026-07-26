@@ -15,7 +15,6 @@ from agent_hub.v2.contracts import (
     validate_task,
 )
 from agent_hub.v2.errors import HubV2Error, safe_unexpected_error
-from agent_hub.v2.migrate import plan_v1_import
 from agent_hub.v2.provider_manifests import builtin_provider_manifests
 
 
@@ -132,29 +131,6 @@ def test_safe_unexpected_error_does_not_accept_exception_text():
 
     assert result["error"]["code"] == "internal_error"
     assert "fixture secret" not in json.dumps(result)
-
-
-def test_v1_import_plan_is_read_only_and_does_not_rewrite_source(tmp_path):
-    source = tmp_path / "runs"
-    source.mkdir()
-    run = source / "abc123def456.json"
-    original = json.dumps(
-        {
-            "run_id": "abc123def456",
-            "run_kind": "adaptive",
-            "status": "completed",
-            "state_schema_version": 2,
-            "prompt": "must not appear in import metadata",
-        }
-    )
-    run.write_text(original)
-
-    plan = plan_v1_import(source)
-
-    assert plan["read_only"] is True
-    assert plan["entries"][0]["mode"] == "archive_metadata_only"
-    assert "prompt" not in json.dumps(plan)
-    assert run.read_text() == original
 
 
 def test_packaged_contract_fixture_contains_all_public_v2_schemas():

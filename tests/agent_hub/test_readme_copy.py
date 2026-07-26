@@ -17,7 +17,7 @@ REQUIRED_COMMANDS = (
     "./.venv/bin/google-antigravity-consent grant --i-understand-and-consent",
     "./.venv/bin/openai-codex-consent grant --i-understand-and-consent",
     "./.venv/bin/agent-hub setup --repo-root . --json",
-    "./.venv/bin/agent-hub-setup --apply",
+    "./.venv/bin/agent-hub setup --repo-root . --apply",
     "claude auth login --claudeai",
     "codex login",
     "codex login --device-auth",

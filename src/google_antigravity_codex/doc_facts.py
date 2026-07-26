@@ -1,6 +1,6 @@
 """Durable document fact packs for product docs (README / technical-doc).
 
-Leaf-side helper aligned with orchestrate-codex durable policy:
+Provider-side helper aligned with Agent Hub V2 durable-document policy:
 version, skills, MCP tool names — never git diary or session work.
 """
 

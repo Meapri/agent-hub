@@ -15,9 +15,6 @@ def _healthy_repo(tmp_path):
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
-    notes = root / "memory" / "data"
-    notes.mkdir(parents=True)
-    (notes / "decision.md").write_text("# Decision\n", encoding="utf-8")
     local_setup.apply_plan(local_setup.plan_setup(root))
     return root
 
@@ -34,10 +31,7 @@ def test_doctor_healthy_path_is_read_only_and_does_not_call_live_status(
     tmp_path,
 ):
     root = _healthy_repo(tmp_path)
-    before = {
-        path: (root / path).stat().st_mtime_ns
-        for path in local_setup.CONFIG_PATHS
-    }
+    before = {path: (root / path).stat().st_mtime_ns for path in local_setup.CONFIG_PATHS}
 
     def forbidden_live():
         raise AssertionError("default doctor must not start provider subprocesses")
@@ -50,12 +44,9 @@ def test_doctor_healthy_path_is_read_only_and_does_not_call_live_status(
     )
 
     assert result["success"] is True
-    assert result["summary"] == {"pass": 8, "warn": 0, "fail": 0}
+    assert result["summary"] == {"pass": 6, "warn": 0, "fail": 0}
     assert all(item["id"] != "gpt_live" for item in result["checks"])
-    after = {
-        path: (root / path).stat().st_mtime_ns
-        for path in local_setup.CONFIG_PATHS
-    }
+    after = {path: (root / path).stat().st_mtime_ns for path in local_setup.CONFIG_PATHS}
     assert after == before
 
 
@@ -78,14 +69,13 @@ def test_optional_commands_warn_but_only_strict_mode_fails(tmp_path):
     )
 
     assert normal["success"] is True
-    assert normal["summary"]["warn"] == 2
+    assert normal["summary"]["warn"] == 1
     assert strict["success"] is False
     assert strict["summary"]["fail"] == 0
 
 
-def test_require_memory_and_config_drift_are_failures(tmp_path):
+def test_config_drift_is_a_failure(tmp_path):
     root = _healthy_repo(tmp_path)
-    (root / "memory" / "data" / "decision.md").unlink()
     root_config = root / ".mcp.json"
     parsed = json.loads(root_config.read_text(encoding="utf-8"))
     parsed["mcpServers"]["agent-hub"]["command"] = "/wrong/path"
@@ -93,16 +83,13 @@ def test_require_memory_and_config_drift_are_failures(tmp_path):
 
     result = doctor.run_doctor(
         root,
-        require_memory=True,
-        which=lambda name: None if name == "uvx" else f"/tools/{name}",
+        which=_which,
         find_spec=_find_spec,
     )
 
     by_id = {item["id"]: item for item in result["checks"]}
     assert result["success"] is False
     assert by_id["local_config"]["status"] == "fail"
-    assert by_id["command_uvx"]["status"] == "fail"
-    assert by_id["memory_notes"]["status"] == "fail"
 
 
 def test_live_doctor_uses_redacted_non_refreshing_status_contract(tmp_path):

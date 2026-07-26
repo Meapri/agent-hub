@@ -2,7 +2,7 @@
 
 > **보관용 snapshot입니다.** 현재 Agent Hub 설치·실행 경로가 아니며 아래 독립 플러그인 명령은
 > 통합 전 구조를 기록하기 위해 남아 있습니다. 실제 설치와 provider 관리는 저장소 루트의
-> `README.md`, `agent-hub-setup`, `agent-hub-connect`를 사용하세요.
+> `README.md`, `agent-hub setup`, `agent-hub-connect`를 사용하세요.
 
 **버전 0.9.8** · OpenAI **Codex Desktop / GUI**용 플러그인(`.codex-plugin`) + **MCP stdio** 서버.
 
@@ -144,7 +144,7 @@ MCP 엔트리포인트: `scripts/google_antigravity_mcp.py`
 | **핵심** | `google_antigravity_chat` | 채팅 (멀티모달·tool-calls·stream 옵션) |
 | | `google_grounded_search` | Google Search grounding |
 | | `google_antigravity_generate_image` | 이미지 생성·로컬 캐시 저장 |
-| | `google_antigravity_write` | 초안·윤문·번역·요약·README 등. **readme/technical-doc**는 durable(fact pack, git diary off). 다단계 README는 orchestrate-codex `durable_readme` |
+| | `google_antigravity_write` | 초안·윤문·번역·요약·README 등. **readme/technical-doc**는 durable(fact pack, git diary off). 다단계 README는 Agent Hub V2의 `agent_hub_plan` → `agent_hub_start` → `agent_hub_continue` |
 | **릴리스** | `google_antigravity_release_snapshot` | 로컬 git 릴리스 컨텍스트 |
 | | `google_antigravity_release_draft` | PR/릴리스 노트 초안 |
 | **모델** | `google_antigravity_list_models` | 텍스트·이미지 모델 목록 |

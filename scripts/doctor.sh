@@ -7,9 +7,9 @@ readonly SCRIPT_DIR
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 readonly REPO_ROOT
 
-if [[ -x "${REPO_ROOT}/.venv/bin/agent-hub-doctor" ]]; then
-  exec "${REPO_ROOT}/.venv/bin/agent-hub-doctor" \
-    --repo-root "${REPO_ROOT}" "$@"
+if [[ -x "${REPO_ROOT}/.venv/bin/agent-hub" ]]; then
+  exec "${REPO_ROOT}/.venv/bin/agent-hub" doctor \
+    --project-root "${REPO_ROOT}" "$@"
 fi
 
 if [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
@@ -22,5 +22,5 @@ else
 fi
 
 PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
-  exec "${python_command}" -m agent_hub.doctor \
-    --repo-root "${REPO_ROOT}" "$@"
+  exec "${python_command}" -m agent_hub.v2.cli doctor \
+    --project-root "${REPO_ROOT}" "$@"

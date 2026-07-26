@@ -6,10 +6,10 @@
     {
       "name": "orchestrate-codex",
       "src": "src/orchestrate_codex",
-      "role": "conductor",
+      "role": "retained document-quality and fact-gathering support utilities",
       "upstream": "https://github.com/Meapri/orchestrate-codex",
       "vendored_commit": "a3bc2b8ca7369ed9028eaaca619dc246aa07a6d1",
-      "version": "0.5.4"
+      "version": "2.0.1"
     },
     {
       "name": "claude-codex",

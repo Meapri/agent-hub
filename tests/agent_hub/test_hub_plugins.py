@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tomllib
 
 from agent_hub import local_setup
 
@@ -69,12 +71,12 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
     assert "placeholder" in route
 
 
-def test_hub_plugins_register_only_unified_agent_hub_and_memory(tmp_path):
+def test_hub_plugins_register_only_unified_agent_hub(tmp_path):
     local_setup.apply_plan(local_setup.plan_setup(ROOT, target_root=tmp_path))
     codex_mcp = _json(tmp_path / "hubs/codex/.mcp.json")
     claude_mcp = _json(tmp_path / "hubs/claude-code/.mcp.json")["mcpServers"]
-    assert set(codex_mcp) == {"agent-hub", "memory"}
-    assert set(claude_mcp) == {"agent-hub", "memory"}
+    assert set(codex_mcp) == {"agent-hub"}
+    assert set(claude_mcp) == {"agent-hub"}
     assert codex_mcp["agent-hub"]["command"].endswith("/.venv/bin/agent-hub-mcp")
     assert claude_mcp["agent-hub"]["command"].endswith("/.venv/bin/agent-hub-mcp")
 
@@ -99,8 +101,8 @@ def test_public_hub_tools_do_not_expose_private_provider_leaf_names():
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():
     codex = _json(HUBS / "codex/.codex-plugin/plugin.json")
     claude = _json(HUBS / "claude-code/.claude-plugin/plugin.json")
-    assert codex["version"] == "2.0.0"
-    assert claude["version"] == "2.0.0"
+    assert codex["version"] == "2.0.1"
+    assert claude["version"] == "2.0.1"
     assert codex["mcpServers"] == "./.mcp.json"
     assert "durable" in codex["description"].lower()
     assert "durable" in claude["description"].lower()
@@ -120,7 +122,7 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["name"] == "agent-hub"
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
-    assert claude["plugins"][0]["version"] == "2.0.0"
+    assert claude["plugins"][0]["version"] == "2.0.1"
 
 
 def test_release_version_check_uses_unified_agent_hub_fields():
@@ -133,7 +135,24 @@ def test_release_version_check_uses_unified_agent_hub_fields():
         "claude_plugin",
         "claude_marketplace",
     }
-    assert set(found.values()) == {"2.0.0"}
+    assert set(found.values()) == {"2.0.1"}
+
+
+def test_package_exposes_only_canonical_agent_hub_entrypoints():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = project["project"]["scripts"]
+
+    assert scripts["agent-hub-mcp"] == "agent_hub.v2.bridge:serve"
+    assert scripts["agent-hub"] == "agent_hub.v2.cli:main"
+    assert scripts["agent-hubd"] == "agent_hub.v2.daemon:main"
+    assert {
+        "agent-hub-v1-mcp",
+        "agent-hub-v2-mcp",
+        "agent-hub-setup",
+        "agent-hub-doctor",
+    }.isdisjoint(scripts)
+    assert importlib.util.find_spec("agent_hub.server") is None
+    assert importlib.util.find_spec("agent_hub.v2.migrate") is None
 
 
 def test_retired_standalone_bundle_fails_with_current_install_guidance(tmp_path):
@@ -153,7 +172,7 @@ def test_retired_standalone_bundle_fails_with_current_install_guidance(tmp_path)
 
     assert result.returncode == 2
     assert "standalone Antigravity plugin bundle was retired" in result.stderr
-    assert "agent-hub-setup" in result.stderr
+    assert "agent-hub setup" in result.stderr
     assert not (tmp_path / "bundle").exists()
 
 

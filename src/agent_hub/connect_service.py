@@ -40,8 +40,8 @@ from openai_codex import security as openai_security
 from .v2.contracts import TASK_SCHEMA
 from .v2.daemon import HubDaemonClient
 from .v2.errors import HubV2Error
+from .v2 import provider_runtime
 
-from . import operations
 from .provider_registry import AVAILABLE_PROVIDERS
 
 PROVIDER_LABELS = {
@@ -190,16 +190,14 @@ def _live_model_payload(provider: str, payload: Any) -> bool:
     if not isinstance(payload, dict) or payload.get("success") is False:
         return False
     if not any(
-        isinstance(item, dict)
-        and _public_model_id(item.get("id") or item.get("model"))
+        isinstance(item, dict) and _public_model_id(item.get("id") or item.get("model"))
         for item in _text_model_items(payload)
     ):
         return False
     source = _public_model_text(payload.get("source"))
     warnings = [str(item) for item in payload.get("warnings") or []]
     if any(
-        warning.startswith("live_list_failed")
-        or warning == "provider_model_list_empty"
+        warning.startswith("live_list_failed") or warning == "provider_model_list_empty"
         for warning in warnings
     ):
         return False
@@ -225,11 +223,7 @@ def _disambiguate_model_displays(models: list[Dict[str, Any]]) -> None:
         if counts[display] < 2:
             continue
         detailed = f"{display} ({item['id']})"
-        item["display"] = (
-            detailed
-            if len(detailed) <= MAX_MODEL_TEXT_CHARS
-            else str(item["id"])
-        )
+        item["display"] = detailed if len(detailed) <= MAX_MODEL_TEXT_CHARS else str(item["id"])
 
 
 def _login_url(value: Any, *, hosts: Collection[str]) -> str:
@@ -269,9 +263,9 @@ def _status_reader(provider: str = "all", *, probe: bool = False) -> Dict[str, A
         data = response.get("data") if isinstance(response, dict) else None
         provider_rows = data.get("providers") if isinstance(data, dict) else None
         if isinstance(provider_rows, dict):
-            selected = provider_rows if provider == "all" else {
-                provider: provider_rows.get(provider, {})
-            }
+            selected = (
+                provider_rows if provider == "all" else {provider: provider_rows.get(provider, {})}
+            )
             states = {
                 provider_id: dict(row.get("state") or {})
                 for provider_id, row in selected.items()
@@ -281,14 +275,17 @@ def _status_reader(provider: str = "all", *, probe: bool = False) -> Dict[str, A
                 return {"providers": states, "runtime": "agent-hubd"}
     except HubV2Error:
         pass
-    result = operations.dispatch_tool(
-        "agent_hub_status",
-        {"provider": provider, "probe": probe},
-    )
-    data = result.get("data") if isinstance(result, dict) else None
-    if not isinstance(data, dict) or not isinstance(data.get("providers"), dict):
+    selected = AVAILABLE_PROVIDERS if provider == "all" else (provider,)
+    states: Dict[str, Any] = {}
+    for provider_id in selected:
+        result = provider_runtime.status(provider_id, probe=probe)
+        data = result.get("data") if isinstance(result, dict) else None
+        provider_rows = data.get("providers") if isinstance(data, dict) else None
+        if isinstance(provider_rows, dict) and isinstance(provider_rows.get(provider_id), dict):
+            states[provider_id] = dict(provider_rows[provider_id])
+    if not states:
         raise ConnectionError("제공자 상태를 읽지 못했습니다.", code="status_unavailable")
-    return data
+    return {"providers": states, "runtime": "local-status-fallback"}
 
 
 def _daemon_tool(name: str, arguments: Mapping[str, Any]) -> Dict[str, Any] | None:
@@ -326,9 +323,7 @@ class ConnectionManager:
         self._job_flows: Dict[str, str] = {}
         self._external_processes: Dict[str, subprocess.Popen[str]] = {}
         self._model_catalogs: Dict[str, Dict[str, Any]] = {}
-        self._auth_generations: Dict[str, int] = {
-            provider: 0 for provider in AVAILABLE_PROVIDERS
-        }
+        self._auth_generations: Dict[str, int] = {provider: 0 for provider in AVAILABLE_PROVIDERS}
         self._closed = False
 
     def _daemon_call(
@@ -359,11 +354,7 @@ class ConnectionManager:
                 )
                 or logged_in
             )
-            refreshable = bool(
-                state.get("refreshable")
-                and logged_in
-                and not auth_ready
-            )
+            refreshable = bool(state.get("refreshable") and logged_in and not auth_ready)
             relogin_required = bool(
                 not auth_ready
                 and not refreshable
@@ -388,46 +379,28 @@ class ConnectionManager:
                 "auth_ready": auth_ready,
                 "account_present": account_present,
                 "login_ready": auth_ready,
-                "refresh_supported": bool(
-                    state.get("refresh_supported") or refreshable
-                ),
+                "refresh_supported": bool(state.get("refresh_supported") or refreshable),
                 "refreshable": refreshable,
                 "relogin_required": relogin_required,
                 "ready": bool(state.get("ready")),
                 "auth_mode": auth_mode,
                 "plan_type": state.get("plan_type"),
-                "default_model": _public_model_id(state.get("default_model"))
-                or "알 수 없음",
-                "base_default_model": _public_model_id(
-                    state.get("base_default_model")
-                )
-                or None,
+                "default_model": _public_model_id(state.get("default_model")) or "알 수 없음",
+                "base_default_model": _public_model_id(state.get("base_default_model")) or None,
                 "model_overridden": bool(state.get("model_overridden")),
-                "model_managed_by_environment": bool(
-                    state.get("model_managed_by_environment")
-                ),
+                "model_managed_by_environment": bool(state.get("model_managed_by_environment")),
                 "model_source": _public_model_text(state.get("model_source")),
-                "model_override_scope": _public_model_text(
-                    state.get("model_override_scope")
-                )
+                "model_override_scope": _public_model_text(state.get("model_override_scope"))
                 or None,
                 "settings_error": (
                     _public_warning(state.get("settings_error"))
                     if state.get("settings_error")
                     else None
                 ),
-                "warnings": [
-                    _public_warning(item) for item in state.get("warnings") or []
-                ],
-                "supports_local_logout": (
-                    provider_id in {"grok", "gemini"}
-                ),
-                "local_credentials_present": bool(
-                    state.get("local_credentials_present")
-                ),
-                "pending_login_present": bool(
-                    state.get("pending_login_present")
-                ),
+                "warnings": [_public_warning(item) for item in state.get("warnings") or []],
+                "supports_local_logout": (provider_id in {"grok", "gemini"}),
+                "local_credentials_present": bool(state.get("local_credentials_present")),
+                "pending_login_present": bool(state.get("pending_login_present")),
                 "login_transport": (
                     "browser" if provider_id in {"grok", "gemini"} else "external_cli"
                 ),
@@ -443,12 +416,9 @@ class ConnectionManager:
                 "authenticated": sum(item["authenticated"] for item in public.values()),
                 "connected": sum(item["logged_in"] for item in public.values()),
                 "refreshable": sum(item["refreshable"] for item in public.values()),
-                "relogin_required": sum(
-                    item["relogin_required"] for item in public.values()
-                ),
+                "relogin_required": sum(item["relogin_required"] for item in public.values()),
                 "consent_required": sum(
-                    item["logged_in"] and not item["consent"]
-                    for item in public.values()
+                    item["logged_in"] and not item["consent"] for item in public.values()
                 ),
                 "total": len(public),
             },
@@ -460,9 +430,7 @@ class ConnectionManager:
             return "ready"
         if state["refreshable"]:
             return "refreshable"
-        if state["relogin_required"] or (
-            state["account_present"] and not state["logged_in"]
-        ):
+        if state["relogin_required"] or (state["account_present"] and not state["logged_in"]):
             return "relogin_required"
         if state["logged_in"] or state["auth_ready"]:
             return "signed_in"
@@ -482,9 +450,7 @@ class ConnectionManager:
             "image_generation": "이미지 생성",
         }
         return [
-            labels[key]
-            for key in labels
-            if bool((capabilities.get(key) or {}).get("supported"))
+            labels[key] for key in labels if bool((capabilities.get(key) or {}).get("supported"))
         ]
 
     def grant_consent(self, provider: str, *, confirmation: str) -> Dict[str, Any]:
@@ -706,7 +672,9 @@ class ConnectionManager:
         provider = _provider(provider)
         value = str(code_or_url or "").strip()
         if not value:
-            raise ConnectionError("리디렉션 URL이나 인증 코드를 입력해 주세요.", code="code_required")
+            raise ConnectionError(
+                "리디렉션 URL이나 인증 코드를 입력해 주세요.", code="code_required"
+            )
         with self._lock:
             self._ensure_open()
             job = self._jobs.get(str(job_id or ""))
@@ -820,43 +788,25 @@ class ConnectionManager:
                 "agent_hub_catalog",
                 {"provider": provider, "refresh": True},
             )
-            daemon_data = (
-                daemon_result.get("data")
-                if isinstance(daemon_result, dict)
-                else None
-            )
+            daemon_data = daemon_result.get("data") if isinstance(daemon_result, dict) else None
             daemon_entry = (
                 (daemon_data.get("providers") or {}).get(provider)
-                if isinstance(daemon_data, dict)
-                and isinstance(daemon_data.get("providers"), dict)
+                if isinstance(daemon_data, dict) and isinstance(daemon_data.get("providers"), dict)
                 else None
             )
-            worker_result = (
-                daemon_entry.get("result")
-                if isinstance(daemon_entry, dict)
-                else None
-            )
-            worker_data = (
-                worker_result.get("data")
-                if isinstance(worker_result, dict)
-                else None
-            )
+            worker_result = daemon_entry.get("result") if isinstance(daemon_entry, dict) else None
+            worker_data = worker_result.get("data") if isinstance(worker_result, dict) else None
             live_payload = (
                 (worker_data.get("models") or {}).get(provider)
-                if isinstance(worker_data, dict)
-                and isinstance(worker_data.get("models"), dict)
+                if isinstance(worker_data, dict) and isinstance(worker_data.get("models"), dict)
                 else None
             )
             if live_payload is None:
-                result = operations.dispatch_tool(
-                    "agent_hub_list_models",
-                    {"provider": provider, "probe": True},
-                )
+                result = provider_runtime.catalog(provider, refresh=True)
                 data = result.get("data") if isinstance(result, dict) else None
                 live_payload = (
                     (data.get("models") or {}).get(provider)
-                    if isinstance(data, dict)
-                    and isinstance(data.get("models"), dict)
+                    if isinstance(data, dict) and isinstance(data.get("models"), dict)
                     else None
                 )
             if _live_model_payload(provider, live_payload):
@@ -873,9 +823,7 @@ class ConnectionManager:
             model_id = _public_model_id(item.get("id") or item.get("model"))
             if not model_id or model_id in seen:
                 continue
-            display = _public_model_text(
-                item.get("display") or item.get("displayName") or model_id
-            )
+            display = _public_model_text(item.get("display") or item.get("displayName") or model_id)
             models.append(
                 {
                     "id": model_id,
@@ -957,8 +905,7 @@ class ConnectionManager:
                     str(catalog_revision or ""),
                 )
                 and float(catalog.get("expires_at") or 0) >= time.monotonic()
-                and catalog.get("auth_generation")
-                == self._auth_generations[provider]
+                and catalog.get("auth_generation") == self._auth_generations[provider]
             )
             allowed = set(catalog.get("ids") or ()) if valid_catalog else set()
             if not valid_catalog:
@@ -971,15 +918,7 @@ class ConnectionManager:
                     "현재 제공자 모델 목록에 없는 모델은 저장할 수 없습니다.",
                     code="model_not_available",
                 )
-            result = operations.dispatch_tool(
-                "agent_hub_update_settings",
-                {
-                    "provider": provider,
-                    "model": requested,
-                    "task": "chat" if provider == "gemini" else None,
-                    "validate": False,
-                },
-            )
+            result = provider_runtime.set_default_model(provider, requested)
             if not isinstance(result, dict) or result.get("success") is False:
                 raise ConnectionError(
                     "선택한 모델을 저장하지 못했습니다. 다시 시도해 주세요.",
@@ -1013,26 +952,18 @@ class ConnectionManager:
                 "진행 중인 로그인이 끝난 뒤 기본 모델을 초기화해 주세요.",
             )
             current = self.status(provider)["providers"][provider]
-            if (
-                current["model_managed_by_environment"]
-                and not current["model_overridden"]
-            ):
+            if current["model_managed_by_environment"] and not current["model_overridden"]:
                 raise ConnectionError(
                     "이 모델은 환경 설정에서 관리되고 있어 웹 화면에서 초기화할 수 없습니다.",
                     code="model_managed_by_environment",
                 )
-            result = operations.dispatch_tool(
-                "agent_hub_reset_settings",
-                {
-                    "provider": provider,
-                    "reset": "model",
-                    "task": (
-                        "chat"
-                        if provider == "gemini"
-                        and current.get("model_override_scope") == "task:chat"
-                        else None
-                    ),
-                },
+            result = provider_runtime.reset_default_model(
+                provider,
+                gemini_task=(
+                    "chat"
+                    if provider == "gemini" and current.get("model_override_scope") == "task:chat"
+                    else None
+                ),
             )
             if not isinstance(result, dict) or result.get("success") is False:
                 raise ConnectionError(
@@ -1091,8 +1022,7 @@ class ConnectionManager:
                     code="oauth_flow_id_missing",
                 )
             action_url = _login_url(
-                started.get("verification_uri_complete")
-                or started.get("verification_uri"),
+                started.get("verification_uri_complete") or started.get("verification_uri"),
                 hosts={"accounts.x.ai", "auth.x.ai"},
             )
         except ConnectionError:
@@ -1107,8 +1037,7 @@ class ConnectionManager:
         except Exception as exc:  # noqa: BLE001
             self._clear_pending_flow("grok", locals().get("flow_id"))
             raise ConnectionError(
-                "Grok 로그인을 시작하지 못했습니다. "
-                "네트워크 상태를 확인하고 다시 시도해 주세요.",
+                "Grok 로그인을 시작하지 못했습니다. 네트워크 상태를 확인하고 다시 시도해 주세요.",
                 code="login_start_failed",
             ) from exc
         cancel_event = threading.Event()
@@ -1215,8 +1144,7 @@ class ConnectionManager:
             if callback_server is not None:
                 callback_server.server_close()
             raise ConnectionError(
-                "Gemini 로그인을 시작하지 못했습니다. "
-                "네트워크 상태를 확인하고 다시 시도해 주세요.",
+                "Gemini 로그인을 시작하지 못했습니다. 네트워크 상태를 확인하고 다시 시도해 주세요.",
                 code="login_start_failed",
             ) from exc
 
@@ -1279,9 +1207,7 @@ class ConnectionManager:
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                callback_url = (
-                    f"http://localhost:{google_oauth.LOCAL_PORT}{self.path}"
-                )
+                callback_url = f"http://localhost:{google_oauth.LOCAL_PORT}{self.path}"
                 try:
                     google_oauth.validate_callback_state(
                         callback_url,
@@ -1315,10 +1241,7 @@ class ConnectionManager:
                         manager._update_job(
                             job_id,
                             state="failed",
-                            message=(
-                                "Gemini 로그인을 완료하지 못했습니다. "
-                                "다시 시도해 주세요."
-                            ),
+                            message=("Gemini 로그인을 완료하지 못했습니다. 다시 시도해 주세요."),
                         )
                         title = "로그인을 완료하지 못했습니다."
                     else:
@@ -1448,11 +1371,7 @@ class ConnectionManager:
         try:
             with self._lock:
                 job = self._jobs.get(job_id)
-                if (
-                    self._closed
-                    or job is None
-                    or job.state not in ACTIVE_JOB_STATES
-                ):
+                if self._closed or job is None or job.state not in ACTIVE_JOB_STATES:
                     return
                 process = subprocess.Popen(
                     command,
@@ -1508,11 +1427,7 @@ class ConnectionManager:
     ) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
-            if (
-                self._closed
-                or job is None
-                or job.state not in ACTIVE_JOB_STATES
-            ):
+            if self._closed or job is None or job.state not in ACTIVE_JOB_STATES:
                 return
         try:
             result = self._command_runner(
@@ -1670,11 +1585,7 @@ class ConnectionManager:
         auth_changed = False
         with self._lock:
             job = self._jobs.get(job_id)
-            if (
-                self._closed
-                or job is None
-                or job.state not in ACTIVE_JOB_STATES
-            ):
+            if self._closed or job is None or job.state not in ACTIVE_JOB_STATES:
                 return
             if self._auth_generations[provider] != auth_generation:
                 self._update_job(
@@ -1703,16 +1614,8 @@ class ConnectionManager:
                     },
                 },
             )
-            daemon_data = (
-                daemon_result.get("data")
-                if isinstance(daemon_result, dict)
-                else None
-            )
-            execution_result = (
-                daemon_data.get("result")
-                if isinstance(daemon_data, dict)
-                else None
-            )
+            daemon_data = daemon_result.get("data") if isinstance(daemon_result, dict) else None
+            execution_result = daemon_data.get("result") if isinstance(daemon_data, dict) else None
             generated = bool(
                 daemon_result
                 and daemon_result.get("success")
@@ -1725,57 +1628,7 @@ class ConnectionManager:
                     or ""
                 ).strip()
             )
-            if daemon_result is not None:
-                success = generated
-            elif provider == "gemini":
-                generated_result = operations.dispatch_tool(
-                    "agent_hub_chat",
-                    {
-                        "provider": "gemini",
-                        "model": selected_model,
-                        "prompt": GEMINI_CONNECTION_TEST_PROMPT,
-                        "temperature": 0.0,
-                        "max_tokens": GEMINI_CONNECTION_TEST_MAX_TOKENS,
-                        "grounding": "off",
-                        "stream": False,
-                        "tools": [],
-                        "retry_count": 0,
-                        "retry_sleep_cap_sec": 0,
-                        "timeout_sec": GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS,
-                        "policy_mode": "off",
-                    },
-                )
-                generated_data = (
-                    generated_result.get("data")
-                    if isinstance(generated_result.get("data"), dict)
-                    else {}
-                )
-                generated = (
-                    bool(generated_result.get("success"))
-                    and generated_result.get("provider") == "gemini"
-                    and generated_result.get("model") == selected_model
-                    and bool(str(generated_result.get("text") or "").strip())
-                    and not bool(generated_data.get("capacity_fallback"))
-                )
-                success = generated
-            else:
-                generated_result = operations.dispatch_tool(
-                    "agent_hub_chat",
-                    {
-                        "provider": provider,
-                        "model": selected_model,
-                        "prompt": GEMINI_CONNECTION_TEST_PROMPT,
-                        "temperature": 0.0,
-                        "max_tokens": GEMINI_CONNECTION_TEST_MAX_TOKENS,
-                        "stream": False,
-                        "timeout_sec": GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS,
-                    },
-                )
-                generated = bool(
-                    generated_result.get("success")
-                    and str(generated_result.get("text") or "").strip()
-                )
-                success = generated
+            success = bool(daemon_result is not None and generated)
         except Exception:  # noqa: BLE001
             self._update_job(
                 job_id,
@@ -1995,11 +1848,7 @@ class ConnectionManager:
     def _prune_jobs(self) -> None:
         cutoff = time.time() - JOB_TTL_SECONDS
         with self._lock:
-            expired = [
-                job_id
-                for job_id, job in self._jobs.items()
-                if job.updated_at < cutoff
-            ]
+            expired = [job_id for job_id, job in self._jobs.items() if job.updated_at < cutoff]
             for job_id in expired:
                 self._jobs.pop(job_id, None)
             if len(self._jobs) >= MAX_JOBS:

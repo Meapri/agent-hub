@@ -10,7 +10,6 @@ from typing import Any
 from .context import index_project
 from .daemon import DEFAULT_SOCKET_PATH, HubDaemonClient
 from .errors import HubV2Error
-from .migrate import apply_v1_import, plan_v1_import
 from .policy import apply_policy_update, load_policy, prepare_policy_update
 from .release import apply_switch, plan_rollback, plan_update
 from .repair import apply_repair, plan_repair
@@ -54,19 +53,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     repair.add_argument("--apply", action="store_true")
     repair.add_argument("--proposal-sha256")
-
-    migrate = sub.add_parser("migrate-v1", help="Plan or import v1 run metadata.")
-    migrate.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    migrate.add_argument(
-        "--source-dir",
-        default=str(Path("~/.orchestrate_codex/runs").expanduser()),
-    )
-    migrate.add_argument(
-        "--state-db",
-        default=str(DEFAULT_STATE_DIR / DEFAULT_DB_NAME),
-    )
-    migrate.add_argument("--apply", action="store_true")
-    migrate.add_argument("--proposal-sha256")
 
     context = sub.add_parser("index", help="Build the local FTS5 project index.")
     context.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -150,21 +136,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "repair": "prepare" if args.repair else "none",
                 },
             },
-        )
-    if args.command == "migrate-v1":
-        proposal = plan_v1_import(args.source_dir)
-        if not args.apply:
-            return proposal
-        if args.proposal_sha256 != proposal["plan_sha256"]:
-            raise HubV2Error(
-                "proposal_digest_required",
-                "Pass the plan_sha256 from the reviewed migration plan.",
-                scope="cli",
-            )
-        return apply_v1_import(
-            HubStore(args.state_db),
-            plan=proposal,
-            plan_sha256=proposal["plan_sha256"],
         )
     if args.command == "repair":
         proposal = plan_repair(args.state_db)

@@ -3,13 +3,13 @@
 This module absorbs the useful routing and prompt-building surface from the
 old Gemini Writing Copilot while using this plugin's Antigravity chat path.
 
-Doc-class split (aligned with orchestrate-codex, no hard dependency):
+Doc-class split (aligned with Agent Hub V2, no hard dependency):
 - **durable** (readme, technical-doc): 1-shot leaf — fact pack on, git diary off.
 - **change** (pr-description, release-notes): git context allowed via auto.
 - **transform** (polish, translate, …): source-first, git off by default.
 
-Multi-step outline→draft→verify still belongs in orchestrate-codex
-``durable_readme``; this leaf enforces durable *safety* when called directly.
+Multi-step outline→draft→verify belongs in the Agent Hub V2 durable run;
+this provider helper enforces durable *safety* when called directly.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ TASK_GUIDANCE = {
     "custom": "Follow the user's explicit instruction exactly.",
 }
 
-# Leaf durable class — mirrors orchestrate-codex durable (not multi-step).
+# Provider durable class — mirrors Agent Hub V2 durable behavior (not multi-step).
 DURABLE_TASKS = frozenset({"readme", "technical-doc"})
 CHANGE_TASKS = frozenset({"pr-description", "release-notes"})
 
@@ -224,9 +224,10 @@ def read_source(arguments: Dict[str, Any]) -> str:
         chunks.append(text)
     source_file = str(arguments.get("source_file") or "").strip()
     if source_file:
-        workspace_root = str(
-            arguments.get("workspace_root") or arguments.get("project_root") or ""
-        ).strip() or None
+        workspace_root = (
+            str(arguments.get("workspace_root") or arguments.get("project_root") or "").strip()
+            or None
+        )
         path = security.resolve_allowed_path(
             source_file,
             purpose="source_file",
@@ -299,7 +300,9 @@ def collect_project_context(arguments: Dict[str, Any], task: str) -> str:
         "Diff stat:\n" + (_run_git(root, ["diff", "--stat"]) or "[none]"),
     ]
     if requested == "git-diff":
-        sections.append("Diff:\n" + (_run_git(root, ["diff", "--", "."], timeout_sec=30) or "[none]"))
+        sections.append(
+            "Diff:\n" + (_run_git(root, ["diff", "--", "."], timeout_sec=30) or "[none]")
+        )
     context = "\n\n".join(sections)
     return context[:max_chars]
 
@@ -310,7 +313,9 @@ def collect_durable_context(arguments: Dict[str, Any], task: str) -> Dict[str, A
         return {"used": False, "text": ""}
     if arguments.get("fact_pack") is False:
         return {"used": False, "text": "", "skipped": True}
-    root = str(arguments.get("project_root") or arguments.get("workspace_root") or ".").strip() or "."
+    root = (
+        str(arguments.get("project_root") or arguments.get("workspace_root") or ".").strip() or "."
+    )
     try:
         facts = doc_facts.collect_durable_facts(root)
     except Exception as exc:  # noqa: BLE001
@@ -357,8 +362,8 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
             " This is a durable product document: use the fact pack and provided source only. "
             "Never turn session work, recent commits, or debug notes into product claims. "
             "Do not emit TODO, TBD, placeholder, or 'fill this later' markers in a final document. "
-            "For multi-step README pipelines (outline→draft→verify), prefer orchestrate-codex "
-            "durable_readme; this path is a single durable-safe pass."
+            "For multi-step README pipelines (outline→draft→verify), prefer the Agent Hub V2 "
+            "plan/start/continue workflow; this path is a single durable-safe pass."
         )
     parts = [
         f"Task: {task}",
@@ -379,7 +384,11 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
         parts.append(f"Length:\n{length}")
     if context:
         # For durable, still allow explicit context but label it carefully
-        label = "Additional context (do not treat as session diary if durable)" if durable else "Additional context"
+        label = (
+            "Additional context (do not treat as session diary if durable)"
+            if durable
+            else "Additional context"
+        )
         parts.append(f"{label}:\n{context}")
     if durable_ctx.get("text"):
         parts.append(f"Durable fact pack:\n{redact(durable_ctx['text'])}")
@@ -415,11 +424,16 @@ def review_text(text: str, *, durable: bool = False) -> List[str]:
 
 def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
     built = build_prompt(arguments)
-    model = model_prefs.resolve_model(
-        explicit=str(arguments.get("model") or os.getenv("GOOGLE_ANTIGRAVITY_WRITING_MODEL") or ""),
-        task="writing",
-        fallback=DEFAULT_MODEL,
-    ) or DEFAULT_MODEL
+    model = (
+        model_prefs.resolve_model(
+            explicit=str(
+                arguments.get("model") or os.getenv("GOOGLE_ANTIGRAVITY_WRITING_MODEL") or ""
+            ),
+            task="writing",
+            fallback=DEFAULT_MODEL,
+        )
+        or DEFAULT_MODEL
+    )
     chat_response = chat.run_chat(
         {
             "prompt": built["prompt"],
@@ -429,19 +443,16 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "temperature": arguments.get("temperature", 0.35),
             "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
             "thinking_level": arguments.get("reasoning_effort"),
-            "timeout_sec": (
-                arguments.get("timeout_sec")
-                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-            ),
-            "retry_count": arguments.get(
-                "retry_count", limits.MAX_PROVIDER_RETRIES
-            ),
+            "timeout_sec": (arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS),
+            "retry_count": arguments.get("retry_count", limits.MAX_PROVIDER_RETRIES),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
         }
     )
     text = str(chat_response.get("text") or "").strip()
     warnings = review_text(text, durable=bool(built.get("durable")))
-    warnings.extend(str(item) for item in chat_response.get("warnings") or [] if str(item) not in warnings)
+    warnings.extend(
+        str(item) for item in chat_response.get("warnings") or [] if str(item) not in warnings
+    )
     finish_reason = str(chat_response.get("finish_reason") or "stop").lower()
     incomplete = finish_reason in {"max_tokens", "length"} or chat_response.get("success") is False
     diagnostics = dict(chat_response.get("diagnostics") or {})

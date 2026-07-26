@@ -34,6 +34,22 @@ def test_shadow_routing_never_changes_planner_choice(tmp_path):
     assert decision["reason_code"] == "shadow_preserves_planner"
 
 
+def test_pinned_routing_keeps_the_explicit_provider(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+
+    decision = route(
+        store=store,
+        task=_task(),
+        planner_provider="gpt",
+        routing_mode="pinned",
+        provider_allowlist=list(_ready()),
+        readiness=_ready(),
+    )
+
+    assert decision["selected_provider"] == "gpt"
+    assert decision["reason_code"] == "pinned_preserves_planner"
+
+
 def test_auto_preserves_planner_until_exact_context_has_twenty_samples(tmp_path):
     store = HubStore(tmp_path / "state.sqlite3")
     context = routing_context(_task())

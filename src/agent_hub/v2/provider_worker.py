@@ -10,11 +10,10 @@ import json
 import sys
 from typing import Any, Mapping
 
-from agent_hub import operations
-
 from .contracts import ensure_public_model_id, require_object, validate_task
 from .errors import HubV2Error, public_failure, safe_unexpected_error
 from .provider_manifests import manifest_for
+from . import provider_runtime
 
 WORKER_PROTOCOL = "agent_hub_provider_worker_v2"
 MAX_REQUEST_CHARS = 4_000_000
@@ -30,20 +29,46 @@ def _payload(result: Any) -> dict[str, Any]:
     )
 
 
-def _status(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
-    return _payload(
-        operations.dispatch_tool(
-            "agent_hub_status",
-            {"provider": provider, "probe": bool(params.get("probe", False))},
-        )
+def _raise_failed_payload(result: Mapping[str, Any]) -> None:
+    if result.get("success") is not False:
+        return
+    error = result.get("error")
+    candidate = ""
+    if isinstance(error, Mapping):
+        candidate = str(error.get("type") or error.get("code") or "")
+    elif isinstance(error, str):
+        candidate = error
+    if not candidate:
+        candidate = str(result.get("error_type") or "")
+    code = (
+        candidate[:64]
+        if candidate.replace("_", "").replace("-", "").isalnum()
+        else "provider_operation_failed"
+    )
+    raise HubV2Error(
+        code or "provider_operation_failed",
+        "The provider could not complete the requested operation.",
+        scope="provider",
+        retryable=code
+        in {
+            "codex_process_error",
+            "codex_timeout",
+            "provider_timeout",
+            "rate_limit",
+            "temporary_unavailable",
+        },
+        safe_details={"reason_code": code or "provider_operation_failed"},
     )
 
 
+def _status(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    return _payload(provider_runtime.status(provider, probe=bool(params.get("probe", False))))
+
+
 def _catalog(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
-    arguments: dict[str, Any] = {"provider": provider}
-    if params.get("refresh") is True:
-        arguments["refresh"] = True
-    result = _payload(operations.dispatch_tool("agent_hub_list_models", arguments))
+    result = _payload(
+        provider_runtime.catalog(provider, refresh=bool(params.get("refresh", False)))
+    )
     models = (
         result.get("data", {}).get("models", {}).get(provider, {}).get("models", [])
         if isinstance(result.get("data"), Mapping)
@@ -84,8 +109,8 @@ def _invoke_arguments(
             **common,
             "instruction": intent,
             "source_text": inline,
-            # v2 accounts for review and revision as explicit DAG steps. Hidden
-            # v1 rewrites would bypass the run's leaf-call and time budgets.
+            # V2 accounts for review and revision as explicit DAG steps. Hidden
+            # provider-side rewrites would bypass run leaf/time budgets.
             "quality_rewrite_attempts": 0,
         }
     if capability == "image":
@@ -108,7 +133,9 @@ def _invoke(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
     )
     if model is not None:
         arguments["model"] = ensure_public_model_id(model)
-    return _payload(operations.dispatch_tool(tool, arguments))
+    result = _payload(provider_runtime.invoke(provider, task["capability"], arguments))
+    _raise_failed_payload(result)
+    return result
 
 
 def _plan(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -122,27 +149,40 @@ def _plan(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
         )
     prompt = str(params.get("planner_prompt") or task["intent"])
     model = params.get("model")
-    arguments: dict[str, Any] = {
-        "workflow_id": "adaptive",
-        "prompt": prompt,
-        "project_root": project_root,
-        "policy_mode": "required",
-        "handoff_mode": "off",
-        "planner_provider": provider,
-    }
     constraints = task.get("constraints")
-    if isinstance(constraints, Mapping):
-        if constraints.get("max_leaf_calls") is not None:
-            arguments["max_leaf_calls"] = int(constraints["max_leaf_calls"])
-        if constraints.get("max_tokens") is not None:
-            arguments["planner_max_tokens"] = int(constraints["max_tokens"])
-        if constraints.get("timeout_seconds") is not None:
-            timeout = float(constraints["timeout_seconds"])
-            arguments["workflow_timeout"] = timeout
-            arguments["per_call_timeout"] = timeout
-    if model is not None:
-        arguments["planner_model"] = ensure_public_model_id(model)
-    result = _payload(operations.dispatch_tool("agent_hub_plan_workflow", arguments))
+    try:
+        result = _payload(
+            provider_runtime.plan(
+                provider,
+                prompt=prompt,
+                model=(ensure_public_model_id(model) if model is not None else None),
+                max_steps=16,
+                max_leaf_calls=int(
+                    constraints.get("max_leaf_calls") or 100
+                    if isinstance(constraints, Mapping)
+                    else 100
+                ),
+                max_tokens=int(
+                    constraints.get("max_tokens") or 131_072
+                    if isinstance(constraints, Mapping)
+                    else 131_072
+                ),
+                timeout_seconds=float(
+                    constraints.get("timeout_seconds") or 1790
+                    if isinstance(constraints, Mapping)
+                    else 1790
+                ),
+            )
+        )
+    except HubV2Error as exc:
+        reason = str(exc.safe_details.get("reason_code") or exc.code)
+        raise HubV2Error(
+            "planner_execution_failed",
+            "The planner could not produce a valid plan.",
+            scope="planner",
+            retryable=exc.retryable,
+            safe_details={"reason_code": reason[:64]},
+        ) from None
     if result.get("success") is False:
         error = result.get("error")
         reason = ""

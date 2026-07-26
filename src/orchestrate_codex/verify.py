@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from . import catalog, document_quality
+from . import document_quality
 
 # Recency/session-diary TONE, not vocabulary — "session diary" as a bare noun is dropped
 # because durable docs that describe the policy legitimately mention it.
@@ -21,9 +21,19 @@ RECENCY_PATTERNS = [
     # VOCABULARY that durable meta-docs legitimately describe, not recency tone.
 ]
 
-# Leaf tools this orchestrator knows about — legitimate references in its own docs even
-# though they're defined in sibling repos (so not in the local fact pack).
-_KNOWN_LEAF_TOOLS = {c["leaf"] for c in catalog.CAPABILITIES} | set(catalog.LATEST_MODELS)
+# Private provider tools are legitimate references in Agent Hub documentation even
+# though the compact public surface does not expose them directly.
+_KNOWN_LEAF_TOOLS = {
+    "claude_codex_chat",
+    "grok_codex_chat",
+    "openai_codex_chat",
+    "google_antigravity_chat",
+    "google_antigravity_write",
+    "google_grounded_search",
+    "google_antigravity_generate_image",
+    "google_antigravity_review_diff",
+    "google_antigravity_compare_models",
+}
 
 # Standard per-provider CLI/console commands present in every leaf repo (e.g. the MCP
 # launcher `grok_codex_mcp`, `*_doctor`, `*_consent`). A meta-doc referencing these is

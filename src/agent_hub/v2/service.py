@@ -14,7 +14,8 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from agent_hub import __version__, operations
+from agent_hub import __version__
+from agent_hub.core import handoff as handoff_state
 from agent_hub.doctor import run_doctor
 
 from .context import index_project, search_fact_pack
@@ -140,6 +141,23 @@ class HubService:
     def _worker(self, provider: str) -> ProviderWorkerClient:
         manifest_for(provider)
         return self._worker_factory(provider)
+
+    @staticmethod
+    def _safe_provider_error(
+        error: HubV2Error,
+        *,
+        provider: str,
+    ) -> HubV2Error:
+        return HubV2Error(
+            error.code,
+            "The provider could not complete the requested operation.",
+            scope="provider",
+            retryable=error.retryable,
+            safe_details={
+                "provider": provider,
+                "reason_code": error.code,
+            },
+        )
 
     @staticmethod
     def _enforce_task_policy(
@@ -347,12 +365,13 @@ class HubService:
                     "result": result,
                 }
             except HubV2Error as exc:
+                safe_error = self._safe_provider_error(exc, provider=provider_id)
                 catalog[provider_id] = {
                     "manifest": manifest,
                     "auth_state": "unavailable",
                     "catalog_state": "unavailable",
                     "generation_state": "unknown",
-                    "error": exc.public(),
+                    "error": safe_error.public(),
                 }
         return {"schema": "agent_hub_catalog_v2", "providers": catalog}
 
@@ -402,7 +421,7 @@ class HubService:
             store=self.store,
             task=task,
             planner_provider=planner_provider,
-            routing_mode="legacy" if explicit else "shadow",
+            routing_mode="pinned" if explicit else "shadow",
             provider_allowlist=allowed,
             readiness=readiness,
             circuit_open={
@@ -431,7 +450,7 @@ class HubService:
                     generation_state="failed",
                     reason_code=exc.code,
                 )
-            raise
+            raise self._safe_provider_error(exc, provider=provider) from None
         self.store.record_provider_outcome(provider=provider, success=True)
         resolved_model = str(result.get("model") or arguments.get("model") or "")
         if resolved_model:
@@ -537,7 +556,7 @@ class HubService:
             task["intent"] + "\n\nApproved project manifest (source contents are intentionally "
             "excluded from this planning call):\n"
             + _planner_manifest_summary(verified["manifest"])
-            + "\n\nAgent Hub v2 compatibility constraints: use only chat, "
+            + "\n\nAgent Hub runtime planner constraints: use only chat, "
             "inspect_codebase, search, write, and review_text steps. Do not use "
             "compare, verify, review_diff, release_snapshot, or release_draft. "
             "Use review_text or a final write step to incorporate review findings."
@@ -1475,32 +1494,98 @@ class HubService:
         project_root = str(arguments.get("project_root") or "")
         supplied = arguments.get("arguments")
         extra = dict(supplied) if isinstance(supplied, Mapping) else {}
-        extra["project_root"] = project_root
-        mapping = {
-            "get": "agent_hub_get_handoff",
-            "prepare_update": "agent_hub_prepare_handoff_update",
-            "apply_update": "agent_hub_apply_handoff_update",
-            "takeover": "agent_hub_prepare_takeover",
-        }
-        tool = mapping.get(action)
-        if tool is None:
-            raise HubV2Error(
-                "invalid_request",
-                "handoff action is not supported.",
-                scope="handoff",
+        if action == "get":
+            snapshot = handoff_state.load_handoff(
+                project_root,
+                mode=str(extra.get("mode") or "auto"),
+                search=str(extra.get("search") or "nearest"),
+                file=str(extra.get("file") or ""),
+                max_chars=int(extra.get("max_chars") or handoff_state.DEFAULT_MAX_CHARS),
             )
-        result = operations.dispatch_tool(tool, extra)
-        if not isinstance(result, Mapping):
-            raise HubV2Error(
-                "handoff_protocol_error",
-                "The handoff subsystem returned an invalid result.",
-                scope="handoff",
+            return {
+                "success": True,
+                "text": (
+                    handoff_state.render_context(snapshot)
+                    if snapshot.get("loaded")
+                    else "No project handoff was found."
+                ),
+                "handoff": handoff_state.public_snapshot(snapshot),
+            }
+        if action == "prepare_update":
+            kwargs: dict[str, Any] = {
+                "body": str(extra.get("body") or ""),
+                "file": str(extra.get("file") or ""),
+                "search": str(extra.get("search") or "project-only"),
+            }
+            if "base_managed_sha256" in extra:
+                kwargs["base_managed_sha256"] = extra.get("base_managed_sha256")
+            return {
+                "success": True,
+                "text": "Handoff update prepared; no file was changed.",
+                **handoff_state.prepare_handoff_update(project_root, **kwargs),
+            }
+        if action == "apply_update":
+            if "expected_sha256" not in extra:
+                raise HubV2Error(
+                    "invalid_request",
+                    "expected_sha256 is required for a handoff update.",
+                    scope="handoff",
+                )
+            return {
+                "success": True,
+                "text": "HANDOFF.md updated atomically.",
+                **handoff_state.apply_handoff_update(
+                    project_root,
+                    file=str(extra.get("file") or ""),
+                    content=str(extra.get("content") or ""),
+                    expected_sha256=extra.get("expected_sha256"),
+                ),
+            }
+        if action == "takeover":
+            run = self.store.get_run(
+                str(extra.get("run_id") or ""),
+                project_root=project_root,
             )
-        return dict(result)
+            plan = self.store.get_plan(run["run_id"])
+            artifact_ids = sorted(
+                {
+                    artifact_id
+                    for step in run["steps"]
+                    for artifact_id in step["output_artifact_ids"]
+                }
+            )
+            artifacts = [
+                {
+                    "artifact_id": artifact_id,
+                    "content_sha256": self.store.get_artifact(artifact_id)["content_sha256"],
+                }
+                for artifact_id in artifact_ids
+            ]
+            capsule = {
+                "schema": "agent_hub_takeover_capsule_v2",
+                "run_id": run["run_id"],
+                "revision": run["revision"],
+                "status": run["status"],
+                "plan_sha256": str(plan.get("plan_sha256") or ""),
+                "artifacts": artifacts,
+            }
+            return {
+                "success": True,
+                "text": "Takeover capsule prepared from the durable run store.",
+                "capsule": {
+                    **capsule,
+                    "capsule_sha256": sha256(canonical_json(capsule).encode("utf-8")).hexdigest(),
+                },
+            }
+        raise HubV2Error(
+            "invalid_request",
+            "handoff action is not supported.",
+            scope="handoff",
+        )
 
     def _tool_doctor(self, arguments: dict[str, Any]) -> dict[str, Any]:
         project_root = str(arguments.get("project_root") or "")
-        v1 = run_doctor(
+        host_checks = run_doctor(
             project_root,
             live=bool(arguments.get("live", False)),
         )
@@ -1516,11 +1601,11 @@ class HubService:
                         "reason_code": "store_integrity_failed",
                     }
                 )
-            for check in v1.get("checks", []):
+            for check in host_checks.get("checks", []):
                 if check.get("status") == "fail":
                     repair_plan.append(
                         {
-                            "action": "review_v1_check",
+                            "action": "review_host_check",
                             "automatic": False,
                             "check_id": check.get("id"),
                         }
@@ -1528,7 +1613,7 @@ class HubService:
         return {
             "schema": "agent_hub_doctor_v2",
             "store": store_health,
-            "compatibility": v1,
+            "host_checks": host_checks,
             "repair_plan": repair_plan,
             "read_only": True,
         }

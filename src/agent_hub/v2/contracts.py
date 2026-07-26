@@ -46,7 +46,7 @@ RUN_STATUSES = frozenset(
         "outcome_unknown",
     }
 )
-ROUTING_MODES = frozenset({"legacy", "shadow", "advisory", "auto"})
+ROUTING_MODES = frozenset({"pinned", "shadow", "advisory", "auto"})
 RETENTION_MODES = frozenset({"ephemeral", "durable_private", "exportable"})
 SENSITIVITY_LEVELS = frozenset({"public", "project", "sensitive", "secret"})
 

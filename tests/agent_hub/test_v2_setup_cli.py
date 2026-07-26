@@ -1,26 +1,49 @@
 from __future__ import annotations
 
+import importlib.util
+import subprocess
+import sys
+
+import pytest
+
 from agent_hub import local_setup
-from agent_hub.v2.migrate import apply_v1_import, plan_v1_import
 from agent_hub.v2.setup import apply_setup, plan_setup
-from agent_hub.v2.store import HubStore
 
 
-def test_local_setup_can_render_v2_bridge_without_changing_v1_default(tmp_path):
+def test_local_setup_renders_only_the_canonical_bridge(tmp_path):
     for relative in local_setup.CONFIG_PATHS:
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
-    v1 = local_setup.plan_setup(tmp_path)
-    v2 = local_setup.plan_setup(tmp_path, hub_executable="agent-hub-v2-mcp")
+    plan = local_setup.plan_setup(tmp_path)
 
-    v1_codex = next(
-        item.rendered for item in v1.changes if item.relative_path == ".codex/config.toml"
+    codex = next(
+        item.rendered for item in plan.changes if item.relative_path == ".codex/config.toml"
     )
-    v2_codex = next(
-        item.rendered for item in v2.changes if item.relative_path == ".codex/config.toml"
+    assert b"agent-hub-mcp" in codex
+    with pytest.raises(local_setup.SetupError, match="unsupported"):
+        local_setup.plan_setup(tmp_path, hub_executable="agent-hub-v2-mcp")
+
+
+def test_cli_help_has_no_retired_migration_command():
+    result = subprocess.run(
+        [sys.executable, "-m", "agent_hub.v2.cli", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert b"agent-hub-mcp" in v1_codex
-    assert b"agent-hub-v2-mcp" not in v1_codex
-    assert b"agent-hub-v2-mcp" in v2_codex
+
+    assert result.returncode == 0
+    assert "migrate-v1" not in result.stdout
+
+
+def test_retired_runtime_modules_are_absent():
+    assert importlib.util.find_spec("agent_hub.operations") is None
+    assert importlib.util.find_spec("agent_hub.providers.hub") is None
+    assert importlib.util.find_spec("agent_hub.core.inprocess") is None
+    assert importlib.util.find_spec("agent_hub.core.run_lifecycle") is None
+    assert importlib.util.find_spec("agent_hub.core.takeover") is None
+    assert importlib.util.find_spec("orchestrate_codex.mcp_server") is None
+    assert importlib.util.find_spec("orchestrate_codex.runner") is None
+    assert importlib.util.find_spec("orchestrate_codex.store") is None
 
 
 def test_v2_setup_is_digest_fenced_and_can_apply_without_launchctl(tmp_path):
@@ -50,24 +73,3 @@ def test_v2_setup_is_digest_fenced_and_can_apply_without_launchctl(tmp_path):
     assert result["activation"]["attempted"] is False
     assert (launch_dir / "com.agent-hub.daemon.plist").exists()
     assert "agent-hub-mcp" in (repo / ".codex/config.toml").read_text()
-
-
-def test_v1_metadata_import_is_idempotent_and_source_is_unchanged(tmp_path):
-    source = tmp_path / "runs"
-    source.mkdir()
-    run = source / "abc.json"
-    run.write_text(
-        '{"run_id":"abc","run_kind":"adaptive","status":"completed",'
-        '"state_schema_version":2,"prompt":"private"}'
-    )
-    original = run.read_bytes()
-    plan = plan_v1_import(source)
-    store = HubStore(tmp_path / "state.sqlite3")
-
-    first = apply_v1_import(store, plan=plan, plan_sha256=plan["plan_sha256"])
-    second = apply_v1_import(store, plan=plan, plan_sha256=plan["plan_sha256"])
-
-    assert first["imported"] == 1
-    assert second["imported"] == 1
-    assert run.read_bytes() == original
-    assert '"prompt"' not in str(first)

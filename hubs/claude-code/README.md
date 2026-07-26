@@ -45,5 +45,3 @@ claude --plugin-dir ./hubs/claude-code
 - `/agent-hub-run`은 idempotent run을 만들고 revision-fenced continue로 진행합니다.
 - `agent_hub_catalog`의 auth, catalog, generation 상태를 따로 확인합니다.
 - 결과 본문은 encrypted `artifact_v2`, 진행 정보는 redacted `event_v2`에서 읽습니다.
-
-이전 v1 도구는 임시 호환 entrypoint `agent-hub-v1-mcp`에 남아 있습니다.

@@ -16,8 +16,9 @@ deliverables. Keep code implementation outside the writing pass.
 | `pr-description`, `release-notes` | **change** | `project_context=auto` → git ok |
 | polish/translate/… | **transform** | source-first; git off by default |
 
-For multi-step README (outline → draft → verify, fallbacks across Claude/Grok/AG),
-prefer **orchestrate-codex** `durable_readme` instead of a single write call.
+For multi-step README (outline → draft → verify, fallbacks across providers),
+prefer Agent Hub V2 `agent_hub_plan` → `agent_hub_start` →
+`agent_hub_continue` instead of a single write call.
 
 ## Defaults
 

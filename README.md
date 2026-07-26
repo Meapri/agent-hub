@@ -4,14 +4,13 @@ Agent Hub는 Claude, Grok, Gemini, GPT를 하나의 로컬 실행 환경에서 �
 멀티 모델 작업 플랫폼입니다. MCP 호스트에는 가벼운 bridge만 연결하고, 계획·실행·복구·정책·
 artifact 관리는 장기 실행 daemon이 맡습니다.
 
-- 현재 버전: `2.0.0`
+- 현재 버전: `2.0.1`
 - Python: 3.10 이상
 - 우선 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
 
-v2는 v1의 37개 MCP 도구를 그대로 복제하지 않은 breaking redesign입니다. 새 통합에는 아래의
-14개 v2 도구를 사용하고, 기존 자동화가 필요할 때만 `agent-hub-v1-mcp` 호환 entrypoint를
-사용하세요.
+설치되는 MCP 표면은 아래의 14개 도구로 하나뿐입니다. provider별 adapter와 내부 실행 도구는
+daemon 뒤에 숨겨져 Codex나 Claude Code에 별도 MCP로 노출되지 않습니다.
 
 Agent Hub는 Anthropic, xAI, Google, OpenAI의 공식 제품이 아닙니다. 실제 호출에는 각 계정의
 사용량·요금·데이터 정책이 적용됩니다.
@@ -96,11 +95,8 @@ Codex·Claude Code hub 설정의 변경안, macOS LaunchAgent 변경안을 함�
 
 ```bash
 ./.venv/bin/agent-hub setup --repo-root . --json
-./.venv/bin/agent-hub setup \
-  --repo-root . \
-  --apply \
-  --proposal-sha256 검토한_SHA256 \
-  --json
+./.venv/bin/agent-hub setup --repo-root . --apply \
+  --proposal-sha256 검토한_SHA256 --json
 ```
 
 적용하면 `~/Library/LaunchAgents/com.agent-hub.daemon.plist`를 설치하고 daemon을
@@ -240,7 +236,7 @@ queue에 넣고, 외부 step의 모호한 결과는 그대로 보존합니다.
 
 | Mode | 동작 |
 | --- | --- |
-| `legacy` | planner provider를 유지 |
+| `pinned` | 명시적으로 지정한 provider를 유지 |
 | `shadow` | planner 선택을 유지하고 대안 점수만 기록 |
 | `advisory` | 추천을 기록하지만 실제 선택은 유지 |
 | `auto` | 동일 context에서 planner와 추천 후보가 각각 20건 이상일 때만 guardrail 평가 |
@@ -323,9 +319,6 @@ Agent Hub는 managed block SHA와 전체 파일 SHA를 함께 확인해 다른 �
 # Local FTS5 index
 ./.venv/bin/agent-hub index --project-root . --json
 
-# v1 metadata import
-./.venv/bin/agent-hub migrate-v1 --json
-
 # Candidate health check와 atomic switch
 ./.venv/bin/agent-hub update \
   --candidate-root /absolute/path/to/candidate \
@@ -333,27 +326,17 @@ Agent Hub는 managed block SHA와 전체 파일 SHA를 함께 확인해 다른 �
 ./.venv/bin/agent-hub rollback --json
 ```
 
-`init`, `setup`, `repair`, `migrate-v1`, `update`, `rollback`의 mutation은 기본적으로 dry-run입니다.
+`init`, `setup`, `repair`, `update`, `rollback`의 mutation은 기본적으로 dry-run입니다.
 출력된 digest를 해당 명령의 `--apply --proposal-sha256 ...`에 다시 전달해야 적용됩니다.
-`migrate-v1`은 v1 JSON 원본을 수정하지 않고 archive metadata만 가져옵니다.
 
 설치되는 주요 entrypoint는 다음과 같습니다.
 
 | 명령 | 역할 |
 | --- | --- |
-| `agent-hub` | v2 lifecycle CLI |
+| `agent-hub` | lifecycle CLI |
 | `agent-hubd` | local daemon |
-| `agent-hub-mcp`, `agent-hub-v2-mcp` | v2 MCP bridge |
-| `agent-hub-v1-mcp` | v1 compatibility server |
+| `agent-hub-mcp` | MCP bridge |
 | `agent-hub-connect` | provider 연결 GUI |
-| `agent-hub-setup`, `agent-hub-doctor` | v1 setup/doctor 호환 명령 |
-
-v1 setup 호환 경로가 필요하면 다음처럼 변경안을 확인한 뒤 적용합니다.
-
-```bash
-./.venv/bin/agent-hub-setup --help
-./.venv/bin/agent-hub-setup --apply
-```
 
 ## Workflow와 Provider SDK
 
@@ -371,16 +354,6 @@ v1 setup 호환 경로가 필요하면 다음처럼 변경안을 확인한 뒤 �
 
 새 provider는 동일한 worker ABI와 conformance 검사를 통과해야 registry에 노출할 수 있습니다.
 
-## v1에서 이전하기
-
-v2와 v1의 tool/run schema는 완전 호환되지 않습니다.
-
-- 기존 MCP 자동화는 임시 `agent-hub-v1-mcp`를 사용할 수 있습니다.
-- `agent-hub migrate-v1`은 기본 `~/.orchestrate_codex/runs/*.json`을 읽어 plan을 만들고,
-  승인 후 metadata만 v2 DB로 import합니다.
-- source file의 SHA가 plan 이후 바뀌면 apply를 거부하며 v1 파일은 수정하지 않습니다.
-- 새 workflow는 `task_v2`, `plan_v2`, `run_v3`, `artifact_v2`를 기준으로 작성하세요.
-
 ## 현재 제약
 
 - macOS 단일 사용자와 사용자당 daemon 하나를 우선 지원합니다.
@@ -389,7 +362,6 @@ v2와 v1의 tool/run schema는 완전 호환되지 않습니다.
 - built-in provider는 idempotent generation을 보장하지 않습니다. 요청 전송 여부가 모호하면
   사람의 확인 없이 재호출하지 않습니다.
 - `isolated_tool_worker`, `local_model`, `remote_worker`는 실험 기능이며 기본으로 꺼져 있습니다.
-- v1 importer는 실행 본문 복원이 아니라 archive metadata import입니다.
 - provider model과 quota 정보는 upstream 상태에 따라 바뀌며 static fallback은 live catalog가
   아닙니다.
 
@@ -417,7 +389,8 @@ v2와 v1의 tool/run schema는 완전 호환되지 않습니다.
 - daemon과 실행 엔진: `src/agent_hub/v2/daemon.py`, `src/agent_hub/v2/service.py`
 - durable store: `src/agent_hub/v2/store.py`
 - provider runtime: `src/agent_hub/v2/provider_client.py`,
-  `src/agent_hub/v2/provider_worker.py`, `src/agent_hub/v2/provider_manifests.py`
+  `src/agent_hub/v2/provider_worker.py`, `src/agent_hub/v2/provider_runtime.py`,
+  `src/agent_hub/v2/provider_manifests.py`
 - policy와 egress: `src/agent_hub/v2/policy.py`, `src/agent_hub/v2/egress.py`,
   `src/agent_hub/v2/egress_proxy.py`
 - 연결 GUI: `src/agent_hub/connect_app.py`, `src/agent_hub/connect_service.py`,

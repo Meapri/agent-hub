@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "2.0.0"
+version = "2.0.1"
 description = "Local-first durable multi-model agent runtime with an MCP bridge, isolated provider workers, policy-fenced egress, artifacts, and cross-harness handoff."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,12 +18,8 @@ dev = ["build>=1.2", "pytest>=8", "pytest-cov>=5", "ruff>=0.12"]
 # Console entry points — cwd-independent MCP/CLI launchers (available after `pip install -e .`).
 [project.scripts]
 agent-hub-mcp = "agent_hub.v2.bridge:serve"
-agent-hub-v1-mcp = "agent_hub.server:serve"
-agent-hub-v2-mcp = "agent_hub.v2.bridge:serve"
 agent-hubd = "agent_hub.v2.daemon:main"
 agent-hub = "agent_hub.v2.cli:main"
-agent-hub-setup = "agent_hub.local_setup:main"
-agent-hub-doctor = "agent_hub.doctor:main"
 agent-hub-connect = "agent_hub.connect_app:main"
 claude-codex-consent = "claude_codex.consent_cli:main"
 grok-codex-consent = "grok_codex.consent_cli:main"

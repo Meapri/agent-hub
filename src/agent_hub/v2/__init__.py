@@ -1,8 +1,7 @@
-"""Agent Hub v2 local-first runtime.
+"""Agent Hub local-first runtime.
 
-The v2 package is intentionally isolated from the v1 public operation module.
-It can be exercised and migrated incrementally without changing the installed
-v1 MCP surface until the daemon and bridge pass their cutover gates.
+The package exposes one daemon-backed MCP surface. Provider-specific adapters
+remain private implementation details behind the worker protocol.
 """
 
 from .contracts import (

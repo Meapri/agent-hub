@@ -35,7 +35,7 @@ Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한
 
 ## 라우팅과 재개
 
-- `legacy`, `shadow`, `advisory`는 planner의 실제 provider 선택을 바꾸지 않는다.
+- `pinned`, `shadow`, `advisory`는 planner의 실제 provider 선택을 바꾸지 않는다.
 - `auto`도 정확한 context 표본이 20건 미만이면 planner 선택을 유지한다.
 - 완료된 step은 재계획으로 바꾸지 않는다. fallback 소진, timeout, context limit, deterministic
   verification 실패, capability 변화에서만 미완료 subgraph를 교체한다.

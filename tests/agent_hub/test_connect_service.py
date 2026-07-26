@@ -107,9 +107,7 @@ def test_status_distinguishes_expired_refreshable_and_relogin_required_accounts(
         logged_in=True,
         relogin_required=True,
     )
-    manager = ConnectionManager(
-        status_reader=_reader({"claude": refreshable, "gemini": relogin})
-    )
+    manager = ConnectionManager(status_reader=_reader({"claude": refreshable, "gemini": relogin}))
 
     result = manager.status()
 
@@ -163,9 +161,7 @@ def test_status_normalizes_lifecycle_invariants_from_provider_state():
         relogin_required=True,
         ready=True,
     )
-    manager = ConnectionManager(
-        status_reader=_reader({"gpt": inconsistent})
-    )
+    manager = ConnectionManager(status_reader=_reader({"gpt": inconsistent}))
 
     provider = manager.status("gpt")["providers"]["gpt"]
 
@@ -208,12 +204,8 @@ def test_local_logout_capability_is_separate_from_current_auth_mode():
     oauth["auth_mode"] = "subscription_oauth"
     oauth["local_credentials_present"] = True
 
-    key_status = ConnectionManager(
-        status_reader=_reader({"grok": api_key})
-    ).status("grok")
-    oauth_status = ConnectionManager(
-        status_reader=_reader({"grok": oauth})
-    ).status("grok")
+    key_status = ConnectionManager(status_reader=_reader({"grok": api_key})).status("grok")
+    oauth_status = ConnectionManager(status_reader=_reader({"grok": oauth})).status("grok")
 
     assert key_status["providers"]["grok"]["session_label"] == "xAI API key"
     assert key_status["providers"]["grok"]["supports_local_logout"] is True
@@ -258,7 +250,7 @@ def test_offline_model_catalog_does_not_call_provider(monkeypatch):
         status_reader=_reader({"claude": _state(default_model="claude-sonnet-5")})
     )
     monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
+        "agent_hub.connect_service.provider_runtime.catalog",
         lambda *_args, **_kwargs: pytest.fail("offline catalog must stay local"),
     )
 
@@ -284,7 +276,7 @@ def test_live_model_catalog_is_bounded_redacted_and_text_only(monkeypatch):
         )
     )
     monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
+        "agent_hub.connect_service.provider_runtime.catalog",
         lambda *_args, **_kwargs: {
             "success": True,
             "data": {
@@ -301,9 +293,7 @@ def test_live_model_catalog_is_bounded_redacted_and_text_only(monkeypatch):
                             {"id": "grok-live", "display": "duplicate"},
                             {"id": "grok-\u202esecret", "display": "unsafe"},
                         ],
-                        "image_models": [
-                            {"id": "grok-imagine-image", "display": "Image"}
-                        ],
+                        "image_models": [{"id": "grok-imagine-image", "display": "Image"}],
                     }
                 }
             },
@@ -359,8 +349,8 @@ def test_ready_provider_live_catalog_keeps_dynamic_models(
     )
     calls = []
 
-    def list_models(name, arguments):
-        calls.append((name, dict(arguments)))
+    def list_models(requested_provider, *, refresh=False):
+        calls.append((requested_provider, refresh))
         return {
             "success": True,
             "data": {
@@ -369,8 +359,7 @@ def test_ready_provider_live_catalog_keeps_dynamic_models(
                         "success": True,
                         "source": source,
                         "text_models": [
-                            {"id": model_id, "display": model_id}
-                            for model_id in model_ids
+                            {"id": model_id, "display": model_id} for model_id in model_ids
                         ],
                     }
                 }
@@ -378,7 +367,7 @@ def test_ready_provider_live_catalog_keeps_dynamic_models(
         }
 
     monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
+        "agent_hub.connect_service.provider_runtime.catalog",
         list_models,
     )
 
@@ -386,12 +375,7 @@ def test_ready_provider_live_catalog_keeps_dynamic_models(
 
     assert catalog["refreshed"] is True
     assert [item["id"] for item in catalog["models"]] == model_ids
-    assert calls == [
-        (
-            "agent_hub_list_models",
-            {"provider": provider, "probe": True},
-        )
-    ]
+    assert calls == [(provider, True)]
 
 
 def test_live_catalog_disambiguates_duplicate_display_names(monkeypatch):
@@ -408,7 +392,7 @@ def test_live_catalog_disambiguates_duplicate_display_names(monkeypatch):
         )
     )
     monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
+        "agent_hub.connect_service.provider_runtime.catalog",
         lambda *_args, **_kwargs: {
             "success": True,
             "data": {
@@ -474,7 +458,7 @@ def test_live_model_refresh_falls_back_when_live_catalog_is_unavailable(
         )
     )
     monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
+        "agent_hub.connect_service.provider_runtime.catalog",
         lambda *_args, **_kwargs: {
             "success": True,
             "data": {"models": {"claude": live_payload}},
@@ -491,9 +475,7 @@ def test_live_model_refresh_falls_back_when_live_catalog_is_unavailable(
 
 def test_equivalent_catalog_reads_keep_the_same_revision():
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"claude": _state(default_model="claude-sonnet-5")}
-        )
+        status_reader=_reader({"claude": _state(default_model="claude-sonnet-5")})
     )
 
     first = manager.models("claude")
@@ -791,9 +773,7 @@ def test_local_credential_removal_invalidates_model_catalog(monkeypatch):
 
 
 def test_gemini_credential_removal_failure_is_fail_closed(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"gemini": _state(authenticated=False)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"gemini": _state(authenticated=False)}))
     manager.models("gemini")
     monkeypatch.setattr(
         "agent_hub.connect_service.google_account.logout",
@@ -817,9 +797,7 @@ def test_gemini_credential_removal_failure_is_fail_closed(monkeypatch):
 
 
 def test_grok_partial_credential_removal_invalidates_catalog(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(authenticated=False)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(authenticated=False)}))
     manager.models("grok")
     monkeypatch.setattr(
         "agent_hub.connect_service.grok_oauth.clear_tokens",
@@ -839,9 +817,7 @@ def test_grok_partial_credential_removal_invalidates_catalog(monkeypatch):
 
 def test_unavailable_selected_model_is_display_only():
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"gpt": _state(default_model="gpt-legacy", model_overridden=True)}
-        )
+        status_reader=_reader({"gpt": _state(default_model="gpt-legacy", model_overridden=True)})
     )
 
     catalog = manager.models("gpt")
@@ -885,9 +861,7 @@ def test_model_save_and_reset_preserve_other_provider_settings(tmp_path, monkeyp
             model_source="saved" if saved.get("model") else "provider_default",
         )
         return {
-            "providers": {"claude": state}
-            if provider == "all"
-            else {provider: state},
+            "providers": {"claude": state} if provider == "all" else {provider: state},
             "probe": probe,
         }
 
@@ -931,9 +905,7 @@ def test_gemini_model_save_and_reset_use_chat_scope(tmp_path, monkeypatch):
             model_override_scope="task:chat" if chat else None,
         )
         return {
-            "providers": {"gemini": state}
-            if provider == "all"
-            else {provider: state},
+            "providers": {"gemini": state} if provider == "all" else {provider: state},
             "probe": probe,
         }
 
@@ -945,9 +917,7 @@ def test_gemini_model_save_and_reset_use_chat_scope(tmp_path, monkeypatch):
         catalog_revision=catalog["catalog_revision"],
     )
 
-    assert google_model_prefs.load_prefs()["task_models"]["chat"] == (
-        "gemini-3.1-pro-high"
-    )
+    assert google_model_prefs.load_prefs()["task_models"]["chat"] == ("gemini-3.1-pro-high")
 
     manager.reset_default_model(
         "gemini",
@@ -1120,9 +1090,7 @@ def test_grok_login_returns_only_public_device_state(monkeypatch):
 
 
 def test_grok_login_failure_does_not_expose_provider_error(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     monkeypatch.setattr(
         "agent_hub.connect_service.grok_oauth.start_login",
         lambda **_kwargs: {
@@ -1152,9 +1120,7 @@ def test_grok_login_failure_does_not_expose_provider_error(monkeypatch):
 
 
 def test_login_adapter_without_flow_id_fails_closed(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     monkeypatch.setattr(
         "agent_hub.connect_service.grok_oauth.start_login",
         lambda **_kwargs: {
@@ -1170,9 +1136,7 @@ def test_login_adapter_without_flow_id_fails_closed(monkeypatch):
 
 
 def test_login_rejects_untrusted_provider_url(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     monkeypatch.setattr(
         "agent_hub.connect_service.grok_oauth.start_login",
         lambda **_kwargs: {
@@ -1189,9 +1153,7 @@ def test_login_rejects_untrusted_provider_url(monkeypatch):
 
 
 def test_login_rejects_trusted_host_on_nonstandard_port(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     monkeypatch.setattr(
         "agent_hub.connect_service.grok_oauth.start_login",
         lambda **_kwargs: {
@@ -1208,9 +1170,7 @@ def test_login_rejects_trusted_host_on_nonstandard_port(monkeypatch):
 
 
 def test_grok_existing_pending_login_has_actionable_error(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
 
     def already_running(**_kwargs):
         raise grok_oauth.LoginInProgressError("active")
@@ -1258,9 +1218,7 @@ def test_gemini_falls_back_to_pasted_callback_when_local_port_is_busy(monkeypatc
 
 
 def test_gemini_existing_pending_login_has_actionable_error(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"gemini": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"gemini": _state(consent=True)}))
 
     class BusyServer:
         def __init__(self, *_args, **_kwargs):
@@ -1289,9 +1247,7 @@ def test_gemini_existing_pending_login_has_actionable_error(monkeypatch):
 
 
 def test_gemini_local_callback_keeps_manual_completion_fallback(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"gemini": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"gemini": _state(consent=True)}))
 
     class StubServer:
         def __init__(self, *_args, **_kwargs):
@@ -1316,9 +1272,7 @@ def test_gemini_local_callback_keeps_manual_completion_fallback(monkeypatch):
 
 
 def test_duplicate_provider_login_reuses_active_job(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     release = threading.Event()
     calls = {"start": 0}
 
@@ -1357,9 +1311,7 @@ def test_duplicate_provider_login_reuses_active_job(monkeypatch):
 
 
 def test_manager_close_clears_only_pending_login_it_started(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     release = threading.Event()
     cleared = []
     monkeypatch.setattr(
@@ -1388,9 +1340,7 @@ def test_manager_close_clears_only_pending_login_it_started(monkeypatch):
 
 
 def test_manager_close_fences_gemini_token_commit(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"gemini": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"gemini": _state(consent=True)}))
     entered = threading.Event()
     release = threading.Event()
     committed = threading.Event()
@@ -1476,9 +1426,7 @@ def test_create_job_rejects_after_close():
 
 
 def test_close_during_grok_start_cleans_unregistered_flow(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     entered = threading.Event()
     release = threading.Event()
     cleared = []
@@ -1528,9 +1476,7 @@ def test_close_during_grok_start_cleans_unregistered_flow(monkeypatch):
 
 
 def test_close_during_gemini_start_closes_callback_and_flow(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"gemini": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"gemini": _state(consent=True)}))
     entered = threading.Event()
     release = threading.Event()
     cleared = []
@@ -1622,9 +1568,7 @@ def test_close_terminates_default_external_process_and_keeps_job_cancelled(
     monkeypatch,
 ):
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"gpt": _state(consent=True, authenticated=True, ready=True)}
-        )
+        status_reader=_reader({"gpt": _state(consent=True, authenticated=True, ready=True)})
     )
     started = threading.Event()
     terminated = threading.Event()
@@ -1690,9 +1634,7 @@ def test_close_during_injected_runner_keeps_cancelled_terminal_state(
         return type("Result", (), {"returncode": 0})()
 
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"gpt": _state(consent=True, authenticated=True, ready=True)}
-        ),
+        status_reader=_reader({"gpt": _state(consent=True, authenticated=True, ready=True)}),
         command_runner=run,
     )
     monkeypatch.setattr(
@@ -1713,9 +1655,7 @@ def test_close_during_injected_runner_keeps_cancelled_terminal_state(
 
 
 def test_stale_pending_cleanup_does_not_remove_replacement_flow(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     cleared = []
     manager._owned_pending_flows["grok"] = "replacement-flow"  # noqa: SLF001
     monkeypatch.setattr(
@@ -1730,9 +1670,7 @@ def test_stale_pending_cleanup_does_not_remove_replacement_flow(monkeypatch):
 
 
 def test_pending_cleanup_keeps_ownership_for_retry_after_oserror(monkeypatch):
-    manager = ConnectionManager(
-        status_reader=_reader({"grok": _state(consent=True)})
-    )
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
     manager._owned_pending_flows["grok"] = "owned-flow"  # noqa: SLF001
     attempts = 0
 
@@ -1755,20 +1693,10 @@ def test_pending_cleanup_keeps_ownership_for_retry_after_oserror(monkeypatch):
     assert "grok" not in manager._owned_pending_flows  # noqa: SLF001
 
 
-def test_connection_test_can_diagnose_authenticated_not_ready_provider(monkeypatch):
+def test_connection_test_can_diagnose_authenticated_not_ready_provider():
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"gemini": _state(consent=True, authenticated=True, ready=False)}
-        )
+        status_reader=_reader({"gemini": _state(consent=True, authenticated=True, ready=False)})
     )
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        lambda *_args, **_kwargs: {
-            "success": True,
-            "data": {"models": {"gemini": {"success": False}}},
-        },
-    )
-
     started = manager.start_test("gemini")
     deadline = time.time() + 1
     job = manager.job(started["id"])
@@ -1796,20 +1724,20 @@ def test_gemini_connection_test_requires_a_real_selected_model_response(
     )
     calls: list[tuple[str, dict]] = []
 
-    def dispatch(name, args):
+    def daemon_call(name, args):
         calls.append((name, args))
         return {
             "success": True,
-            "provider": "gemini",
-            "model": "gemini-3.6-flash-high",
-            "text": "AGENT_HUB_CONNECTION_OK",
-            "data": {"capacity_fallback": False},
+            "data": {
+                "provider": "gemini",
+                "result": {
+                    "model": "gemini-3.6-flash-high",
+                    "text": "AGENT_HUB_CONNECTION_OK",
+                },
+            },
         }
 
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        dispatch,
-    )
+    monkeypatch.setattr(manager, "_daemon_call", daemon_call)
 
     started = manager.start_test("gemini")
     deadline = time.time() + 1
@@ -1819,15 +1747,13 @@ def test_gemini_connection_test_requires_a_real_selected_model_response(
         job = manager.job(started["id"])
 
     assert job["state"] == "complete"
-    assert [name for name, _args in calls] == ["agent_hub_chat"]
+    assert [name for name, _args in calls] == ["agent_hub_execute"]
     probe = calls[-1][1]
     assert probe["provider"] == "gemini"
     assert probe["model"] == "gemini-3.6-flash-high"
-    assert probe["max_tokens"] == 512
-    assert probe["retry_count"] == 0
-    assert probe["retry_sleep_cap_sec"] == 0
-    assert probe["timeout_sec"] == 30
-    assert probe["policy_mode"] == "off"
+    assert probe["task"]["constraints"]["max_tokens"] == 512
+    assert probe["task"]["constraints"]["timeout_seconds"] == 30
+    assert probe["task"]["retention"] == "ephemeral"
 
 
 def test_gemini_connection_test_fails_when_generation_fails(monkeypatch):
@@ -1844,7 +1770,7 @@ def test_gemini_connection_test_fails_when_generation_fails(monkeypatch):
         )
     )
 
-    def dispatch(_name, _args):
+    def daemon_call(_name, _args):
         return {
             "success": False,
             "error": {
@@ -1853,10 +1779,7 @@ def test_gemini_connection_test_fails_when_generation_fails(monkeypatch):
             },
         }
 
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        dispatch,
-    )
+    monkeypatch.setattr(manager, "_daemon_call", daemon_call)
 
     started = manager.start_test("gemini")
     deadline = time.time() + 1
@@ -1869,7 +1792,7 @@ def test_gemini_connection_test_fails_when_generation_fails(monkeypatch):
     assert "provider body omitted" not in str(job)
 
 
-def test_gemini_connection_test_requires_a_selected_model(monkeypatch):
+def test_gemini_connection_test_requires_a_selected_model():
     manager = ConnectionManager(
         status_reader=_reader(
             {
@@ -1882,11 +1805,6 @@ def test_gemini_connection_test_requires_a_selected_model(monkeypatch):
             }
         )
     )
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        lambda *_args, **_kwargs: pytest.fail("generation must not start"),
-    )
-
     with pytest.raises(ConnectionError) as error:
         manager.start_test("gemini")
 
@@ -1911,21 +1829,21 @@ def test_gemini_connection_test_fences_late_success_after_auth_change(
     entered = threading.Event()
     release = threading.Event()
 
-    def dispatch(_name, _args):
+    def daemon_call(_name, _args):
         entered.set()
         release.wait(timeout=1)
         return {
             "success": True,
-            "provider": "gemini",
-            "model": "gemini-3.6-flash-high",
-            "text": "AGENT_HUB_CONNECTION_OK",
-            "data": {"capacity_fallback": False},
+            "data": {
+                "provider": "gemini",
+                "result": {
+                    "model": "gemini-3.6-flash-high",
+                    "text": "AGENT_HUB_CONNECTION_OK",
+                },
+            },
         }
 
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        dispatch,
-    )
+    monkeypatch.setattr(manager, "_daemon_call", daemon_call)
 
     started = manager.start_test("gemini")
     assert entered.wait(timeout=1)
@@ -1960,21 +1878,21 @@ def test_close_during_gemini_connection_test_keeps_cancelled_state(
     entered = threading.Event()
     release = threading.Event()
 
-    def dispatch(_name, _args):
+    def daemon_call(_name, _args):
         entered.set()
         release.wait(timeout=1)
         return {
             "success": True,
-            "provider": "gemini",
-            "model": "gemini-3.6-flash-high",
-            "text": "AGENT_HUB_CONNECTION_OK",
-            "data": {"capacity_fallback": False},
+            "data": {
+                "provider": "gemini",
+                "result": {
+                    "model": "gemini-3.6-flash-high",
+                    "text": "AGENT_HUB_CONNECTION_OK",
+                },
+            },
         }
 
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        dispatch,
-    )
+    monkeypatch.setattr(manager, "_daemon_call", daemon_call)
 
     started = manager.start_test("gemini")
     assert entered.wait(timeout=1)
@@ -1987,29 +1905,10 @@ def test_close_during_gemini_connection_test_keeps_cancelled_state(
     assert "AGENT_HUB_CONNECTION_OK" not in str(job)
 
 
-def test_connection_test_rejects_curated_fallback_false_positive(monkeypatch):
+def test_connection_test_requires_daemon_generation():
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"claude": _state(consent=True, authenticated=True, ready=True)}
-        )
+        status_reader=_reader({"claude": _state(consent=True, authenticated=True, ready=True)})
     )
-    monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        lambda *_args, **_kwargs: {
-            "success": True,
-            "data": {
-                "models": {
-                    "claude": {
-                        "success": True,
-                        "source": "curated",
-                        "warnings": ["live_list_failed"],
-                        "text_models": [{"id": "claude-sonnet-5"}],
-                    }
-                }
-            },
-        },
-    )
-
     started = manager.start_test("claude")
     deadline = time.time() + 1
     job = manager.job(started["id"])
@@ -2022,9 +1921,7 @@ def test_connection_test_rejects_curated_fallback_false_positive(monkeypatch):
 
 def test_provider_rejects_connection_test_while_login_is_active(monkeypatch):
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"grok": _state(consent=True, authenticated=True, ready=True)}
-        )
+        status_reader=_reader({"grok": _state(consent=True, authenticated=True, ready=True)})
     )
     release = threading.Event()
     monkeypatch.setattr(
@@ -2061,9 +1958,7 @@ def test_provider_rejects_connection_test_while_login_is_active(monkeypatch):
 
 def test_provider_rejects_disconnect_and_local_removal_while_job_is_active():
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"grok": _state(consent=True, authenticated=True, ready=True)}
-        )
+        status_reader=_reader({"grok": _state(consent=True, authenticated=True, ready=True)})
     )
     manager._create_job(  # noqa: SLF001 - state-machine regression boundary
         "grok",
@@ -2089,9 +1984,7 @@ def test_provider_rejects_disconnect_and_local_removal_while_job_is_active():
 
 def test_provider_rejects_destructive_actions_while_login_is_starting(monkeypatch):
     manager = ConnectionManager(
-        status_reader=_reader(
-            {"grok": _state(consent=True, authenticated=True, ready=True)}
-        )
+        status_reader=_reader({"grok": _state(consent=True, authenticated=True, ready=True)})
     )
     entered = threading.Event()
     release = threading.Event()
@@ -2158,9 +2051,7 @@ def test_consent_check_and_login_reservation_are_serialized(monkeypatch):
             status_entered.set()
             allow_status.wait(timeout=5)
         return {
-            "providers": {
-                "grok": _state(consent=True, authenticated=True, ready=True)
-            },
+            "providers": {"grok": _state(consent=True, authenticated=True, ready=True)},
             "probe": probe,
         }
 
@@ -2262,30 +2153,19 @@ def test_job_ids_do_not_expose_internal_results(monkeypatch):
     states = {"claude": _state(consent=True, authenticated=True, ready=True)}
     manager = ConnectionManager(status_reader=_reader(states))
     monkeypatch.setattr(
-        "agent_hub.connect_service.operations.dispatch_tool",
-        lambda tool, *_args, **_kwargs: (
-            {
-                "success": True,
+        manager,
+        "_daemon_call",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "data": {
                 "provider": "claude",
-                "model": "claude-sonnet-5",
-                "text": "ok",
-                "token": "never-return",
-            }
-            if tool == "agent_hub_chat"
-            else {
-                "success": True,
-                "data": {
-                    "models": {
-                        "claude": {
-                            "success": True,
-                            "source": "live",
-                            "text_models": [{"id": "claude-sonnet-5"}],
-                            "token": "never-return",
-                        }
-                    }
+                "result": {
+                    "model": "claude-sonnet-5",
+                    "text": "ok",
+                    "token": "never-return",
                 },
-            }
-        ),
+            },
+        },
     )
 
     started = manager.start_test("claude")

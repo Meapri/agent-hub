@@ -110,9 +110,7 @@ def _validate_target_parent(target_root: Path, path: Path) -> None:
             current_stat = current.lstat()
         except FileNotFoundError:
             return
-        if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(
-            current_stat.st_mode
-        ):
+        if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
             raise SetupError(f"refusing unsafe config parent: {current}")
 
 
@@ -151,21 +149,18 @@ def _json_object(content: bytes | None, *, path: Path) -> Dict[str, Any]:
     return parsed
 
 
-def _memory_server(repo_root: Path, *, include_type: bool) -> Dict[str, Any]:
-    server: Dict[str, Any] = {
-        "command": "uvx",
-        "args": ["basic-memory", "mcp"],
-        "env": {
-            "BASIC_MEMORY_CONFIG_DIR": str(
-                repo_root / "memory" / ".basic-memory"
-            ),
-            "BASIC_MEMORY_HOME": str(repo_root / "memory" / "data"),
-            "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false",
-        },
-    }
-    if include_type:
-        server["type"] = "stdio"
-    return server
+def _is_legacy_memory_server(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    args = value.get("args")
+    env = value.get("env")
+    return (
+        value.get("command") == "uvx"
+        and isinstance(args, list)
+        and args[:2] == ["basic-memory", "mcp"]
+        and isinstance(env, dict)
+        and "BASIC_MEMORY_HOME" in env
+    )
 
 
 def _hub_server(
@@ -206,15 +201,14 @@ def _merge_json_config(
         root["mcpServers"] = servers
     else:
         servers = root
-    servers["memory"] = _memory_server(repo_root, include_type=include_type)
+    if _is_legacy_memory_server(servers.get("memory")):
+        servers.pop("memory")
     servers["agent-hub"] = _hub_server(
         repo_root,
         include_type=include_type,
         hub_executable=hub_executable,
     )
-    return (
-        json.dumps(root, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
-    ).encode("utf-8")
+    return (json.dumps(root, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
 
 
 def _strip_managed_toml(text: str) -> str:
@@ -262,22 +256,10 @@ def _render_codex_config(
         except UnicodeDecodeError as exc:
             raise SetupError(f"config is not valid UTF-8 TOML: {path}") from exc
     prefix = _strip_managed_toml(text)
-    memory_config = repo_root / "memory" / ".basic-memory"
-    memory_home = repo_root / "memory" / "data"
     hub_command = repo_root / ".venv" / "bin" / hub_executable
     block = "\n".join(
         (
             MANAGED_TOML_BEGIN,
-            "[mcp_servers.memory]",
-            'command = "uvx"',
-            'args = ["basic-memory", "mcp"]',
-            'type = "stdio"',
-            "",
-            "[mcp_servers.memory.env]",
-            f"BASIC_MEMORY_CONFIG_DIR = {_toml_string(str(memory_config))}",
-            f"BASIC_MEMORY_HOME = {_toml_string(str(memory_home))}",
-            'BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED = "false"',
-            "",
             "[mcp_servers.agent-hub]",
             f"command = {_toml_string(str(hub_command))}",
             'type = "stdio"',
@@ -358,7 +340,7 @@ def plan_setup(
     target_root: str | os.PathLike[str] | None = None,
     hub_executable: str = "agent-hub-mcp",
 ) -> SetupPlan:
-    if hub_executable not in {"agent-hub-mcp", "agent-hub-v2-mcp"}:
+    if hub_executable != "agent-hub-mcp":
         raise SetupError("unsupported Agent Hub MCP executable")
     source = _canonical_directory(repo_root, label="repo_root")
     destination = _canonical_directory(
@@ -381,13 +363,7 @@ def plan_setup(
             hub_executable=hub_executable,
         )
         expected_sha = _digest(existing) if existing is not None else None
-        status = (
-            "create"
-            if existing is None
-            else "unchanged"
-            if existing == rendered
-            else "update"
-        )
+        status = "create" if existing is None else "unchanged" if existing == rendered else "update"
         changes.append(
             ConfigChange(
                 relative_path=relative_path,
@@ -453,13 +429,8 @@ def apply_plan(plan: SetupPlan) -> Dict[str, Any]:
 
     changed = plan.changed
     for item in changed:
-        if (
-            _current_digest(item.target, target_root=plan.target_root)
-            != item.expected_sha256
-        ):
-            raise SetupError(
-                f"config changed after planning; rerun setup: {item.relative_path}"
-            )
+        if _current_digest(item.target, target_root=plan.target_root) != item.expected_sha256:
+            raise SetupError(f"config changed after planning; rerun setup: {item.relative_path}")
     for item in changed:
         _atomic_write(
             item.target,
@@ -480,8 +451,7 @@ def apply_plan(plan: SetupPlan) -> Dict[str, Any]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Plan or apply machine-local Agent Hub MCP paths. "
-            "The default is a read-only dry run."
+            "Plan or apply machine-local Agent Hub MCP paths. The default is a read-only dry run."
         )
     )
     parser.add_argument(
@@ -518,9 +488,7 @@ def _text_report(plan: SetupPlan, *, applied: bool, quiet: bool) -> str:
     if applied:
         lines.append(f"applied {len(plan.changed)} local config change(s)")
     elif plan.changed:
-        lines.append(
-            f"dry-run: {len(plan.changed)} change(s); rerun with --apply to write them"
-        )
+        lines.append(f"dry-run: {len(plan.changed)} change(s); rerun with --apply to write them")
     elif not quiet:
         lines.append("local config is up to date")
     return "\n".join(lines)

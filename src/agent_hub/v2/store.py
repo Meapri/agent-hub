@@ -35,7 +35,7 @@ from .contracts import (
 )
 from .errors import HubV2Error
 
-STORE_SCHEMA_VERSION = 3
+STORE_SCHEMA_VERSION = 4
 DEFAULT_STATE_DIR = Path("~/.agent-hub").expanduser()
 DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
@@ -441,16 +441,6 @@ class HubStore:
                     tokenize = 'unicode61'
                 );
 
-                CREATE TABLE IF NOT EXISTS legacy_imports (
-                    source_sha256 TEXT PRIMARY KEY,
-                    source_name TEXT NOT NULL,
-                    legacy_run_id TEXT NOT NULL,
-                    legacy_run_kind TEXT NOT NULL,
-                    legacy_status TEXT NOT NULL,
-                    source_schema_version INTEGER,
-                    imported_at REAL NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS provider_health (
                     provider TEXT PRIMARY KEY,
                     consecutive_failures INTEGER NOT NULL DEFAULT 0
@@ -490,6 +480,7 @@ class HubStore:
                     },
                 )
             elif int(current["value"]) < STORE_SCHEMA_VERSION:
+                connection.execute("DROP TABLE IF EXISTS legacy_imports")
                 connection.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                     (str(STORE_SCHEMA_VERSION),),
@@ -1912,52 +1903,6 @@ class HubStore:
             }
             for row in rows
         ]
-
-    def record_legacy_import(self, entry: Mapping[str, Any]) -> dict[str, Any]:
-        source_sha = str(entry.get("source_sha256") or "")
-        if len(source_sha) != 64 or any(
-            char not in "0123456789abcdef" for char in source_sha
-        ):
-            raise HubV2Error(
-                "invalid_import_entry",
-                "The legacy source digest is invalid.",
-                scope="migration",
-            )
-        now = self._clock()
-        with self._transaction() as connection:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO legacy_imports(
-                    source_sha256, source_name, legacy_run_id, legacy_run_kind,
-                    legacy_status, source_schema_version, imported_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    source_sha,
-                    str(entry.get("source_name") or "")[:256],
-                    str(entry.get("run_id") or "")[:128],
-                    str(entry.get("run_kind") or "unknown")[:64],
-                    str(entry.get("status") or "unknown")[:64],
-                    entry.get("source_schema_version")
-                    if isinstance(entry.get("source_schema_version"), int)
-                    else None,
-                    now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM legacy_imports WHERE source_sha256 = ?",
-                (source_sha,),
-            ).fetchone()
-        return {
-            "schema": "agent_hub_v1_import_receipt_v1",
-            "source_sha256": row["source_sha256"],
-            "source_name": row["source_name"],
-            "legacy_run_id": row["legacy_run_id"],
-            "legacy_run_kind": row["legacy_run_kind"],
-            "legacy_status": row["legacy_status"],
-            "imported_at": row["imported_at"],
-            "mode": "archive_metadata_only",
-        }
 
     def record_provider_outcome(
         self,

@@ -43,15 +43,11 @@ def test_setup_defaults_to_a_read_only_plan_then_applies_idempotently(
 
     expected_command = str(source / ".venv" / "bin" / "agent-hub-mcp")
     root_config = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))
-    codex_hub = json.loads(
-        (target / "hubs" / "codex" / ".mcp.json").read_text(encoding="utf-8")
-    )
+    codex_hub = json.loads((target / "hubs" / "codex" / ".mcp.json").read_text(encoding="utf-8"))
     assert root_config["mcpServers"]["agent-hub"]["command"] == expected_command
     assert codex_hub["agent-hub"]["command"] == expected_command
-    assert (
-        root_config["mcpServers"]["memory"]["env"]["BASIC_MEMORY_HOME"]
-        == str(source / "memory" / "data")
-    )
+    assert set(root_config["mcpServers"]) == {"agent-hub"}
+    assert set(codex_hub) == {"agent-hub"}
 
 
 def test_setup_preserves_unrelated_json_and_toml_settings(tmp_path):

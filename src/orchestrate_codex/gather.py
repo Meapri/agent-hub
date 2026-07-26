@@ -179,9 +179,7 @@ def gather_git(
 
     scoped = scope_text != "."
     branch = (
-        "[scoped]"
-        if scoped
-        else field(["git", "branch", "--show-current"], fallback="[detached]")
+        "[scoped]" if scoped else field(["git", "branch", "--show-current"], fallback="[detached]")
     )
     head = field(["git", "rev-parse", "--short", "HEAD"])
     status = field(
@@ -303,8 +301,7 @@ def _mcp_tools_from_config(
     server_files = sorted(
         item
         for item in available
-        if Path(item).name == "mcp_server.py"
-        or item == "src/agent_hub/operations.py"
+        if Path(item).name == "mcp_server.py" or item == "src/agent_hub/v2/tools.py"
     )
     for path in server_files:
         text = read_text(path)
@@ -316,15 +313,13 @@ def _mcp_tools_from_config(
         for m in re.finditer(r'"name":\s*"([a-z0-9_]+)"', text):
             name = m.group(1)
             if name not in names and (
-                "codex" in name
-                or name.startswith("google_")
-                or name.startswith("orchestrate_")
+                "codex" in name or name.startswith("google_") or name.startswith("orchestrate_")
             ):
                 names.append(name)
                 if len(names) >= _DURABLE_METADATA_ENTRY_LIMIT:
                     return sorted(set(names))
         for m in re.finditer(
-            r'"(claude_codex_[a-z0-9_]+|grok_codex_[a-z0-9_]+|'
+            r'"(agent_hub_[a-z0-9_]+|claude_codex_[a-z0-9_]+|grok_codex_[a-z0-9_]+|'
             r'google_[a-z0-9_]+|orchestrate_[a-z0-9_]+)"',
             text,
         ):
@@ -376,9 +371,7 @@ def _cli_commands_from_tree(
         available,
         read_text,
     )
-    return sorted(set(console_scripts) | set(repository_scripts))[
-        :_DURABLE_METADATA_ENTRY_LIMIT
-    ]
+    return sorted(set(console_scripts) | set(repository_scripts))[:_DURABLE_METADATA_ENTRY_LIMIT]
 
 
 def _install_commands(
@@ -414,9 +407,7 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
                 return ""
             remaining = _DURABLE_READ_BYTE_LIMIT - durable_read_bytes
             if remaining <= 0:
-                durable_read_skips["read_budget"] = (
-                    durable_read_skips.get("read_budget", 0) + 1
-                )
+                durable_read_skips["read_budget"] = durable_read_skips.get("read_budget", 0) + 1
                 return ""
             text, size, reason = read_repository_text(
                 root / relative,
@@ -449,9 +440,7 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
             root_fd=root_fd,
         )
 
-    packages = sorted(_package_init_files_from_tree(available))[
-        :_DURABLE_METADATA_ENTRY_LIMIT
-    ]
+    packages = sorted(_package_init_files_from_tree(available))[:_DURABLE_METADATA_ENTRY_LIMIT]
     has_license = bool({"LICENSE", "LICENSE.md"} & available)
     rendered_text = _facts_as_text(
         root=root,
@@ -470,9 +459,7 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
     text_truncated = len(rendered_text) > _DURABLE_TEXT_CHAR_LIMIT
     if text_truncated:
         marker = "\n[durable fact text truncated at configured limit]"
-        rendered_text = (
-            rendered_text[: _DURABLE_TEXT_CHAR_LIMIT - len(marker)] + marker
-        )
+        rendered_text = rendered_text[: _DURABLE_TEXT_CHAR_LIMIT - len(marker)] + marker
     facts = {
         "ok": True,
         "root": str(root),
@@ -487,7 +474,8 @@ def gather_durable_facts(project_root: str | Path = ".") -> Dict[str, Any]:
         "packages": packages,
         "has_license": has_license,
         **manifest,
-        "install_hints": install_commands or [
+        "install_hints": install_commands
+        or [
             f'codex plugin marketplace add "{root}"',
         ],
         "readme_preview_chars": len(readme_preview),
@@ -553,7 +541,16 @@ def _facts_as_text(
 
 
 _CODE_EXTS = {".py", ".toml", ".md", ".json", ".cfg", ".ini", ".txt", ".yaml", ".yml"}
-_CODE_SKIP_PARTS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules", "dist", "build"}
+_CODE_SKIP_PARTS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+    "dist",
+    "build",
+}
 _CODE_MAX_FILE_BYTES = 1_048_576
 _CODE_CANDIDATE_LIMITS = {"shallow": 1_000, "standard": 4_000, "deep": 10_000}
 _CODE_READ_BYTE_LIMITS = {
@@ -727,6 +724,7 @@ def _code_candidates(
     candidate_truncated = scan_truncated or len(candidates) > candidate_limit
     return candidates[:candidate_limit], candidate_truncated, skipped
 
+
 _FOCUS_STOP_TERMS = {
     "actual",
     "after",
@@ -808,7 +806,7 @@ def _code_context_priority(path: Path, root: Path) -> tuple:
     interface_names = {
         "mcp_server.py",
         "server.py",
-        "operations.py",
+        "tools.py",
         "orchestrator.py",
         "recipes.py",
         "runner.py",
@@ -956,7 +954,9 @@ def _render_numbered_range(
     return "".join(chunks), actual_end
 
 
-def _merge_line_windows(matches: List[int], line_count: int, radius: int = 18) -> List[tuple[int, int]]:
+def _merge_line_windows(
+    matches: List[int], line_count: int, radius: int = 18
+) -> List[tuple[int, int]]:
     ranges: List[tuple[int, int]] = []
     for line_index in matches:
         start = max(0, line_index - radius)
@@ -990,8 +990,7 @@ def _focused_file_blocks(
     lowered_terms = [term.lower() for term in terms]
     lowered_body = "\n".join(lines).lower()
     line_match_counts = {
-        term: sum(1 for line in lines if term in line.lower())
-        for term in lowered_terms
+        term: sum(1 for line in lines if term in line.lower()) for term in lowered_terms
     }
     frequency_cutoff = max(4, len(lines) // 100)
     definition_terms = [
@@ -1016,14 +1015,10 @@ def _focused_file_blocks(
     if not matches:
         matches = [0, max(0, len(lines) - 1)]
     windows = _merge_line_windows(matches, len(lines))
+
     def window_score(item: tuple[int, int]) -> int:
         window_lines = lines[item[0] : item[1]]
-        score = sum(
-            1
-            for line in window_lines
-            for term in active_terms
-            if term in line.lower()
-        )
+        score = sum(1 for line in window_lines for term in active_terms if term in line.lower())
         joined = "\n".join(window_lines).lower()
         for term in active_terms:
             if re.search(rf"(?m)^\s*(?:async\s+)?(?:def|class)\s+{re.escape(term)}\b", joined):
@@ -1096,9 +1091,7 @@ def _gather_code_context(
 ) -> Dict[str, Any]:
     normalized_depth = str(depth or "standard").strip().lower()
     if normalized_depth not in _CODE_CONTEXT_LIMITS:
-        raise ValueError(
-            "depth must be one of: " + ", ".join(sorted(_CODE_CONTEXT_LIMITS))
-        )
+        raise ValueError("depth must be one of: " + ", ".join(sorted(_CODE_CONTEXT_LIMITS)))
     limits = _CODE_CONTEXT_LIMITS[normalized_depth]
     file_limit = min(
         int(limits["max_files"]),
@@ -1158,10 +1151,7 @@ def _gather_code_context(
         bodies[path] = body
         return body
 
-    path_scores = {
-        path: _focus_score(path, root, focus_terms, "")
-        for path in candidates
-    }
+    path_scores = {path: _focus_score(path, root, focus_terms, "") for path in candidates}
     scan_order = sorted(
         candidates,
         key=lambda path: (
@@ -1183,9 +1173,7 @@ def _gather_code_context(
         key=lambda item: (-item[0], _code_context_priority(item[1], root)),
     )
     focused_candidates = [
-        path
-        for score, path in scored[: int(limits["focused_files"])]
-        if score > 0
+        path for score, path in scored[: int(limits["focused_files"])] if score > 0
     ]
     focused_set = set(focused_candidates)
 
@@ -1351,9 +1339,7 @@ def _gather_code_context(
         "candidate_count": len(candidates),
         "candidate_limit": candidate_limit,
         "candidate_truncated": candidate_truncated,
-        "focus_scan_truncated": bool(
-            focus_terms and len(candidates) > len(focus_scan_candidates)
-        ),
+        "focus_scan_truncated": bool(focus_terms and len(candidates) > len(focus_scan_candidates)),
         "read_bytes": read_bytes,
         "read_byte_limit": read_byte_limit,
         "focus_scan_byte_limit": focus_scan_byte_limit,
@@ -1367,7 +1353,9 @@ def _gather_code_context(
     }
 
 
-def run_gather(stage: Dict[str, Any], *, project_root: str = ".", args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def run_gather(
+    stage: Dict[str, Any], *, project_root: str = ".", args: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     args = args or {}
     root = str(args.get("project_root") or project_root or ".")
     cap = str(stage.get("capability") or "")
@@ -1378,12 +1366,11 @@ def run_gather(stage: Dict[str, Any], *, project_root: str = ".", args: Optional
     if cap == "local_code" or stage.get("id") == "gather_code":
         return gather_code_context(
             root,
-            depth=str(stage.get("investigation_depth") or args.get("investigation_depth") or "standard"),
+            depth=str(
+                stage.get("investigation_depth") or args.get("investigation_depth") or "standard"
+            ),
             focus=str(
-                stage.get("instruction")
-                or args.get("instruction")
-                or args.get("prompt")
-                or ""
+                stage.get("instruction") or args.get("instruction") or args.get("prompt") or ""
             ),
         )
     # default durable / local facts
