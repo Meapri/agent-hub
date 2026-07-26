@@ -59,9 +59,7 @@ def refresh_operation_lock(
     process_lock = _refresh_process_lock(root)
     bounded_timeout = max(0.1, float(timeout))
     deadline = time.monotonic() + bounded_timeout
-    if not process_lock.acquire(
-        timeout=max(0.0, deadline - time.monotonic())
-    ):
+    if not process_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
         raise TimeoutError("provider refresh operation is already running")
     descriptor = -1
     try:
@@ -76,9 +74,7 @@ def refresh_operation_lock(
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "provider refresh operation is already running"
-                    )
+                    raise TimeoutError("provider refresh operation is already running")
                 time.sleep(0.05)
         try:
             yield

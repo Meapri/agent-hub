@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from google_antigravity_codex import agy_auth, io_util, oauth_login, profiles, provider, session_prefs
+from google_antigravity_codex import (
+    agy_auth,
+    io_util,
+    oauth_login,
+    profiles,
+    provider,
+    session_prefs,
+)
 
 
 def test_provider_priority_env_over_saved(tmp_path, monkeypatch):
@@ -30,7 +37,9 @@ def test_provider_priority_env_over_saved(tmp_path, monkeypatch):
 
 def test_profile_does_not_override_explicit_grounding_off(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_CONFIG_DIR", str(tmp_path))
-    profiles.use_profile_tool({"name": "research", "apply_provider": False, "apply_model_pref": False})
+    profiles.use_profile_tool(
+        {"name": "research", "apply_provider": False, "apply_model_pref": False}
+    )
     args = profiles.apply_profile_to_chat_args({"prompt": "hi", "grounding": "off"})
     assert args["grounding"] == "off"
     # Missing grounding inherits research always

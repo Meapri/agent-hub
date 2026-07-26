@@ -121,7 +121,11 @@ def read_credentials() -> Optional[Dict[str, Any]]:
             return kc
         if file_ok and not kc_ok:
             return file_creds
-        return kc if int(kc.get("expiresAt") or 0) >= int(file_creds.get("expiresAt") or 0) else file_creds
+        return (
+            kc
+            if int(kc.get("expiresAt") or 0) >= int(file_creds.get("expiresAt") or 0)
+            else file_creds
+        )
     return kc or file_creds
 
 
@@ -308,12 +312,9 @@ def refresh_access_token(
                 code="refresh_failed",
             ) from exc
         with security.auth_state_lock():
-            if (
-                not security.user_consent_enabled()
-                or not secrets.compare_digest(
-                    security.consent_revision(),
-                    consent_revision,
-                )
+            if not security.user_consent_enabled() or not secrets.compare_digest(
+                security.consent_revision(),
+                consent_revision,
             ):
                 raise ClaudeRefreshError(
                     "Claude consent changed during refresh.",

@@ -472,7 +472,16 @@ ROUTE_MODEL_SCHEMA: Dict[str, Any] = {
     "properties": {
         "task": {
             "type": "string",
-            "enum": ["chat", "code", "fast", "grounded-search", "search", "writing", "release", "image"],
+            "enum": [
+                "chat",
+                "code",
+                "fast",
+                "grounded-search",
+                "search",
+                "writing",
+                "release",
+                "image",
+            ],
             "default": "chat",
         },
         "intent": {"type": "string"},
@@ -521,115 +530,255 @@ COMMON_OUTPUT_SCHEMA: Dict[str, Any] = {
 TOOL_METADATA: Dict[str, Dict[str, Any]] = {
     "google_antigravity_consent_status": {
         "title": "Check Antigravity Consent",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_provider_status": {
         "title": "Check Antigravity Provider",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_agy_auth_status": {
         "title": "Check agy Session Export",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_agy_auth_refresh": {
         "title": "Open Login Manager to Refresh",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_login_status": {
         "title": "Check Direct Antigravity Login",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_login_start": {
         "title": "Open Antigravity Login Manager",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_login_complete": {
         "title": "Complete Login in Manager",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_chat": {
         "title": "Chat with Antigravity",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
     },
     "google_grounded_search": {
         "title": "Search with Google Grounding",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_generate_image": {
         "title": "Generate an Antigravity Image",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_write": {
         "title": "Write with Antigravity",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_release_snapshot": {
         "title": "Collect Release Snapshot",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_release_draft": {
         "title": "Draft Release Materials",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_list_models": {
         "title": "List Antigravity Models",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_route_model": {
         "title": "Route to an Antigravity Model",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_get_model_prefs": {
         "title": "Get Saved Antigravity Models",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_set_model": {
         "title": "Set Antigravity Model Preference",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_clear_model_prefs": {
         "title": "Clear Antigravity Model Preferences",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_set_provider": {
         "title": "Set Preferred Provider",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_get_session_prefs": {
         "title": "Get Session Preferences",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_list_profiles": {
         "title": "List Session Profiles",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_use_profile": {
         "title": "Activate Session Profile",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_save_profile": {
         "title": "Save Custom Session Profile",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_whoami": {
         "title": "Show Antigravity Account",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_logout": {
         "title": "Disconnect in Login Manager",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     "google_antigravity_compare_models": {
         "title": "Compare Models",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_review_diff": {
         "title": "Review Git Diff",
-        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
     },
     "google_antigravity_quota_status": {
         "title": "Check Antigravity Quota",
-        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
     },
 }
 
@@ -826,7 +975,9 @@ def tool_definitions() -> List[Dict[str, Any]]:
     return enriched
 
 
-def _text_result(text: str, structured: Dict[str, Any], *, is_error: bool = False) -> Dict[str, Any]:
+def _text_result(
+    text: str, structured: Dict[str, Any], *, is_error: bool = False
+) -> Dict[str, Any]:
     return {
         "content": [{"type": "text", "text": text}],
         "structuredContent": structured,
@@ -836,7 +987,10 @@ def _text_result(text: str, structured: Dict[str, Any], *, is_error: bool = Fals
 
 def _emit_notification(method: str, params: Dict[str, Any]) -> None:
     """Write a JSON-RPC notification to stdout (MCP stream/progress side-channel)."""
-    print(json.dumps({"jsonrpc": "2.0", "method": method, "params": params}, ensure_ascii=False), flush=True)
+    print(
+        json.dumps({"jsonrpc": "2.0", "method": method, "params": params}, ensure_ascii=False),
+        flush=True,
+    )
 
 
 def _safe_call(
@@ -850,7 +1004,9 @@ def _safe_call(
             data = func(arguments, progress=progress)
         else:
             data = func(arguments)
-        text = data.get("text") or data.get("answer") or json.dumps(data, ensure_ascii=False, indent=2)
+        text = (
+            data.get("text") or data.get("answer") or json.dumps(data, ensure_ascii=False, indent=2)
+        )
         return _text_result(str(text), data, is_error=data.get("success") is False)
     except (
         agy_auth.AgyAuthError,
@@ -1069,7 +1225,11 @@ def handle_request(message: Dict[str, Any]) -> Dict[str, Any] | None:
             if name not in {tool["name"] for tool in tool_definitions()}:
                 raise RpcError(-32602, f"unknown tool: {name}")
             # Enable stream side-channel for chat when requested.
-            progress = _emit_notification if (name == "google_antigravity_chat" and arguments.get("stream")) else None
+            progress = (
+                _emit_notification
+                if (name == "google_antigravity_chat" and arguments.get("stream"))
+                else None
+            )
             result = dispatch_tool(name, arguments, progress=progress)
         else:
             raise RpcError(-32601, f"unsupported method: {method}")
@@ -1093,7 +1253,11 @@ def serve() -> int:
         try:
             message = json.loads(line)
         except json.JSONDecodeError as exc:
-            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": str(exc)}}
+            response = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": str(exc)},
+            }
         else:
             response = handle_request(message)
         if response is not None:

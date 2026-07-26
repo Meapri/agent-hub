@@ -40,7 +40,11 @@ def resolve_auth() -> Dict[str, Any]:
     if prefer_subscription():
         token = oauth_login.resolve_access_token()
         if token:
-            return {"mode": "subscription_oauth", "access_token": token, "source": "oauth-token.json"}
+            return {
+                "mode": "subscription_oauth",
+                "access_token": token,
+                "source": "oauth-token.json",
+            }
     key = get_api_key()
     if key:
         return {
@@ -79,13 +83,9 @@ def status() -> Dict[str, Any]:
 
     sub = oauth_login.status()
     key = get_api_key()
-    subscription_ready = bool(
-        sub.get("logged_in") and sub.get("token_valid") is True
-    )
+    subscription_ready = bool(sub.get("logged_in") and sub.get("token_valid") is True)
     subscription_context = (
-        {"mode": "subscription_oauth", "source": sub.get("source")}
-        if subscription_ready
-        else None
+        {"mode": "subscription_oauth", "source": sub.get("source")} if subscription_ready else None
     )
     key_context = _api_key_context(key)
     active = (

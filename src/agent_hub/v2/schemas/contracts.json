@@ -12,7 +12,27 @@
         "capability": {"enum": ["chat", "search", "vision", "write", "image", "inspect", "review", "decide"]},
         "inline_input": {"type": "string"},
         "input_artifacts": {"type": "array", "items": {"type": "string"}},
-        "constraints": {"type": "object"},
+        "constraints": {
+          "type": "object",
+          "properties": {
+            "provider_allowlist": {
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            "max_tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "deprecated": true,
+              "description": "Compatibility alias for max_output_tokens and max_total_tokens."
+            },
+            "max_input_tokens": {"type": "integer", "minimum": 0},
+            "max_output_tokens": {"type": "integer", "minimum": 0},
+            "max_total_tokens": {"type": "integer", "minimum": 0},
+            "max_leaf_calls": {"type": "integer", "minimum": 0},
+            "timeout_seconds": {"type": "number", "minimum": 0.1}
+          },
+          "additionalProperties": false
+        },
         "output_contract": {"type": "object"},
         "retention": {"enum": ["ephemeral", "durable_private", "exportable"]}
       },
@@ -43,7 +63,36 @@
         "revision": {"type": "integer", "minimum": 0},
         "status": {"enum": ["prepared", "queued", "running", "waiting_approval", "paused", "completed", "failed", "cancelled", "archived", "outcome_unknown"]},
         "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "steps": {"type": "array", "items": {"type": "object"}}
+        "steps": {"type": "array", "items": {"type": "object"}},
+        "retryable_failed_steps": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "next_action": {
+          "type": "object",
+          "required": ["type", "tool", "arguments"],
+          "properties": {
+            "type": {"const": "call_tool"},
+            "tool": {"const": "agent_hub_continue"},
+            "arguments": {
+              "type": "object",
+              "required": ["run_id", "expected_revision", "retry_failed_steps"],
+              "properties": {
+                "run_id": {"type": "string"},
+                "expected_revision": {"type": "integer", "minimum": 0},
+                "retry_failed_steps": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
       }
     },
     "event_v2": {

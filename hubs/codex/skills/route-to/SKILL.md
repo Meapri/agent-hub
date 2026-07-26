@@ -13,8 +13,9 @@ description: >
 ## 위임 경로
 
 - 짧은 inline 요청은 `agent_hub_execute`에 capability와 `provider`를 명시한다.
-- 저장소 파일이나 기존 artifact가 필요한 작업은 `agent_hub_plan` prepare 뒤 연결 GUI에서 사용자가
-  egress를 승인하고, 반환된 `approval_request_id`로 apply한 뒤 `agent_hub_start`로 실행한다.
+- 저장소 파일이나 기존 artifact가 필요한 작업은 `agent_hub_plan` prepare 뒤 `approval_mode`를
+  확인한다. `manual`이면 연결 GUI에서 사용자가 승인하고, `automatic`이면 승인된 review를 사용해
+  반환된 `approval_request_id`로 apply한 뒤 `agent_hub_start`로 실행한다.
 - provider를 고정하기 전 `agent_hub_catalog`에서 model capability와 auth/catalog/generation 상태를
   확인한다.
 - 결과 본문은 `agent_hub_artifact`, 진행 상태는 `agent_hub_events`로 분리해 읽는다.

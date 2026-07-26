@@ -33,18 +33,12 @@ def _cli_status(*, timeout: float) -> Dict[str, Any] | None:
         "logged_in": logged_in,
         "subscription_login": logged_in and subscription,
         "auth_mode": (
-            "chatgpt"
-            if logged_in and subscription
-            else "apiKey"
-            if logged_in and api_key
-            else None
+            "chatgpt" if logged_in and subscription else "apiKey" if logged_in and api_key else None
         ),
         "plan_type": None,
         "requires_openai_auth": True,
         "warning": (
-            None
-            if not logged_in or subscription
-            else "codex_api_key_mode_not_subscription"
+            None if not logged_in or subscription else "codex_api_key_mode_not_subscription"
         ),
         "status_source": "codex_cli",
     }
@@ -87,9 +81,7 @@ def status(*, refresh: bool = False, timeout: float = 20.0) -> Dict[str, Any]:
         "requires_openai_auth": bool(result.get("requiresOpenaiAuth", True)),
         "status_source": "codex_app_server",
         "warning": (
-            "codex_api_key_mode_not_subscription"
-            if logged_in and not subscription
-            else None
+            "codex_api_key_mode_not_subscription" if logged_in and not subscription else None
         ),
     }
 

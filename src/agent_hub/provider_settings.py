@@ -26,9 +26,7 @@ _LOCK = threading.RLock()
 def _validate_provider_value(provider: str, value: Dict[str, Any]) -> None:
     unknown = set(value) - ALLOWED[provider]
     if unknown:
-        raise ValueError(
-            f"unsupported {provider} settings: {', '.join(sorted(unknown))}"
-        )
+        raise ValueError(f"unsupported {provider} settings: {', '.join(sorted(unknown))}")
     if "model" in value:
         model = value["model"]
         if not isinstance(model, str) or not model.strip():
@@ -50,8 +48,7 @@ def _validate_provider_value(provider: str, value: Dict[str, Any]) -> None:
             or max_tokens > limits.MAX_OUTPUT_TOKENS
         ):
             raise ValueError(
-                f"{provider} max_tokens must be an integer within "
-                f"1..{limits.MAX_OUTPUT_TOKENS}"
+                f"{provider} max_tokens must be an integer within 1..{limits.MAX_OUTPUT_TOKENS}"
             )
     if "api_mode" in value:
         api_mode = value["api_mode"]
@@ -63,19 +60,12 @@ def _normalize_changes(provider: str, changes: Dict[str, Any]) -> Dict[str, Any]
     unknown = set(changes) - ALLOWED[provider]
     if unknown:
         raise ValueError(f"unsupported {provider} settings: {', '.join(sorted(unknown))}")
-    normalized = {
-        key: value
-        for key, value in changes.items()
-        if value is not None
-    }
+    normalized = {key: value for key, value in changes.items() if value is not None}
     if "model" in normalized and isinstance(normalized["model"], str):
         normalized["model"] = normalized["model"].strip()
     if "temperature" in normalized:
         temperature = normalized["temperature"]
-        if (
-            not isinstance(temperature, bool)
-            and isinstance(temperature, (int, float))
-        ):
+        if not isinstance(temperature, bool) and isinstance(temperature, (int, float)):
             normalized["temperature"] = float(temperature)
     _validate_provider_value(provider, normalized)
     return normalized
@@ -105,8 +95,7 @@ def _read(*, strict: bool = False) -> Dict[str, Any]:
             provider_value = value[provider]
             if not isinstance(provider_value, dict):
                 raise ValueError(
-                    "Agent Hub provider settings must contain JSON objects: "
-                    + provider
+                    "Agent Hub provider settings must contain JSON objects: " + provider
                 )
             _validate_provider_value(provider, provider_value)
     return value if isinstance(value, dict) else {}

@@ -7,7 +7,7 @@ macOS용 멀티 모델 실행 환경입니다.
 인계 기록을 로컬에서 함께 관리합니다. Codex나 Claude Code가 종료되어도 실행 상태가 남기
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
-- 현재 버전: `2.2.0`
+- 현재 버전: `2.3.0`
 - Python: 3.10 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -27,12 +27,13 @@ Provider마다 로그인과 API 동작은 다르지만, Agent Hub 밖에서는 �
 긴 작업은 run, step, event 단위로 SQLite에 저장됩니다. 호스트의 MCP 연결이 끊겨도
 백그라운드의 `agent-hubd`가 실행 상태를 유지하며, 완료된 단계는 다시 실행하지 않습니다.
 
-### 외부 전송 전 사람 확인
+### 외부 전송을 확인하고 제어
 
 저장소 파일이나 이전 결과물을 모델에 보낼 때는 포함할 파일, 데이터 크기, 목적 provider와
-내용 digest를 먼저 만듭니다. 연결 GUI에서 사람이 이 목록을 승인한 뒤 같은 digest, policy
-revision과 일회용 review ID를 제출해야 외부 모델을 호출합니다. 승인 전에는 provider 호출이
-발생하지 않으며, 한 번 사용한 승인은 다시 사용할 수 없습니다.
+내용 digest를 먼저 만듭니다. 기본 설정에서는 연결 GUI에서 사람이 이 목록을 승인해야 합니다.
+반복 작업에는 사용자 전역 `자동 승인` 스위치를 켤 수 있습니다. 자동 승인도 같은 digest,
+policy revision과 일회용 review ID를 사용하며, 프로젝트의 전송 금지 정책과 민감 정보 보호를
+우회하지 않습니다. 한 번 사용한 승인은 다시 사용할 수 없습니다.
 
 ### Provider별 격리
 
@@ -189,8 +190,9 @@ claude plugin install agent-hub@agent-hub --scope user
 흐름을 사용합니다.
 
 1. `agent_hub_plan`의 `prepare`가 선택한 파일을 조사하고 외부 전송 변경안을 만듭니다.
-2. 연결 GUI에서 사용자가 파일 목록, 목적 provider, 크기와 digest를 검토해 승인하거나
-   거부합니다.
+2. 기본 설정에서는 연결 GUI에서 사용자가 파일 목록, 목적 provider, 크기와 digest를 검토해
+   승인하거나 거부합니다. 전역 자동 승인이 켜져 있으면 허용된 요청은 이 단계에서 자동으로
+   승인됩니다.
 3. 같은 digest, policy revision과 `approval_request_id`로 `apply`를 실행하면 planner가
    작업 단계를 제안합니다.
 4. 로컬 validator가 의존 관계, capability, 정책과 사용 한도를 검사합니다.
@@ -202,7 +204,8 @@ claude plugin install agent-hub@agent-hub --scope user
 사용자가 판단할 수 있게 합니다.
 Provider가 명확한 retryable 실패를 반환한 step은 `agent_hub_continue`의
 `retry_failed_steps`에 step ID를 명시해 다시 실행할 수 있습니다. 안전 여부가 불명확한
-`outcome_unknown`이나 내부 오류는 이 경로로 재시도할 수 없습니다.
+`outcome_unknown`이나 내부 오류는 이 경로로 재시도할 수 없습니다. `agent_hub_get`은
+재시도 가능한 step ID와 최신 revision이 들어간 `next_action`을 함께 반환합니다.
 
 ## 공개 MCP 도구 14개
 
@@ -223,16 +226,18 @@ Provider가 명확한 retryable 실패를 반환한 step은 `agent_hub_continue`
 | `agent_hub_handoff` | `HANDOFF.md` 갱신과 takeover를 관리합니다. |
 | `agent_hub_doctor` | 상태를 읽기 전용으로 진단하고 수리 계획을 만듭니다. |
 
-상태를 바꾸는 도구는 `idempotency_key` 또는 `expected_revision`을 요구합니다. 오류 응답에는
-안전한 코드와 다음 행동만 포함하며, credential, 원본 prompt, 결과 본문과 raw exception은
-event에 기록하지 않습니다.
+Run 시작·진행·취소와 feedback은 `idempotency_key` 또는 `expected_revision`으로 경합을
+막습니다. Policy, HANDOFF와 artifact 내보내기는 proposal digest와 대상 파일 SHA를 다시
+확인합니다. 오류 응답에는 안전한 코드와 다음 행동만 포함하며, credential, 원본 prompt,
+결과 본문과 raw exception은 event에 기록하지 않습니다.
 
 ## 라우팅과 프로젝트 정책
 
 기본 설정인 `quality_balanced`는 품질 60%, 신뢰성 20%, 지연시간 10%, token 효율 10%를
-기준으로 후보를 비교합니다. `shadow` mode에서는 planner 선택을 바꾸지 않고 대안 점수만
-기록합니다. `advisory`는 추천을 보여 주며, `auto`는 충분한 표본과 품질 기준을 만족할 때만
-provider 순서를 조정합니다. Mode는 자동으로 승격되지 않습니다.
+기준으로 후보를 비교합니다. `shadow`와 `advisory`는 planner가 고른 provider가 capability,
+정책, 연결 상태와 context limit 검사를 통과하면 그 선택을 유지합니다. 실행할 수 없는
+provider는 eligible fallback으로 바뀔 수 있습니다. `auto`는 충분한 표본과 품질 기준을
+만족할 때만 provider 순서를 조정합니다. Mode는 자동으로 승격되지 않습니다.
 
 프로젝트별 설정은 `.agent-hub/project.toml`에 둡니다.
 
@@ -253,21 +258,32 @@ inline_prompt = "allowed"
 [budgets]
 timeout_seconds = 1790
 max_leaf_calls = 100
-max_tokens = 131072
+max_output_tokens = 131072
+max_total_tokens = 131072
+# 필요할 때만 model context limit보다 작은 입력 상한을 지정합니다.
+# max_input_tokens = 65536
 ```
 
-Provider와 model 허용 목록, 외부 전송 규칙, 최대 실행 시간, provider 호출 횟수, token과
-결과물 보관 방식을 프로젝트마다 다르게 설정할 수 있습니다.
+`max_output_tokens`는 provider 한 번의 최대 출력, `max_total_tokens`는 run 전체 누적 사용량을
+제한합니다. 선택 사항인 `max_input_tokens`는 model이 받을 context를 더 작게 제한할 때만
+사용합니다. 이전 설정의 `max_tokens`는 output과 total의 호환 별칭으로 읽으며 input limit으로
+사용하지 않습니다. Provider와 model 허용 목록, 외부 전송 규칙, 최대 실행 시간, provider
+호출 횟수, token과 결과물 보관 방식을 프로젝트마다 다르게 설정할 수 있습니다.
 
 ## 보안과 데이터 경계
 
-- 저장소 내용을 외부로 보내기 전 `egress_manifest_v2`를 연결 GUI에 표시하고, 사람이 승인한
-  일회용 review ID와 digest·policy revision 재확인을 요구합니다.
+- 저장소 내용을 외부로 보내기 전 `egress_manifest_v2`를 만들고 일회용 review ID와
+  digest·policy revision 재확인을 요구합니다. 사람의 개별 승인이 기본값이며, 연결 GUI의
+  사용자 전역 스위치로 자동 승인을 선택할 수 있습니다.
+- 전역 자동 승인은 프로젝트의 `denied` 정책, 민감 경로 차단, secret 제거를 우회하지 않으며
+  자동 승인 여부와 당시 설정 revision을 review 기록에 남깁니다.
 - Secret으로 보이는 줄은 fact pack과 로컬 색인에 넣기 전에 제외합니다.
 - 긴 작업의 입력과 결과 artifact는 AES-GCM으로 암호화합니다.
 - 암호화 key는 macOS Keychain에 저장합니다. SQLite DB 전체가 암호화되는 것은 아닙니다.
 - 로컬 검색은 SQLite FTS5를 사용하며 기본 설정에서 cloud embedding을 호출하지 않습니다.
 - Provider worker는 허용된 외부 도메인만 통과시키는 localhost proxy를 사용합니다.
+- Provider config, cache와 credential 경로는 절대 경로이면서 HOME의 하위 디렉터리여야 합니다.
+  `/`, HOME 자체, HOME의 상위 경로나 그곳을 가리키는 symlink는 worker 시작 전에 거부합니다.
 - Third-party provider는 package와 manifest digest, 권한을 검토하기 전에는 설치하지 않습니다.
 - Agent Hub core에는 임의 shell 명령 실행 기능이 없습니다.
 
@@ -327,12 +343,14 @@ slot에 보관합니다. 전환이나 복구가 완전히 끝나지 않으면 �
 ./.venv/bin/python -m pytest
 ./scripts/check-sync.sh
 ./scripts/check-hub-plugins.sh
+./.venv/bin/python scripts/check_release_version.py
 ./.venv/bin/python -m build
 ```
 
 사용자 문서는 다음 검사도 함께 실행합니다.
 
 ```bash
+./.venv/bin/python -m orchestrate_codex.verify --user-facing README.md
 ./.venv/bin/python -m orchestrate_codex.document_quality README.md
 ```
 

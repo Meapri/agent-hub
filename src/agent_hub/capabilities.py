@@ -16,11 +16,13 @@ CAPABILITIES: Dict[str, Dict[str, Dict[str, Any]]] = {
     provider: deepcopy(dict(item.capabilities))
     for provider, item in provider_registry.MANIFESTS.items()
 }
-CAPABILITIES.update({
-    "local": {
-        "release_snapshot": {"supported": True, "native": True},
-    },
-})
+CAPABILITIES.update(
+    {
+        "local": {
+            "release_snapshot": {"supported": True, "native": True},
+        },
+    }
+)
 
 
 def provider_capabilities(provider: str) -> Dict[str, Dict[str, Any]]:

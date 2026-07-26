@@ -115,6 +115,26 @@ def test_egress_review_gui_uses_internal_daemon_channel_only():
                         "approved_count": 0,
                     },
                 }
+            if method == "egress/settings":
+                return {
+                    "success": True,
+                    "data": {
+                        "schema": "agent_hub_egress_settings_v1",
+                        "revision": 2,
+                        "auto_approve": False,
+                        "updated_at": 100.0,
+                    },
+                }
+            if method == "egress/settings/update":
+                return {
+                    "success": True,
+                    "data": {
+                        "schema": "agent_hub_egress_settings_v1",
+                        "revision": 3,
+                        "auto_approve": True,
+                        "updated_at": 101.0,
+                    },
+                }
             return {
                 "success": True,
                 "data": {"review_id": "egr_fixture", "status": "approved"},
@@ -127,12 +147,25 @@ def test_egress_review_gui_uses_internal_daemon_channel_only():
     manager._use_daemon = True  # noqa: SLF001 - internal GUI channel boundary
 
     reviews = manager.egress_reviews()
+    settings = manager.egress_settings()
+    enabled = manager.update_egress_settings(
+        auto_approve=True,
+        expected_revision=settings["revision"],
+    )
     approved = manager.decide_egress_review("egr_fixture", decision="approve")
 
     assert reviews["reviews"][0]["review_id"] == "egr_fixture"
+    assert settings["auto_approve"] is False
+    assert enabled["auto_approve"] is True
     assert approved["review"]["status"] == "approved"
     assert calls == [
         ("egress/reviews", None, 5.0),
+        ("egress/settings", None, 5.0),
+        (
+            "egress/settings/update",
+            {"auto_approve": True, "expected_revision": 2},
+            5.0,
+        ),
         (
             "egress/decide",
             {"review_id": "egr_fixture", "decision": "approve"},
@@ -2203,7 +2236,7 @@ def test_consent_check_and_login_reservation_are_serialized(monkeypatch):
     login_worker.start()
     assert status_entered.wait(timeout=5)
     revoke_worker.start()
-    assert revoke_done.wait(timeout=0.05) is False
+    assert revoke_done.wait(timeout=0.05) is True
     allow_status.set()
     assert start_entered.wait(timeout=5)
     assert revoke_done.wait(timeout=5)

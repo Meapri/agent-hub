@@ -20,7 +20,9 @@ description: >
    대조한다. HANDOFF가 다르면 현재 코드와 Git 상태를 우선한다.
 4. 저장소의 정책 파일과 가까운 범위 지시를 읽고, 다음 한 걸음부터 실행한다.
 5. durable run을 재개할 때는 `agent_hub_get`으로 최신 revision과 lease를 확인한 뒤
-   `agent_hub_continue`를 호출한다. 활성 lease에 중복 continue하지 않는다.
+   `agent_hub_continue`를 호출한다. 활성 lease에 중복 continue하지 않는다. paused run은
+   `retryable_failed_steps`에 표시된 step만 사용자 의사를 확인한 뒤 `next_action`의 최신
+   revision으로 재시도한다.
 
 ## 경계
 

@@ -33,9 +33,7 @@ def compare_models(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     max_tokens = int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS)
     temperature = arguments.get("temperature", 0.2)
-    timeout = int(
-        arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-    )
+    timeout = int(arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS)
     results: List[Dict[str, Any]] = []
     for model in models:
         started = time.time()
@@ -60,7 +58,9 @@ def compare_models(arguments: Dict[str, Any]) -> Dict[str, Any]:
                     "elapsed_ms": elapsed_ms,
                     "usage": out.get("usage") or {},
                     "backend": out.get("backend"),
-                    "capacity_fallback": bool((out.get("diagnostics") or {}).get("capacity_fallback")),
+                    "capacity_fallback": bool(
+                        (out.get("diagnostics") or {}).get("capacity_fallback")
+                    ),
                     "used_model": (out.get("diagnostics") or {}).get("used_model") or model,
                     "warnings": out.get("warnings") or [],
                 }

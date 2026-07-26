@@ -74,9 +74,12 @@ def test_provider_conformance_rejects_secret_shaped_fields():
     report = check_provider("fixture", request)
 
     assert report["passed"] is False
-    assert next(
-        check for check in report["checks"] if check["name"] == "status_redaction"
-    )["reason_code"] == "secret_field_exposed"
+    assert (
+        next(check for check in report["checks"] if check["name"] == "status_redaction")[
+            "reason_code"
+        ]
+        == "secret_field_exposed"
+    )
 
 
 def test_builtin_workflow_packages_are_valid():

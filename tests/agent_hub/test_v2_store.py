@@ -45,6 +45,27 @@ def test_store_uses_wal_permissions_and_integrity(tmp_path):
     assert store.path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_global_egress_settings_default_off_and_use_revision_cas(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+
+    initial = store.egress_settings()
+    enabled = store.update_egress_settings(
+        auto_approve=True,
+        expected_revision=initial["revision"],
+    )
+
+    assert initial["auto_approve"] is False
+    assert enabled["auto_approve"] is True
+    assert enabled["revision"] == initial["revision"] + 1
+    with pytest.raises(HubV2Error) as stale:
+        store.update_egress_settings(
+            auto_approve=False,
+            expected_revision=initial["revision"],
+        )
+    assert stale.value.code == "egress_settings_revision_conflict"
+    assert store.egress_settings()["auto_approve"] is True
+
+
 def test_run_creation_is_idempotent_and_events_are_cursor_based(tmp_path):
     store = HubStore(tmp_path / "state.sqlite3")
     first = store.create_run(
@@ -132,6 +153,68 @@ def test_step_failure_preserves_request_checkpoint_and_provider_identity(tmp_pat
     assert step["provider"] == "gpt"
     assert step["checkpoint"]["request_sha256"] == "a" * 64
     assert step["checkpoint"]["phase"] == "outcome_unknown"
+
+
+def test_claim_owner_reconciles_every_running_step_without_leaving_hangs(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    plan = validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Reconcile coordinator failure.",
+                "capability": "chat",
+                "inline_input": "",
+            },
+            "steps": [
+                {
+                    "id": "local",
+                    "capability": "inspect",
+                    "instruction": "Inspect locally.",
+                },
+                {
+                    "id": "external",
+                    "capability": "chat",
+                    "instruction": "Call a provider.",
+                },
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+    run = store.create_run(
+        plan=plan,
+        project_root=str(tmp_path),
+        idempotency_key="fixture.reconcile",
+    )
+    claim = store.claim_run(run["run_id"], expected_revision=0)
+    running = store.update_step(
+        run["run_id"],
+        step_id="local",
+        expected_run_revision=claim.revision,
+        status="running",
+        checkpoint={"phase": "local_step_pending", "retry_safe": True},
+    )
+    running = store.update_step(
+        run["run_id"],
+        step_id="external",
+        expected_run_revision=running["revision"],
+        status="running",
+        checkpoint={"phase": "provider_request_pending", "retry_safe": False},
+    )
+
+    reconciled = store.reconcile_running_steps(
+        run["run_id"],
+        claim_token=claim.claim_token,
+        expected_revision=running["revision"],
+        reason_code="run_internal_error",
+    )
+
+    statuses = {step["step_id"]: step["status"] for step in reconciled["run"]["steps"]}
+    assert statuses == {"local": "queued", "external": "outcome_unknown"}
+    assert reconciled["requeued_step_ids"] == ["local"]
+    assert reconciled["outcome_unknown_step_ids"] == ["external"]
+    assert all(status != "running" for status in statuses.values())
 
 
 def test_claim_renewal_extends_lease_without_changing_revision(tmp_path):
@@ -246,6 +329,56 @@ def test_store_schema_is_backed_up_and_drops_retired_import_table(tmp_path):
     finally:
         connection.close()
     assert retired is None
+
+
+def test_store_migrates_schema_eight_global_egress_fields(tmp_path):
+    path = tmp_path / "state.sqlite3"
+    HubStore(path)
+    connection = sqlite3.connect(path)
+    try:
+        connection.executescript(
+            """
+            ALTER TABLE egress_reviews RENAME TO egress_reviews_v9;
+            CREATE TABLE egress_reviews (
+                review_id TEXT PRIMARY KEY,
+                proposal_sha256 TEXT NOT NULL,
+                manifest_sha256 TEXT NOT NULL,
+                project_root TEXT NOT NULL,
+                policy_revision INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT,
+                destinations_json TEXT NOT NULL,
+                entries_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                decided_at REAL,
+                consumed_at REAL
+            );
+            DROP TABLE egress_reviews_v9;
+            DROP TABLE egress_settings;
+            UPDATE meta SET value = '8' WHERE key = 'schema_version';
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    migrated = HubStore(path)
+    connection = sqlite3.connect(path)
+    try:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(egress_reviews)").fetchall()
+        }
+    finally:
+        connection.close()
+
+    assert migrated.health()["schema_version"] == STORE_SCHEMA_VERSION
+    assert {"decision_source", "decision_settings_revision"} <= columns
+    assert migrated.egress_settings()["auto_approve"] is False
+    assert list(
+        (tmp_path / "backups").glob(f"pre-migration-v8-to-v{STORE_SCHEMA_VERSION}-*.sqlite3")
+    )
 
 
 def test_store_records_only_egress_approval_metadata(tmp_path):

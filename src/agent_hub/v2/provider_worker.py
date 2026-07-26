@@ -10,7 +10,7 @@ import json
 import sys
 from typing import Any, Mapping
 
-from .contracts import ensure_public_model_id, require_object, validate_task
+from .contracts import ensure_public_model_id, output_token_limit, require_object, validate_task
 from .errors import HubV2Error, public_failure, safe_unexpected_error
 from .provider_manifests import manifest_for
 from . import provider_runtime
@@ -94,8 +94,14 @@ def _invoke_arguments(
     common: dict[str, Any] = {"provider": provider}
     if model:
         common["model"] = ensure_public_model_id(model)
-    if constraints.get("max_tokens") is not None:
-        common["max_tokens"] = constraints["max_tokens"]
+    output_limit = (
+        output_token_limit(constraints)
+        if constraints.get("max_output_tokens") is not None
+        or constraints.get("max_tokens") is not None
+        else None
+    )
+    if output_limit is not None:
+        common["max_tokens"] = output_limit
     if constraints.get("timeout_seconds") is not None:
         common["timeout_sec"] = constraints["timeout_seconds"]
     if capability in {"chat", "review", "decide"}:
@@ -166,9 +172,7 @@ def _plan(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
                     else 100
                 ),
                 max_tokens=int(
-                    constraints.get("max_tokens") or 131_072
-                    if isinstance(constraints, Mapping)
-                    else 131_072
+                    output_token_limit(constraints) if isinstance(constraints, Mapping) else 131_072
                 ),
                 timeout_seconds=float(
                     constraints.get("timeout_seconds") or 1790

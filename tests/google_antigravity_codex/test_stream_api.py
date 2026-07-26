@@ -9,9 +9,9 @@ from google_antigravity_codex import antigravity_api, agy_auth
 
 def test_stream_post_parses_sse_and_json_lines():
     lines = [
-        b"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}}\n",
+        b'data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}}\n',
         b"\n",
-        b"{\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}]}}]}}\n",
+        b'{"response":{"candidates":[{"content":{"parts":[{"text":"!"}]}}]}}\n',
         b"data: [DONE]\n",
     ]
 
@@ -56,8 +56,9 @@ def test_generate_content_stream_yields_chunks_and_diagnostics():
         assert "streamGenerateContent" in path
         yield {"response": {"candidates": [{"content": {"parts": [{"text": "S"}]}}]}}
 
-    with patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=credentials), patch.object(
-        antigravity_api, "_stream_post", side_effect=fake_stream
+    with (
+        patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=credentials),
+        patch.object(antigravity_api, "_stream_post", side_effect=fake_stream),
     ):
         events = list(
             antigravity_api.generate_content_stream(
@@ -92,11 +93,7 @@ def test_stream_refresh_keeps_public_model_after_project_change():
     def fake_catalog(path, body, access_token, *, timeout):
         del access_token, timeout
         assert path == "/v1internal:fetchAvailableModels"
-        internal = (
-            "MODEL_PROJECT_ONE"
-            if body["project"] == "project-one"
-            else "MODEL_PROJECT_TWO"
-        )
+        internal = "MODEL_PROJECT_ONE" if body["project"] == "project-one" else "MODEL_PROJECT_TWO"
         return {
             "models": {
                 "gemini-3.6-flash-high": {
@@ -108,9 +105,7 @@ def test_stream_refresh_keeps_public_model_after_project_change():
 
     def fake_stream(path, body, access_token, *, timeout):
         del path, timeout
-        stream_calls.append(
-            (access_token, body["project"], body["model"])
-        )
+        stream_calls.append((access_token, body["project"], body["model"]))
         if access_token == "stale-token":
             raise antigravity_api.AntigravityApiError(
                 "unauthorized",

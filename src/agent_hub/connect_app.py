@@ -59,8 +59,17 @@ class ConnectHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/" and self._accept_initial_session(parsed.query):
-            return
+        if parsed.path == "/":
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            if "session" in query:
+                if self._accept_initial_session(query["session"][0]):
+                    return
+                self._json_error(
+                    HTTPStatus.UNAUTHORIZED,
+                    "이 연결 관리 세션이 만료되었습니다. 앱을 다시 실행해 주세요.",
+                    "session_required",
+                )
+                return
         if parsed.path in {"/", "/styles.css", "/app.js"}:
             self._static(parsed.path)
             return
@@ -76,6 +85,9 @@ class ConnectHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/egress-reviews":
             self._action(self.server.manager.egress_reviews)
+            return
+        if parsed.path == "/api/egress-settings":
+            self._action(self.server.manager.egress_settings)
             return
         if parsed.path.startswith("/api/jobs/"):
             job_id = urllib.parse.unquote(parsed.path.removeprefix("/api/jobs/"))
@@ -111,6 +123,14 @@ class ConnectHandler(BaseHTTPRequestHandler):
         if parts == ["api", "shutdown"]:
             self._json(HTTPStatus.OK, {"success": True})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+        if parts == ["api", "egress-settings"]:
+            self._action(
+                lambda: self.server.manager.update_egress_settings(
+                    auto_approve=body.get("auto_approve"),
+                    expected_revision=body.get("expected_revision"),
+                )
+            )
             return
         if (
             len(parts) == 4
@@ -195,9 +215,17 @@ class ConnectHandler(BaseHTTPRequestHandler):
         else:
             self._json(HTTPStatus.OK, payload)
 
-    def _accept_initial_session(self, query: str) -> bool:
-        supplied = urllib.parse.parse_qs(query).get("session", [""])[0]
-        if not supplied or not secrets.compare_digest(supplied, self.server.session_token):
+    def _session_matches(self, supplied: str) -> bool:
+        expected = self.server.session_token
+        return bool(
+            supplied
+            and supplied.isascii()
+            and expected.isascii()
+            and secrets.compare_digest(supplied, expected)
+        )
+
+    def _accept_initial_session(self, supplied: str) -> bool:
+        if not self._session_matches(supplied):
             return False
         self.send_response(HTTPStatus.SEE_OTHER)
         self._security_headers()
@@ -208,7 +236,7 @@ class ConnectHandler(BaseHTTPRequestHandler):
 
     def _authenticated(self) -> bool:
         supplied = self.headers.get("X-Agent-Hub-Session", "")
-        return bool(supplied and secrets.compare_digest(supplied, self.server.session_token))
+        return self._session_matches(supplied)
 
     def _same_origin(self) -> bool:
         return (

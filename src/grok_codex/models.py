@@ -39,7 +39,11 @@ def list_models(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
             warnings.append(f"live_list_failed:{type(exc).__name__}")
     models = live or list(CURATED)
     image_models = [item for item in models if "imagine-image" in str(item.get("id") or "")]
-    text_models = [item for item in models if item not in image_models and "imagine-video" not in str(item.get("id") or "")]
+    text_models = [
+        item
+        for item in models
+        if item not in image_models and "imagine-video" not in str(item.get("id") or "")
+    ]
     return {
         "text": f"{len(models)} models (source={source})",
         "source": source,

@@ -92,6 +92,11 @@ def test_daemon_exposes_egress_review_only_on_internal_gui_channel(tmp_path):
                 except HubV2Error:
                     time.sleep(0.01)
             listed = client.request("egress/reviews")
+            settings = client.request("egress/settings")
+            enabled = client.request(
+                "egress/settings/update",
+                {"auto_approve": True, "expected_revision": 0},
+            )
             approved = client.request(
                 "egress/decide",
                 {"review_id": review_id, "decision": "approve"},
@@ -107,6 +112,9 @@ def test_daemon_exposes_egress_review_only_on_internal_gui_channel(tmp_path):
             daemon.close()
 
     assert listed["data"]["reviews"][0]["review_id"] == review_id
+    assert settings["data"]["auto_approve"] is False
+    assert enabled["data"]["auto_approve"] is True
+    assert enabled["data"]["revision"] == 1
     assert approved["data"]["status"] == "approved"
     assert public["success"] is False
     assert public["error"]["code"] == "unknown_tool"

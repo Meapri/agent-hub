@@ -158,6 +158,40 @@ class HubDaemon:
                 }
             except HubV2Error as exc:
                 result = public_failure(exc, operation=method)
+        elif method == "egress/settings":
+            try:
+                result = {
+                    "success": True,
+                    "operation": method,
+                    "error": None,
+                    "data": self.service.egress_settings(),
+                }
+            except HubV2Error as exc:
+                result = public_failure(exc, operation=method)
+        elif method == "egress/settings/update":
+            params = request.get("params")
+            if not isinstance(params, Mapping):
+                result = public_failure(
+                    HubV2Error(
+                        "invalid_request",
+                        "The global egress setting must be an object.",
+                        scope="egress",
+                    ),
+                    operation=method,
+                )
+            else:
+                try:
+                    result = {
+                        "success": True,
+                        "operation": method,
+                        "error": None,
+                        "data": self.service.update_egress_settings(
+                            auto_approve=params.get("auto_approve"),  # type: ignore[arg-type]
+                            expected_revision=params.get("expected_revision"),  # type: ignore[arg-type]
+                        ),
+                    }
+                except HubV2Error as exc:
+                    result = public_failure(exc, operation=method)
         elif method == "egress/decide":
             params = request.get("params")
             if not isinstance(params, Mapping):

@@ -141,9 +141,7 @@ def clear_pending_login(*, expected_flow_id: str | None = None) -> bool:
     with _pending_lock():
         if expected_flow_id:
             pending = _read_json_object(path)
-            current_flow_id = (
-                str(pending.get("flow_id") or "") if pending is not None else ""
-            )
+            current_flow_id = str(pending.get("flow_id") or "") if pending is not None else ""
             if not current_flow_id or not secrets.compare_digest(
                 current_flow_id,
                 expected_flow_id,
@@ -198,7 +196,9 @@ def clear_unusable_pending_login() -> bool:
 
 def _pkce() -> Tuple[str, str]:
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    )
     return verifier, challenge
 
 
@@ -286,7 +286,9 @@ def save_tokens(
     if not email:
         email = str(existing.get("email") or "")
     if not project_id:
-        project_id = str(existing.get("project_id") or existing.get("cloudaicompanion_project") or "")
+        project_id = str(
+            existing.get("project_id") or existing.get("cloudaicompanion_project") or ""
+        )
     if not refresh_token:
         refresh_token = str(existing.get("refresh") or existing.get("refresh_token") or "")
     payload = {
@@ -363,7 +365,9 @@ def _exchange(
     except urllib.error.URLError as exc:
         raise OAuthLoginError("Token exchange network error.", code="oauth_network_error") from exc
     if not isinstance(payload, dict) or not payload.get("access_token"):
-        raise OAuthLoginError("Token exchange returned no access token.", code="oauth_token_missing")
+        raise OAuthLoginError(
+            "Token exchange returned no access token.", code="oauth_token_missing"
+        )
     return payload
 
 
@@ -401,12 +405,9 @@ def refresh_access_token(
                 "Direct Antigravity credentials are no longer available.",
                 code="credentials_changed",
             ) from exc
-        if (
-            not stored_credentials.refresh_token
-            or not secrets.compare_digest(
-                stored_credentials.refresh_token,
-                refresh_token,
-            )
+        if not stored_credentials.refresh_token or not secrets.compare_digest(
+            stored_credentials.refresh_token,
+            refresh_token,
         ):
             raise OAuthLoginError(
                 "Direct Antigravity credentials changed before refresh.",
@@ -525,10 +526,7 @@ def start_login(*, use_local_redirect: bool = True) -> Dict[str, Any]:
                         "Existing login state is invalid; clear it before starting again.",
                         code="oauth_pending_invalid",
                     )
-                if (
-                    existing.get("version") != PENDING_VERSION
-                    or not existing.get("flow_id")
-                ):
+                if existing.get("version") != PENDING_VERSION or not existing.get("flow_id"):
                     raise OAuthLoginError(
                         "Existing login state must be cleared before starting again.",
                         code="oauth_pending_restart_required",
@@ -578,13 +576,12 @@ def start_login(*, use_local_redirect: bool = True) -> Dict[str, Any]:
 def _load_pending(*, expected_flow_id: str | None = None) -> Dict[str, Any]:
     data = _read_json_object(pending_file_path())
     if not data:
-        raise OAuthLoginError("No pending login. Call google_antigravity_login_start first.", code="oauth_pending_missing")
+        raise OAuthLoginError(
+            "No pending login. Call google_antigravity_login_start first.",
+            code="oauth_pending_missing",
+        )
     flow_id = str(data.get("flow_id") or "")
-    if (
-        data.get("version") != PENDING_VERSION
-        or not flow_id
-        or not data.get("consent_revision")
-    ):
+    if data.get("version") != PENDING_VERSION or not flow_id or not data.get("consent_revision"):
         raise OAuthLoginError(
             "Pending login state must be cleared and restarted.",
             code="oauth_pending_restart_required",
@@ -616,9 +613,7 @@ def validate_callback_state(
     with _pending_lock():
         pending = _load_pending(expected_flow_id=expected_flow_id)
     expected_state = str(pending.get("state") or "")
-    is_redirect_url = bool(
-        urllib.parse.urlparse(str(code_or_url or "")).scheme
-    )
+    is_redirect_url = bool(urllib.parse.urlparse(str(code_or_url or "")).scheme)
     state_missing = not returned_state and (require_state or is_redirect_url)
     state_mismatch = bool(returned_state) and not secrets.compare_digest(
         returned_state,
@@ -692,11 +687,7 @@ def complete_login(
         pending = _load_pending(expected_flow_id=expected_flow_id)
     flow_id = str(pending["flow_id"])
     expected_state = str(pending.get("state") or "")
-    if (
-        rstate
-        and expected_state
-        and not secrets.compare_digest(rstate, expected_state)
-    ):
+    if rstate and expected_state and not secrets.compare_digest(rstate, expected_state):
         raise OAuthLoginError("OAuth state mismatch.", code="oauth_state_mismatch")
 
     pending_client_id = str(pending.get("client_id") or "").strip()
@@ -849,9 +840,7 @@ def run_interactive_login(
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
-                self.wfile.write(
-                    b"<h2>Antigravity login complete. You can close this tab.</h2>"
-                )
+                self.wfile.write(b"<h2>Antigravity login complete. You can close this tab.</h2>")
 
         try:
             server = http.server.HTTPServer(("127.0.0.1", LOCAL_PORT), Handler)
@@ -916,18 +905,13 @@ def run_interactive_login(
     if rstate and not secrets.compare_digest(rstate, state):
         raise OAuthLoginError("OAuth state mismatch.", code="oauth_state_mismatch")
 
-    callback_url = redirect + "?" + urllib.parse.urlencode(
-        {"code": code, "state": rstate or state}
-    )
+    callback_url = redirect + "?" + urllib.parse.urlencode({"code": code, "state": rstate or state})
     result = complete_login(
         callback_url,
         probe=False,
         expected_flow_id=flow_id,
     )
-    print_fn(
-        "\n[OK] Logged in"
-        f"  (client={result.get('client_label') or 'configured'})"
-    )
+    print_fn(f"\n[OK] Logged in  (client={result.get('client_label') or 'configured'})")
     return result
 
 

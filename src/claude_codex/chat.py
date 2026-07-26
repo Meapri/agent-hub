@@ -167,7 +167,9 @@ def to_anthropic_messages(
                 previous_parts = (
                     previous if isinstance(previous, list) else [{"type": "text", "text": previous}]
                 )
-                new_parts = content if isinstance(content, list) else [{"type": "text", "text": content}]
+                new_parts = (
+                    content if isinstance(content, list) else [{"type": "text", "text": content}]
+                )
                 out[-1]["content"] = [*previous_parts, *new_parts]
         else:
             out.append({"role": role, "content": content})
@@ -178,7 +180,9 @@ def to_anthropic_messages(
     return "\n\n".join(system_parts), out
 
 
-def convert_tools_to_anthropic(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+def convert_tools_to_anthropic(
+    tools: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
     """OpenAI tools → Anthropic input_schema tools (Hermes pattern, rewritten)."""
     if not tools:
         return None
@@ -195,8 +199,7 @@ def convert_tools_to_anthropic(tools: Optional[List[Dict[str, Any]]]) -> Optiona
                 {
                     "name": name,
                     "description": str(fn.get("description") or ""),
-                    "input_schema": fn.get("parameters")
-                    or {"type": "object", "properties": {}},
+                    "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
                 }
             )
         elif tool.get("name"):
@@ -288,7 +291,9 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         body["output_config"] = {"effort": reasoning_effort}
         if uses_explicit_adaptive_thinking(model):
             body["thinking"] = {"type": "adaptive"}
-    tools = convert_tools_to_anthropic(arguments.get("tools") if isinstance(arguments.get("tools"), list) else None)
+    tools = convert_tools_to_anthropic(
+        arguments.get("tools") if isinstance(arguments.get("tools"), list) else None
+    )
     if tools:
         body["tools"] = tools
 
@@ -305,9 +310,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     incomplete = stop_reason in {"max_tokens", "tool_use"}
     warnings = [f"incomplete_finish_reason:{stop_reason}"] if incomplete else []
     if requested_max_tokens > model_max_tokens:
-        warnings.append(
-            f"max_tokens_clamped_for_model:{requested_max_tokens}->{model_max_tokens}"
-        )
+        warnings.append(f"max_tokens_clamped_for_model:{requested_max_tokens}->{model_max_tokens}")
     if temperature_ignored:
         warnings.append("temperature_ignored_by_model")
     return {

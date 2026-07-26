@@ -57,7 +57,11 @@ def resolve_auth() -> Dict[str, Any]:
         # OAuth-shaped keys from env still use Bearer
         if key.startswith("sk-ant-oat") or key.startswith("sk-ant-ort"):
             return {"mode": "subscription_oauth", "access_token": key, "source": API_KEY_ENV}
-        return {"mode": "api_key", "api_key": key, "source": API_KEY_ENV if os.getenv(API_KEY_ENV) else str(api_key_path())}
+        return {
+            "mode": "api_key",
+            "api_key": key,
+            "source": API_KEY_ENV if os.getenv(API_KEY_ENV) else str(api_key_path()),
+        }
     # last resort: subscription even if prefer was api_key
     sub = subscription_auth.resolve_access_token()
     if sub and sub.get("access_token"):
@@ -84,11 +88,7 @@ def has_credentials() -> bool:
 def _api_key_context(key: str) -> Dict[str, Any] | None:
     if not key:
         return None
-    mode = (
-        "subscription_oauth"
-        if key.startswith(("sk-ant-oat", "sk-ant-ort"))
-        else "api_key"
-    )
+    mode = "subscription_oauth" if key.startswith(("sk-ant-oat", "sk-ant-ort")) else "api_key"
     return {
         "mode": mode,
         "source": API_KEY_ENV if os.getenv(API_KEY_ENV) else str(api_key_path()),
@@ -100,9 +100,7 @@ def status() -> Dict[str, Any]:
 
     sub = subscription_auth.status()
     key = get_api_key()
-    subscription_ready = bool(
-        sub.get("logged_in") and sub.get("token_valid") is True
-    )
+    subscription_ready = bool(sub.get("logged_in") and sub.get("token_valid") is True)
     subscription_context = (
         {
             "mode": "subscription_oauth",

@@ -31,9 +31,13 @@ def _safe_get_json(url: str, *, access_token: str = "", timeout: float = 15.0) -
         with opener.open(request, timeout=timeout) as resp:
             raw = resp.read(64 * 1024)
     except urllib.error.HTTPError as exc:
-        raise AccountError(f"HTTP {exc.code} from identity endpoint.", code="identity_http_error") from exc
+        raise AccountError(
+            f"HTTP {exc.code} from identity endpoint.", code="identity_http_error"
+        ) from exc
     except urllib.error.URLError as exc:
-        raise AccountError("Network error calling identity endpoint.", code="identity_network_error") from exc
+        raise AccountError(
+            "Network error calling identity endpoint.", code="identity_network_error"
+        ) from exc
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -60,7 +64,9 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
         "provider_hint": "agy-oauth" if present else None,
     }
     if not present:
-        result["text"] = "No local OAuth token file; run google_antigravity_login_start/complete first."
+        result["text"] = (
+            "No local OAuth token file; run google_antigravity_login_start/complete first."
+        )
         result.update(
             response.standard_fields(success=False, backend="account", warnings=["token_missing"])
         )
@@ -69,7 +75,9 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     try:
         creds = agy_auth.valid_credentials(refresh=False)
     except Exception as exc:
-        result["text"] = f"Token present but not usable ({getattr(exc, 'code', type(exc).__name__)})."
+        result["text"] = (
+            f"Token present but not usable ({getattr(exc, 'code', type(exc).__name__)})."
+        )
         result["error_type"] = getattr(exc, "code", type(exc).__name__)
         result.update(
             response.standard_fields(success=False, backend="account", warnings=["token_unusable"])
@@ -124,7 +132,9 @@ def whoami(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     # Ensure no secrets leaked
     blob = json.dumps(result)
     if access and access in blob:
-        raise AccountError("Refusing to return payload that embeds access token.", code="secret_leak_blocked")
+        raise AccountError(
+            "Refusing to return payload that embeds access token.", code="secret_leak_blocked"
+        )
     result.update(response.standard_fields(backend="account"))
     return result
 
@@ -196,11 +206,7 @@ def logout(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
         **response.standard_fields(
             success=success,
             backend="account",
-            warnings=(
-                ["credential_removal_incomplete"]
-                if failed_count
-                else []
-            ),
+            warnings=(["credential_removal_incomplete"] if failed_count else []),
         ),
     }
     if failed_count:

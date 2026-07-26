@@ -13,6 +13,7 @@ import threading
 
 import pytest
 
+import agent_hub.v2.provider_client as provider_client_module
 from agent_hub import orchestrator
 from agent_hub.v2.contracts import TASK_SCHEMA
 from agent_hub.core.limits import MAX_PROVIDER_TIMEOUT_SECONDS
@@ -22,7 +23,11 @@ from agent_hub.v2.egress_proxy import (
     ProviderEgressProxy,
     _ProxyHandler,
 )
-from agent_hub.v2.provider_client import ProviderWorkerClient, _sandbox_profile
+from agent_hub.v2.provider_client import (
+    ProviderWorkerClient,
+    _sandbox_profile,
+    _worker_environment,
+)
 from agent_hub.v2.provider_worker import _invoke_arguments, handle_request
 from agent_hub.v2 import provider_runtime
 
@@ -177,7 +182,9 @@ def test_worker_forwards_v2_planner_budgets(monkeypatch):
                     "inline_input": "",
                     "constraints": {
                         "max_leaf_calls": 100,
-                        "max_tokens": 131_072,
+                        "max_input_tokens": 16_384,
+                        "max_output_tokens": 4_096,
+                        "max_total_tokens": 131_072,
                         "timeout_seconds": 1790,
                     },
                 },
@@ -187,8 +194,30 @@ def test_worker_forwards_v2_planner_budgets(monkeypatch):
 
     assert result["success"] is True
     assert captured["max_leaf_calls"] == 100
-    assert captured["max_tokens"] == 131_072
+    assert captured["max_tokens"] == 4_096
     assert captured["timeout_seconds"] == 1790
+
+
+def test_worker_forwards_only_output_token_budget_to_provider():
+    tool, arguments = _invoke_arguments(
+        "gpt",
+        {
+            "schema": TASK_SCHEMA,
+            "intent": "Answer.",
+            "capability": "chat",
+            "inline_input": "fixture",
+            "constraints": {
+                "max_input_tokens": 16_384,
+                "max_output_tokens": 2_048,
+                "max_total_tokens": 32_768,
+            },
+        },
+    )
+
+    assert tool == "agent_hub_chat"
+    assert arguments["max_tokens"] == 2_048
+    assert "max_input_tokens" not in arguments
+    assert "max_total_tokens" not in arguments
 
 
 def test_worker_disables_hidden_rewrites_for_v2_write(monkeypatch):
@@ -439,13 +468,30 @@ def test_client_restores_home_when_launchd_omits_it(monkeypatch):
     assert captured["env"]["HOME"] == str(Path.home())
 
 
+def test_gpt_worker_resolves_user_launcher_before_home_sandbox(monkeypatch, tmp_path):
+    launcher = tmp_path / ".local" / "bin" / "codex"
+    executable = tmp_path / ".codex" / "packages" / "codex"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(executable)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(launcher.parent))
+    monkeypatch.delenv("OPENAI_CODEX_BIN", raising=False)
+
+    environment = _worker_environment("gpt")
+
+    assert environment["OPENAI_CODEX_BIN"] == str(executable)
+
+
 def test_sandbox_profile_limits_writes_to_runtime_and_provider_state(tmp_path):
     profile = _sandbox_profile(
         provider="gpt",
         runtime_directory=str(tmp_path / "runtime"),
         environment={
             "HOME": str(tmp_path / "home"),
-            "CODEX_HOME": str(tmp_path / "codex"),
+            "CODEX_HOME": str(tmp_path / "home" / "codex"),
         },
         proxy_port=43123,
     )
@@ -454,12 +500,14 @@ def test_sandbox_profile_limits_writes_to_runtime_and_provider_state(tmp_path):
     assert "(deny file-read* (require-all (subpath" in profile
     assert str(tmp_path / "runtime") in profile
     assert str(tmp_path / "home" / ".config" / "openai-codex") in profile
-    assert str(tmp_path / "codex") in profile
+    assert str(tmp_path / "home" / ".config" / "agent-hub" / "settings.json") in profile
+    assert str(tmp_path / "home" / "codex") in profile
     assert "localhost:43123" in profile
     assert "localhost:*" not in profile
     assert "/private/var/run/mDNSResponder" in profile
     assert "com.apple.dnssd.service" in profile
     assert "agent-hub-local-socket-denied" in profile
+    assert str((tmp_path / "runtime").resolve().parent) in profile
 
     claude = _sandbox_profile(
         provider="claude",
@@ -468,6 +516,227 @@ def test_sandbox_profile_limits_writes_to_runtime_and_provider_state(tmp_path):
         proxy_port=43124,
     )
     assert str((tmp_path / "home" / ".claude").resolve()) in claude
+    assert str((tmp_path / "home" / ".claude.json").resolve()) in claude
+
+
+@pytest.mark.parametrize(
+    ("executable", "prefix"),
+    [
+        ("/usr/bin/python3", "/usr"),
+        ("/opt/homebrew/bin/python3", "/opt/homebrew"),
+    ],
+)
+def test_sandbox_profile_never_expands_system_python_to_a_broad_home_exception(
+    monkeypatch,
+    tmp_path,
+    executable,
+    prefix,
+):
+    home = tmp_path / "home"
+    monkeypatch.setattr(sys, "executable", executable)
+    monkeypatch.setattr(sys, "prefix", prefix)
+
+    profile = _sandbox_profile(
+        provider="gpt",
+        runtime_directory=str(tmp_path / "runtime"),
+        environment={"HOME": str(home)},
+        proxy_port=43125,
+    )
+
+    assert '(subpath "/")' not in profile
+    assert '(subpath "/Users")' not in profile
+
+
+def test_sandbox_profile_scopes_home_venv_without_allowing_home_itself(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    venv = home / ".venv"
+    monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(sys, "prefix", str(venv))
+
+    profile = _sandbox_profile(
+        provider="gpt",
+        runtime_directory=str(tmp_path / "runtime"),
+        environment={"HOME": str(home)},
+        proxy_port=43126,
+    )
+
+    assert f'(subpath "{venv}")' in profile
+    assert profile.count(f'(subpath "{home}")') == 2
+
+
+def test_sandbox_profile_preserves_non_ascii_paths(monkeypatch, tmp_path):
+    home = tmp_path / "사용자"
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(sys, "prefix", "/usr")
+
+    profile = _sandbox_profile(
+        provider="gpt",
+        runtime_directory=str(tmp_path / "runtime"),
+        environment={"HOME": str(home)},
+        proxy_port=43127,
+    )
+
+    assert "사용자" in profile
+    assert "\\uc0ac" not in profile
+
+
+@pytest.mark.parametrize(
+    ("environment", "field"),
+    [
+        ({"HOME": "/"}, None),
+        ({"HOME": "/Users/tester", "CODEX_HOME": "/"}, "CODEX_HOME"),
+        (
+            {
+                "HOME": "/Users/tester",
+                "OPENAI_CODEX_CONFIG_DIR": "/Users",
+            },
+            "OPENAI_CODEX_CONFIG_DIR",
+        ),
+        (
+            {
+                "HOME": "/Users/tester",
+                "OPENAI_CODEX_CONFIG_DIR": "relative/config",
+            },
+            "OPENAI_CODEX_CONFIG_DIR",
+        ),
+    ],
+)
+def test_sandbox_profile_rejects_broad_writable_paths(tmp_path, environment, field):
+    with pytest.raises(HubV2Error) as error:
+        _sandbox_profile(
+            provider="gpt",
+            runtime_directory=str(tmp_path / "runtime"),
+            environment=environment,
+            proxy_port=43128,
+        )
+
+    assert error.value.code == "provider_sandbox_invalid_path"
+    if field is not None:
+        assert error.value.safe_details == {"field": field}
+
+
+def test_sandbox_profile_rejects_provider_state_symlink_to_broad_path(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude").symlink_to("/")
+
+    with pytest.raises(HubV2Error) as error:
+        _sandbox_profile(
+            provider="claude",
+            runtime_directory=str(tmp_path / "runtime"),
+            environment={"HOME": str(home)},
+            proxy_port=43129,
+        )
+
+    assert error.value.code == "provider_sandbox_invalid_path"
+    assert error.value.safe_details == {"field": "CLAUDE_HOME"}
+
+
+def test_sandbox_profile_maps_symlink_loops_to_safe_error(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude").symlink_to(home / ".claude")
+
+    with pytest.raises(HubV2Error) as error:
+        _sandbox_profile(
+            provider="claude",
+            runtime_directory=str(tmp_path / "runtime"),
+            environment={"HOME": str(home)},
+            proxy_port=43130,
+        )
+
+    assert error.value.code == "provider_sandbox_invalid_path"
+    assert error.value.safe_details == {"field": "CLAUDE_HOME"}
+
+
+def test_gpt_sandbox_allows_explicit_home_local_codex_binary(tmp_path):
+    home = tmp_path / "home"
+    codex = home / ".local" / "bin" / "codex"
+
+    profile = _sandbox_profile(
+        provider="gpt",
+        runtime_directory=str(tmp_path / "runtime"),
+        environment={
+            "HOME": str(home),
+            "OPENAI_CODEX_BIN": str(codex),
+        },
+        proxy_port=43131,
+    )
+
+    assert f'(literal "{codex}")' in profile
+    assert f'(literal "{codex.parent}")' in profile
+
+
+def test_sandbox_profile_uses_client_python_executable(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    interpreter = home / ".runtime" / "bin" / "python"
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(sys, "prefix", "/usr")
+
+    profile = _sandbox_profile(
+        provider="gpt",
+        runtime_directory=str(tmp_path / "runtime"),
+        environment={"HOME": str(home)},
+        proxy_port=43132,
+        python_executable=str(interpreter),
+    )
+
+    assert f'(literal "{interpreter}")' in profile
+    runtime_root = home / ".runtime"
+    assert f'(subpath "{runtime_root}")' in profile
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox integration")
+def test_provider_client_cleans_proxy_and_runtime_when_profile_validation_fails(
+    monkeypatch,
+    tmp_path,
+):
+    class _Proxy:
+        url = "http://127.0.0.1:43133"
+        port = 43133
+        closed = False
+
+        def start(self):
+            return self
+
+        def close(self):
+            self.closed = True
+
+    class _RuntimeDirectory:
+        name = str(tmp_path / "runtime")
+        cleaned = False
+
+        def cleanup(self):
+            self.cleaned = True
+
+    proxy = _Proxy()
+    runtime = _RuntimeDirectory()
+    monkeypatch.setattr(
+        provider_client_module,
+        "ProviderEgressProxy",
+        lambda _domains: proxy,
+    )
+    monkeypatch.setattr(
+        provider_client_module.tempfile,
+        "TemporaryDirectory",
+        lambda **_kwargs: runtime,
+    )
+
+    def invalid_profile(**_kwargs):
+        raise HubV2Error(
+            "provider_sandbox_invalid_path",
+            "fixture",
+            scope="provider",
+        )
+
+    monkeypatch.setattr(provider_client_module, "_sandbox_profile", invalid_profile)
+
+    with pytest.raises(HubV2Error) as error:
+        ProviderWorkerClient("gpt", enforce_egress=True).request("status")
+
+    assert error.value.code == "provider_sandbox_invalid_path"
+    assert proxy.closed is True
+    assert runtime.cleaned is True
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox integration")
@@ -479,10 +748,13 @@ def test_sandbox_profile_blocks_other_home_credentials_but_allows_provider_state
         pytest.skip("sandbox-exec unavailable")
     home = tmp_path / "home"
     provider_state = home / ".codex" / "state.json"
+    shared_settings = home / ".config" / "agent-hub" / "settings.json"
     other_credentials = home / ".ssh" / "id_fixture"
     provider_state.parent.mkdir(parents=True)
+    shared_settings.parent.mkdir(parents=True)
     other_credentials.parent.mkdir(parents=True)
     provider_state.write_text("provider state")
+    shared_settings.write_text('{"gpt": {"model": "gpt-fixture"}}')
     other_credentials.write_text("other credentials")
     profile = _sandbox_profile(
         provider="gpt",
@@ -505,6 +777,13 @@ def test_sandbox_profile_blocks_other_home_credentials_but_allows_provider_state
     )
 
     assert permitted.returncode == 0
+    shared = subprocess.run(
+        [str(sandbox), "-p", profile, "/bin/cat", str(shared_settings)],
+        check=False,
+        capture_output=True,
+        timeout=10.0,
+    )
+    assert shared.returncode == 0
     assert blocked.returncode != 0
 
 
@@ -575,17 +854,20 @@ def test_sandbox_profile_allows_only_the_request_proxy_port(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox integration")
-def test_sandbox_profile_blocks_dns_and_user_local_sockets_without_breaking_worker(
-    tmp_path,
-):
+def test_sandbox_profile_blocks_dns_and_user_local_sockets_without_breaking_worker():
     sandbox = Path("/usr/bin/sandbox-exec")
     if not sandbox.exists():
         pytest.skip("sandbox-exec unavailable")
-    home = tmp_path / "home"
-    runtime = tmp_path / "runtime"
-    home.mkdir()
-    runtime.mkdir()
-    with tempfile.TemporaryDirectory(prefix="ahsb-", dir="/tmp") as socket_directory:
+    with (
+        tempfile.TemporaryDirectory(prefix="ahsb-home-") as home_directory,
+        tempfile.TemporaryDirectory(prefix="ahsb-runtime-") as runtime_directory,
+        tempfile.TemporaryDirectory(
+            prefix="ahsb-socket-",
+            dir=str(Path(runtime_directory).parent),
+        ) as socket_directory,
+    ):
+        runtime = Path(runtime_directory)
+        home = Path(home_directory)
         socket_path = Path(socket_directory) / "blocked.sock"
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))

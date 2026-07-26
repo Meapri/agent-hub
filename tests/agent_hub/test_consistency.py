@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from threading import Barrier
-
 import pytest
 
 from agent_hub import consistency
-from agent_hub.core import parallel
 
 
 def _policy_root(tmp_path):
@@ -59,26 +56,3 @@ def test_decision_parser_is_strict():
             '{"schema":"decision_v1","label":"MAYBE","confidence":0.9}',
             ["ACCEPT", "REJECT"],
         )
-
-
-def test_parallel_runner_overlaps_calls_and_isolates_failure():
-    barrier = Barrier(2)
-
-    def call(value):
-        barrier.wait(timeout=2)
-        return value
-
-    outcomes = parallel.run_ordered(
-        [lambda: call("first"), lambda: call("second")],
-        execution="parallel",
-        max_workers=2,
-    )
-    assert [item.value for item in outcomes] == ["first", "second"]
-
-    def broken():
-        raise RuntimeError("provider down")
-
-    isolated = parallel.run_ordered([lambda: "ok", broken], max_workers=2)
-    assert isolated[0].value == "ok"
-    assert isolated[1].value is None
-    assert isinstance(isolated[1].error, RuntimeError)

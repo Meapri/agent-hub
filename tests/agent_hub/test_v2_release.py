@@ -32,6 +32,13 @@ def _plist(path: Path, executable: Path, state_db: Path):
             {
                 "Label": "com.agent-hub.daemon",
                 "ProgramArguments": [str(executable), "--state-db", str(state_db)],
+                "WorkingDirectory": str(executable.parent.parent),
+                "EnvironmentVariables": {
+                    "PATH": (
+                        f"{executable.parent}:"
+                        f"{executable.parent.parent.parent / 'legacy/bin'}:/usr/bin:/bin"
+                    ),
+                },
             }
         )
     )
@@ -67,7 +74,12 @@ def test_update_and_rollback_switch_are_digest_fenced(tmp_path, monkeypatch):
     )
 
     assert applied["active_executable"] == str(new)
-    assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(new)
+    updated_plist = plistlib.loads(launch.read_bytes())
+    assert updated_plist["ProgramArguments"][0] == str(new)
+    assert updated_plist["WorkingDirectory"] == str(tmp_path / "new")
+    updated_path = updated_plist["EnvironmentVariables"]["PATH"].split(":")
+    assert updated_path[0] == str(new.parent)
+    assert str(tmp_path / "legacy/bin") not in updated_path
     assert rollback.exists()
     assert Path(str(rollback) + ".metadata.json").exists()
     assert Path(str(rollback) + ".state.sqlite3").exists()
@@ -84,7 +96,10 @@ def test_update_and_rollback_switch_are_digest_fenced(tmp_path, monkeypatch):
         rollback_path=rollback,
     )
     assert restored["active_executable"] == str(old)
-    assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(old)
+    restored_plist = plistlib.loads(launch.read_bytes())
+    assert restored_plist["ProgramArguments"][0] == str(old)
+    assert restored_plist["WorkingDirectory"] == str(tmp_path / "old")
+    assert restored_plist["EnvironmentVariables"]["PATH"].split(":")[0] == str(old.parent)
     assert restored["database"]["restore_applied"] is False
 
 

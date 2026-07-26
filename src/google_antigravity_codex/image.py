@@ -37,8 +37,20 @@ MODEL_ALIASES = {
 }
 ASPECT_RATIOS = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
 IMAGE_SIZES = {"512", "1K", "2K", "4K"}
-IMAGE_SIZE_ALIASES = {"1024": "1K", "2048": "2K", "4096": "4K", "512PX": "512", "2048PX": "2K", "4096PX": "4K"}
-MIME_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp"}
+IMAGE_SIZE_ALIASES = {
+    "1024": "1K",
+    "2048": "2K",
+    "4096": "4K",
+    "512PX": "512",
+    "2048PX": "2K",
+    "4096PX": "4K",
+}
+MIME_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+}
 
 
 def normalize_model(value: Any) -> str:
@@ -90,10 +102,7 @@ def available_model_catalog() -> Dict[str, Dict[str, Any]]:
         catalog = {}
     # Curated fallback when live catalog omits image models.
     if not catalog:
-        catalog = {
-            model_id: dict(meta)
-            for model_id, meta in MODELS.items()
-        }
+        catalog = {model_id: dict(meta) for model_id, meta in MODELS.items()}
     return catalog
 
 
@@ -148,7 +157,11 @@ def extract_image_result(payload: Any) -> Tuple[Optional[str], str, str]:
             data = inline.get("data") or inline.get("b64Json") or inline.get("b64_json")
             if isinstance(data, str) and data.strip():
                 mime = str(inline.get("mimeType") or inline.get("mime_type") or "").lower()
-                return data.strip(), "b64", MIME_EXTENSIONS.get(mime) or image_extension_from_b64(data) or "png"
+                return (
+                    data.strip(),
+                    "b64",
+                    MIME_EXTENSIONS.get(mime) or image_extension_from_b64(data) or "png",
+                )
         for key in ("imageUrl", "image_url", "url", "uri"):
             value = item.get(key)
             if isinstance(value, str) and value.startswith(("http://", "https://")):
@@ -209,7 +222,9 @@ def save_url_image(url: str, *, prefix: str) -> Path:
         network.validate_public_url(response.geturl())
         content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
         if content_type not in MIME_EXTENSIONS:
-            raise ValueError(f"downloaded content type is not a supported image: {content_type or 'missing'}")
+            raise ValueError(
+                f"downloaded content type is not a supported image: {content_type or 'missing'}"
+            )
         data = network.read_limited(response, network.max_download_bytes())
     ext = MIME_EXTENSIONS[content_type]
     path = _cache_file(prefix, ext)
@@ -241,7 +256,9 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     requested = normalize_model(
         model_prefs.resolve_model(
-            explicit=str(arguments.get("model") or os.getenv("GOOGLE_ANTIGRAVITY_IMAGE_MODEL") or ""),
+            explicit=str(
+                arguments.get("model") or os.getenv("GOOGLE_ANTIGRAVITY_IMAGE_MODEL") or ""
+            ),
             task="image",
             fallback=DEFAULT_MODEL,
         )
@@ -257,11 +274,11 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 f"Unsupported Google Antigravity image model '{requested}'. "
                 f"Available image models: {', '.join(sorted(catalog)) or 'none'}."
             )
-    image_size = resolve_image_size(arguments.get("image_size") or arguments.get("resolution") or "")
-    aspect = resolve_aspect_ratio(arguments.get("aspect_ratio") or DEFAULT_ASPECT_RATIO)
-    timeout = float(
-        arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+    image_size = resolve_image_size(
+        arguments.get("image_size") or arguments.get("resolution") or ""
     )
+    aspect = resolve_aspect_ratio(arguments.get("aspect_ratio") or DEFAULT_ASPECT_RATIO)
+    timeout = float(arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS)
     retries = int(
         arguments.get("retry_count")
         if arguments.get("retry_count") is not None
@@ -277,7 +294,11 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
         max_retries=retries,
         retry_sleep_cap_seconds=retry_cap,
     )
-    diagnostics = payload.get("_antigravity_diagnostics") if isinstance(payload.get("_antigravity_diagnostics"), dict) else {}
+    diagnostics = (
+        payload.get("_antigravity_diagnostics")
+        if isinstance(payload.get("_antigravity_diagnostics"), dict)
+        else {}
+    )
     backend = str(diagnostics.get("backend") or "agy-oauth-code-assist")
     data, kind, extension = extract_image_result(payload)
     if not data:
@@ -286,7 +307,14 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
         saved = save_url_image(data, prefix=f"google_antigravity_{requested}")
     else:
         saved = save_b64_image(data, prefix=f"google_antigravity_{requested}", extension=extension)
-    mime_type = next((mime for mime, ext in MIME_EXTENSIONS.items() if ext == saved.suffix.removeprefix(".").lower()), "")
+    mime_type = next(
+        (
+            mime
+            for mime, ext in MIME_EXTENSIONS.items()
+            if ext == saved.suffix.removeprefix(".").lower()
+        ),
+        "",
+    )
     return {
         "success": True,
         "text": f"Generated image: {saved}",

@@ -14,7 +14,7 @@ def test_quota_status_reports_provider_health_without_inventing_buckets():
             "enabled": True,
             "healthy": True,
             "model_count": 4,
-            "backend": "agy-cli",
+            "backend": "agy-oauth",
         },
     ):
         result = quota.quota_status({})

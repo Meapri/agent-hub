@@ -8,11 +8,9 @@ only redacted state.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
 import hashlib
 import http.server
 import os
-import re
 import secrets
 import shutil
 import signal
@@ -20,7 +18,6 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable, Collection, Dict, Mapping
-import unicodedata
 import urllib.parse
 
 from claude_codex import security as claude_security
@@ -37,33 +34,23 @@ from grok_codex import security as grok_security
 from openai_codex import models as openai_models
 from openai_codex import security as openai_security
 
+from .connect_egress import EgressGateway
+from .connect_status import (
+    MAX_MODEL_TEXT_CHARS,
+    PROVIDER_LABELS,
+    PROVIDER_LOGIN_OWNERS,
+    capability_labels as _capability_labels,
+    connection_state as _connection_state,
+    project_status,
+    public_model_id as _public_model_id,
+    public_model_text as _public_model_text,
+)
+from .connect_types import ConnectionError, ConnectionJob
+from .provider_registry import AVAILABLE_PROVIDERS
+from .v2 import provider_runtime
 from .v2.contracts import TASK_SCHEMA
 from .v2.daemon import HubDaemonClient
 from .v2.errors import HubV2Error
-from .v2 import provider_runtime
-
-from .provider_registry import AVAILABLE_PROVIDERS
-
-PROVIDER_LABELS = {
-    "claude": "Claude",
-    "grok": "Grok",
-    "gemini": "Gemini",
-    "gpt": "GPT",
-}
-
-PROVIDER_SESSION_LABELS = {
-    "claude": "Claude Code 구독 세션",
-    "grok": "xAI 구독 세션",
-    "gemini": "Google Antigravity 세션",
-    "gpt": "공식 Codex ChatGPT 세션",
-}
-
-PROVIDER_LOGIN_OWNERS = {
-    "claude": "Claude Code",
-    "grok": "Agent Hub",
-    "gemini": "Agent Hub",
-    "gpt": "공식 Codex",
-}
 
 _CONSENT_MODULES = {
     "claude": claude_security,
@@ -74,47 +61,13 @@ _CONSENT_MODULES = {
 MAX_JOBS = 32
 JOB_TTL_SECONDS = 30 * 60
 MAX_MODELS = 150
-MAX_MODEL_TEXT_CHARS = 180
 MODEL_CATALOG_TTL_SECONDS = 10 * 60
-MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 GEMINI_CONNECTION_TEST_MAX_TOKENS = 512
 GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS = 30
 GEMINI_CONNECTION_TEST_PROMPT = (
     "This is a connection check. Reply with exactly AGENT_HUB_CONNECTION_OK."
 )
 ACTIVE_JOB_STATES = frozenset({"pending", "working", "waiting"})
-PUBLIC_WARNING_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:- "
-)
-
-
-class ConnectionError(RuntimeError):
-    """A provider connection action could not be completed safely."""
-
-    def __init__(self, message: str, *, code: str = "connection_error") -> None:
-        super().__init__(message)
-        self.code = code
-
-
-@dataclass
-class ConnectionJob:
-    id: str
-    provider: str
-    kind: str
-    state: str = "pending"
-    message: str = ""
-    action_url: str | None = None
-    user_code: str | None = None
-    requires_code: bool = False
-    fallback_command: str | None = None
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-
-    def public(self) -> Dict[str, Any]:
-        data = asdict(self)
-        data.pop("created_at", None)
-        data.pop("updated_at", None)
-        return data
 
 
 def _provider(value: str) -> str:
@@ -125,27 +78,6 @@ def _provider(value: str) -> str:
             code="provider_invalid",
         )
     return provider
-
-
-def _public_warning(value: Any) -> str:
-    warning = str(value or "").strip()
-    if 0 < len(warning) <= 80 and all(char in PUBLIC_WARNING_CHARS for char in warning):
-        return warning
-    return "provider_warning"
-
-
-def _public_model_text(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text or len(text) > MAX_MODEL_TEXT_CHARS:
-        return ""
-    if any(unicodedata.category(char).startswith("C") for char in text):
-        return ""
-    return text
-
-
-def _public_model_id(value: Any) -> str:
-    text = str(value or "").strip()
-    return text if MODEL_ID_PATTERN.fullmatch(text) else ""
 
 
 def _local_model_payload(provider: str) -> Dict[str, Any]:
@@ -314,6 +246,7 @@ class ConnectionManager:
         self._use_daemon = status_reader is _status_reader
         self._command_runner = command_runner
         self._daemon_client_factory = daemon_client_factory
+        self._egress = EgressGateway(daemon_client_factory)
         self._jobs: Dict[str, ConnectionJob] = {}
         self._lock = threading.RLock()
         self._starting_logins: set[str] = set()
@@ -328,46 +261,23 @@ class ConnectionManager:
         self._auth_generations: Dict[str, int] = {provider: 0 for provider in AVAILABLE_PROVIDERS}
         self._closed = False
 
-    @staticmethod
-    def _daemon_data(response: Mapping[str, Any], *, fallback_code: str) -> Dict[str, Any]:
-        if response.get("success") is not True:
-            error = response.get("error")
-            safe_error = error if isinstance(error, Mapping) else {}
-            raise ConnectionError(
-                str(safe_error.get("message") or "Agent Hub daemon 요청을 완료하지 못했습니다."),
-                code=str(safe_error.get("code") or fallback_code),
-            )
-        data = response.get("data")
-        if not isinstance(data, Mapping):
-            raise ConnectionError(
-                "Agent Hub daemon 응답을 확인하지 못했습니다.",
-                code=fallback_code,
-            )
-        return dict(data)
-
     def egress_reviews(self) -> Dict[str, Any]:
-        if not self._use_daemon:
-            return {
-                "success": True,
-                "schema": "agent_hub_egress_review_list_v1",
-                "reviews": [],
-                "pending_count": 0,
-                "approved_count": 0,
-            }
-        try:
-            response = self._daemon_client_factory().request(
-                "egress/reviews",
-                timeout=5.0,
-            )
-        except HubV2Error as exc:
-            raise ConnectionError(
-                "외부 전송 검토 목록을 불러오지 못했습니다.",
-                code=exc.code,
-            ) from exc
-        return {
-            "success": True,
-            **self._daemon_data(response, fallback_code="egress_reviews_unavailable"),
-        }
+        return self._egress.reviews(use_daemon=self._use_daemon)
+
+    def egress_settings(self) -> Dict[str, Any]:
+        return self._egress.settings(use_daemon=self._use_daemon)
+
+    def update_egress_settings(
+        self,
+        *,
+        auto_approve: bool,
+        expected_revision: int,
+    ) -> Dict[str, Any]:
+        return self._egress.update_settings(
+            use_daemon=self._use_daemon,
+            auto_approve=auto_approve,
+            expected_revision=expected_revision,
+        )
 
     def decide_egress_review(
         self,
@@ -375,29 +285,11 @@ class ConnectionManager:
         *,
         decision: str,
     ) -> Dict[str, Any]:
-        if not self._use_daemon:
-            raise ConnectionError(
-                "실행 중인 Agent Hub daemon에서만 외부 전송을 승인할 수 있습니다.",
-                code="daemon_required",
-            )
-        try:
-            response = self._daemon_client_factory().request(
-                "egress/decide",
-                {"review_id": review_id, "decision": decision},
-                timeout=5.0,
-            )
-        except HubV2Error as exc:
-            raise ConnectionError(
-                "외부 전송 검토를 저장하지 못했습니다.",
-                code=exc.code,
-            ) from exc
-        return {
-            "success": True,
-            "review": self._daemon_data(
-                response,
-                fallback_code="egress_review_failed",
-            ),
-        }
+        return self._egress.decide(
+            review_id,
+            use_daemon=self._use_daemon,
+            decision=decision,
+        )
 
     def _daemon_call(
         self,
@@ -409,124 +301,15 @@ class ConnectionManager:
     def status(self, provider: str = "all", *, probe: bool = False) -> Dict[str, Any]:
         selected = "all" if provider == "all" else _provider(provider)
         raw = self._status_reader(selected, probe=probe)
-        public: Dict[str, Dict[str, Any]] = {}
-        for provider_id, state in raw["providers"].items():
-            auth_mode = state.get("auth_mode")
-            auth_ready = bool(state.get("auth_ready", state.get("authenticated")))
-            logged_in = bool(
-                state.get(
-                    "logged_in",
-                    state.get("configured", state.get("authenticated")),
-                )
-                or auth_ready
-            )
-            account_present = bool(
-                state.get(
-                    "account_present",
-                    state.get("configured", state.get("authenticated")),
-                )
-                or logged_in
-            )
-            refreshable = bool(state.get("refreshable") and logged_in and not auth_ready)
-            relogin_required = bool(
-                not auth_ready
-                and not refreshable
-                and (state.get("relogin_required") or account_present)
-            )
-            session_label = PROVIDER_SESSION_LABELS[provider_id]
-            if provider_id == "claude" and auth_mode == "api_key":
-                session_label = "Claude API key"
-            elif provider_id == "grok" and auth_mode == "api_key":
-                session_label = "xAI API key"
-            elif provider_id == "gpt" and auth_mode in {"api_key", "apiKey"}:
-                session_label = "Codex API key"
-            safe = {
-                "id": provider_id,
-                "label": PROVIDER_LABELS[provider_id],
-                "session_label": session_label,
-                "login_owner": PROVIDER_LOGIN_OWNERS[provider_id],
-                "consent": bool(state.get("consent")),
-                "configured": bool(state.get("configured", state.get("authenticated"))),
-                "authenticated": auth_ready,
-                "logged_in": logged_in,
-                "auth_ready": auth_ready,
-                "account_present": account_present,
-                "login_ready": auth_ready,
-                "refresh_supported": bool(state.get("refresh_supported") or refreshable),
-                "refreshable": refreshable,
-                "relogin_required": relogin_required,
-                "ready": bool(state.get("ready")),
-                "invocation_ready": bool(state.get("invocation_ready", state.get("ready"))),
-                "auto_refresh_on_invoke": bool(state.get("auto_refresh_on_invoke")),
-                "auth_mode": auth_mode,
-                "plan_type": state.get("plan_type"),
-                "default_model": _public_model_id(state.get("default_model")) or "알 수 없음",
-                "base_default_model": _public_model_id(state.get("base_default_model")) or None,
-                "model_overridden": bool(state.get("model_overridden")),
-                "model_managed_by_environment": bool(state.get("model_managed_by_environment")),
-                "model_source": _public_model_text(state.get("model_source")),
-                "model_override_scope": _public_model_text(state.get("model_override_scope"))
-                or None,
-                "settings_error": (
-                    _public_warning(state.get("settings_error"))
-                    if state.get("settings_error")
-                    else None
-                ),
-                "warnings": [_public_warning(item) for item in state.get("warnings") or []],
-                "supports_local_logout": (provider_id in {"grok", "gemini"}),
-                "local_credentials_present": bool(state.get("local_credentials_present")),
-                "pending_login_present": bool(state.get("pending_login_present")),
-                "login_transport": (
-                    "browser" if provider_id in {"grok", "gemini"} else "external_cli"
-                ),
-                "capabilities": self._capability_labels(state.get("capabilities")),
-            }
-            safe["connection_state"] = self._connection_state(safe)
-            public[provider_id] = safe
-        return {
-            "success": True,
-            "providers": public,
-            "summary": {
-                "ready": sum(item["ready"] for item in public.values()),
-                "authenticated": sum(item["authenticated"] for item in public.values()),
-                "connected": sum(item["logged_in"] for item in public.values()),
-                "refreshable": sum(item["refreshable"] for item in public.values()),
-                "relogin_required": sum(item["relogin_required"] for item in public.values()),
-                "consent_required": sum(
-                    item["logged_in"] and not item["consent"] for item in public.values()
-                ),
-                "total": len(public),
-            },
-        }
+        return project_status(raw)
 
     @staticmethod
     def _connection_state(state: Dict[str, Any]) -> str:
-        if state["ready"]:
-            return "ready"
-        if state["refreshable"]:
-            return "refreshable"
-        if state["relogin_required"] or (state["account_present"] and not state["logged_in"]):
-            return "relogin_required"
-        if state["logged_in"] or state["auth_ready"]:
-            return "signed_in"
-        return "signed_out"
+        return _connection_state(state)
 
     @staticmethod
     def _capability_labels(capabilities: Any) -> list[str]:
-        if not isinstance(capabilities, dict):
-            return []
-        labels = {
-            "chat": "대화",
-            "compare": "비교",
-            "review_diff": "코드 검토",
-            "write": "문서 작성",
-            "search": "검색",
-            "vision": "이미지 입력",
-            "image_generation": "이미지 생성",
-        }
-        return [
-            labels[key] for key in labels if bool((capabilities.get(key) or {}).get("supported"))
-        ]
+        return _capability_labels(capabilities)
 
     def grant_consent(self, provider: str, *, confirmation: str) -> Dict[str, Any]:
         provider = _provider(provider)
@@ -573,7 +356,7 @@ class ConnectionManager:
             else:
                 removed = bool(_CONSENT_MODULES[provider].revoke_consent())
             self._invalidate_model_catalog(provider)
-            effective = self.status(provider)["providers"][provider]["consent"]
+        effective = self.status(provider)["providers"][provider]["consent"]
         return {
             "success": True,
             "provider": provider,
@@ -644,12 +427,6 @@ class ConnectionManager:
         provider = _provider(provider)
         with self._lock:
             self._ensure_open()
-            current = self.status(provider)["providers"][provider]
-            if not current["consent"]:
-                raise ConnectionError(
-                    "먼저 Agent Hub 사용 동의를 완료해 주세요.",
-                    code="consent_required",
-                )
             active = self._active_job(provider)
             if active is not None:
                 if active.kind == "login":
@@ -676,6 +453,12 @@ class ConnectionManager:
             self._starting_logins.add(provider)
             self._invalidate_model_catalog(provider)
         try:
+            current = self.status(provider)["providers"][provider]
+            if not current["consent"]:
+                raise ConnectionError(
+                    "먼저 Agent Hub 사용 동의를 완료해 주세요.",
+                    code="consent_required",
+                )
             if provider == "grok":
                 return self._start_grok_login()
             if provider == "gemini":
@@ -702,17 +485,6 @@ class ConnectionManager:
                     "이 제공자의 다른 연결 작업이 진행 중입니다. 완료된 뒤 갱신해 주세요.",
                     code="provider_busy",
                 )
-            current = self.status(provider)["providers"][provider]
-            if not current["consent"]:
-                raise ConnectionError(
-                    "먼저 Agent Hub 사용 동의를 완료해 주세요.",
-                    code="consent_required",
-                )
-            if not current["refreshable"]:
-                raise ConnectionError(
-                    "현재 로그인은 바로 갱신할 수 없습니다. 다시 로그인해 주세요.",
-                    code="refresh_unavailable",
-                )
             if provider in self._starting_refreshes:
                 raise ConnectionError(
                     "로그인 갱신 요청을 처리하고 있습니다.",
@@ -725,7 +497,20 @@ class ConnectionManager:
                 )
             self._starting_refreshes.add(provider)
             self._invalidate_model_catalog(provider)
-            try:
+        try:
+            current = self.status(provider)["providers"][provider]
+            if not current["consent"]:
+                raise ConnectionError(
+                    "먼저 Agent Hub 사용 동의를 완료해 주세요.",
+                    code="consent_required",
+                )
+            if not current["refreshable"]:
+                raise ConnectionError(
+                    "현재 로그인은 바로 갱신할 수 없습니다. 다시 로그인해 주세요.",
+                    code="refresh_unavailable",
+                )
+            with self._lock:
+                self._ensure_open()
                 job = self._create_job(
                     provider,
                     kind="refresh",
@@ -739,8 +524,9 @@ class ConnectionManager:
                     args=(job.id, cancel_event),
                     daemon=True,
                 ).start()
-                return job.public()
-            finally:
+            return job.public()
+        finally:
+            with self._lock:
                 self._starting_refreshes.discard(provider)
 
     def complete_login(self, provider: str, job_id: str, code_or_url: str) -> Dict[str, Any]:
@@ -790,19 +576,6 @@ class ConnectionManager:
         provider = _provider(provider)
         with self._lock:
             self._ensure_open()
-            state = self.status(provider)["providers"][provider]
-            if not state["consent"] or not (state["login_ready"] or state["invocation_ready"]):
-                raise ConnectionError(
-                    "동의와 로그인을 모두 완료한 뒤 연결을 테스트할 수 있습니다.",
-                    code="provider_not_ready",
-                )
-            selected_model = _public_model_id(state.get("default_model"))
-            if provider == "gemini" and not selected_model:
-                raise ConnectionError(
-                    "테스트할 Gemini 모델을 확인하지 못했습니다.",
-                    code="model_unavailable",
-                )
-            auth_generation = self._auth_generations[provider]
             active = self._active_job(provider)
             if active is not None:
                 if active.kind == "test":
@@ -828,7 +601,21 @@ class ConnectionManager:
                 )
             self._starting_tests.add(provider)
         try:
+            state = self.status(provider)["providers"][provider]
+            if not state["consent"] or not (state["login_ready"] or state["invocation_ready"]):
+                raise ConnectionError(
+                    "동의와 로그인을 모두 완료한 뒤 연결을 테스트할 수 있습니다.",
+                    code="provider_not_ready",
+                )
+            selected_model = _public_model_id(state.get("default_model"))
+            if provider == "gemini" and not selected_model:
+                raise ConnectionError(
+                    "테스트할 Gemini 모델을 확인하지 못했습니다.",
+                    code="model_unavailable",
+                )
             with self._lock:
+                self._ensure_open()
+                auth_generation = self._auth_generations[provider]
                 job = self._create_job(
                     provider,
                     kind="test",
@@ -1000,7 +787,7 @@ class ConnectionManager:
                     "선택한 모델을 저장하지 못했습니다. 다시 시도해 주세요.",
                     code="model_save_failed",
                 )
-            current = self.status(provider)["providers"][provider]
+        current = self.status(provider)["providers"][provider]
         return {
             "success": True,
             "provider": provider,
@@ -1021,13 +808,13 @@ class ConnectionManager:
                 "기본 모델 초기화를 다시 확인해 주세요.",
                 code="model_reset_confirmation_required",
             )
+        current = self.status(provider)["providers"][provider]
         with self._lock:
             self._ensure_open()
             self._ensure_provider_idle(
                 provider,
                 "진행 중인 로그인이 끝난 뒤 기본 모델을 초기화해 주세요.",
             )
-            current = self.status(provider)["providers"][provider]
             if current["model_managed_by_environment"] and not current["model_overridden"]:
                 raise ConnectionError(
                     "이 모델은 환경 설정에서 관리되고 있어 웹 화면에서 초기화할 수 없습니다.",
@@ -1046,7 +833,7 @@ class ConnectionManager:
                     "기본 모델 설정을 초기화하지 못했습니다. 다시 시도해 주세요.",
                     code="model_reset_failed",
                 )
-            updated = self.status(provider)["providers"][provider]
+        updated = self.status(provider)["providers"][provider]
         return {
             "success": True,
             "provider": provider,

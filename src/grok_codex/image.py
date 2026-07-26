@@ -75,9 +75,7 @@ def generate_image(arguments: Dict[str, Any]) -> Dict[str, Any]:
         body["resolution"] = str(arguments.get("resolution") or arguments.get("image_size"))
     payload = api.images_generate(
         body,
-        timeout=float(
-            arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-        ),
+        timeout=float(arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS),
     )
     items = payload.get("data") if isinstance(payload.get("data"), list) else []
     if not items or not isinstance(items[0], dict):

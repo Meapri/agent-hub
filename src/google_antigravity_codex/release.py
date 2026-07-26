@@ -127,7 +127,9 @@ def normalize_remote_url(remote: str) -> str:
         host = parsed.hostname
         if parsed.port:
             host += f":{parsed.port}"
-        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, "", "")).removesuffix(".git")
+        return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, "", "")).removesuffix(
+            ".git"
+        )
     return remote
 
 
@@ -155,7 +157,9 @@ def detect_release_tools(repo: Path) -> List[str]:
     names = {".releaserc", ".releaserc.json", ".releaserc.yml", "release.config.js"}
     if any((repo / name).exists() for name in names):
         tools.append("semantic-release")
-    if (repo / "release-please-config.json").exists() or (repo / ".release-please-manifest.json").exists():
+    if (repo / "release-please-config.json").exists() or (
+        repo / ".release-please-manifest.json"
+    ).exists():
         tools.append("release-please")
     if (repo / ".changeset").is_dir():
         tools.append("changesets")
@@ -228,7 +232,9 @@ def recommended_bump(categories: Dict[str, List[str]]) -> str:
         return "major"
     if categories.get("features"):
         return "minor"
-    if any(categories.get(key) for key in ("fixes", "performance", "docs", "tests", "chores", "other")):
+    if any(
+        categories.get(key) for key in ("fixes", "performance", "docs", "tests", "chores", "other")
+    ):
         return "patch"
     return "none"
 
@@ -237,7 +243,11 @@ def bump_version(version: str, bump: str) -> str:
     match = SEMVER_RE.match((version or "").strip())
     if not match or bump == "none":
         return ""
-    major, minor, patch = int(match.group("major")), int(match.group("minor")), int(match.group("patch"))
+    major, minor, patch = (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+    )
     prefix = "v" if version.startswith("v") else ""
     if bump == "major":
         major, minor, patch = major + 1, 0, 0
@@ -289,7 +299,9 @@ def collect_snapshot(arguments: Dict[str, Any]) -> ReleaseSnapshot:
     diff_stat = _git(repo, ["diff", "--stat", *diff_range])
     if status_short and not changed_files:
         changed_files = status_short
-        diff_stat = _git(repo, ["diff", "--stat"]) or "[working tree has untracked or staged changes]"
+        diff_stat = (
+            _git(repo, ["diff", "--stat"]) or "[working tree has untracked or staged changes]"
+        )
     categories = categorize_commits(commits) or categorize_files(changed_files)
     versions = version_infos(repo)
     primary_version = versions[0].version if versions else latest_tag(repo)
@@ -377,8 +389,14 @@ def _check_summary(checks: List[CommandResult]) -> str:
 def render_draft(snapshot: ReleaseSnapshot, arguments: Dict[str, Any]) -> str:
     version = str(arguments.get("version") or snapshot.recommended_version or "").strip()
     tag = str(arguments.get("tag") or "").strip()
-    title = str(arguments.get("title") or "").strip() or f"Release {version or tag or snapshot.head}"
-    tag_text = tag or (f"v{version}" if version and not version.startswith("v") else version) or "[tag not selected]"
+    title = (
+        str(arguments.get("title") or "").strip() or f"Release {version or tag or snapshot.head}"
+    )
+    tag_text = (
+        tag
+        or (f"v{version}" if version and not version.startswith("v") else version)
+        or "[tag not selected]"
+    )
     sections = [
         "# Release Copilot Draft",
         "## Snapshot",
@@ -454,8 +472,7 @@ def release_draft(arguments: Dict[str, Any]) -> Dict[str, Any]:
                 "source_text": draft,
                 "model": arguments.get("model"),
                 "timeout_sec": (
-                    arguments.get("timeout_sec")
-                    or limits.MAX_PROVIDER_TIMEOUT_SECONDS
+                    arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
                 ),
                 "max_tokens": arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS,
             }

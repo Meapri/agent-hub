@@ -105,7 +105,9 @@ def _parts_from_content(content: Any) -> List[Dict[str, Any]]:
             if blob:
                 parts.append({"inlineData": {"mimeType": mime, "data": blob}})
             continue
-        if isinstance(item.get("functionCall"), dict) or isinstance(item.get("function_call"), dict):
+        if isinstance(item.get("functionCall"), dict) or isinstance(
+            item.get("function_call"), dict
+        ):
             fn = item.get("functionCall") or item.get("function_call") or {}
             parts.append(
                 {
@@ -116,13 +118,17 @@ def _parts_from_content(content: Any) -> List[Dict[str, Any]]:
                 }
             )
             continue
-        if isinstance(item.get("functionResponse"), dict) or isinstance(item.get("function_response"), dict):
+        if isinstance(item.get("functionResponse"), dict) or isinstance(
+            item.get("function_response"), dict
+        ):
             fr = item.get("functionResponse") or item.get("function_response") or {}
             parts.append(
                 {
                     "functionResponse": {
                         "name": str(fr.get("name") or ""),
-                        "response": fr.get("response") if isinstance(fr.get("response"), dict) else {"result": fr.get("response")},
+                        "response": fr.get("response")
+                        if isinstance(fr.get("response"), dict)
+                        else {"result": fr.get("response")},
                     }
                 }
             )
@@ -204,7 +210,9 @@ def _tool_calls_to_parts(message: Dict[str, Any]) -> List[Dict[str, Any]]:
     return parts
 
 
-def _build_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def _build_contents(
+    messages: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     contents: List[Dict[str, Any]] = []
     system_parts: List[str] = []
     for message in messages:
@@ -231,7 +239,9 @@ def _build_contents(messages: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]
             else:
                 raw = _content_to_text(message.get("content"))
                 try:
-                    response_payload = json.loads(raw) if raw.strip().startswith(("{", "[")) else {"result": raw}
+                    response_payload = (
+                        json.loads(raw) if raw.strip().startswith(("{", "[")) else {"result": raw}
+                    )
                 except json.JSONDecodeError:
                     response_payload = {"result": raw}
             if not isinstance(response_payload, dict):
@@ -315,7 +325,11 @@ def build_request(
     if grounding in {"always", "auto"}:
         tool_list.append({"google_search": {}})
         existing = body.get("systemInstruction")
-        if isinstance(existing, dict) and isinstance(existing.get("parts"), list) and existing["parts"]:
+        if (
+            isinstance(existing, dict)
+            and isinstance(existing.get("parts"), list)
+            and existing["parts"]
+        ):
             first = existing["parts"][0]
             if isinstance(first, dict):
                 first["text"] = f"{first.get('text', '')}\n\n{GROUNDING_HINT}".strip()
@@ -357,7 +371,13 @@ def extract_response_text(payload: Dict[str, Any]) -> Dict[str, Any]:
     inner = payload.get("response") if isinstance(payload.get("response"), dict) else payload
     candidates = inner.get("candidates") if isinstance(inner, dict) else []
     if not isinstance(candidates, list) or not candidates:
-        return {"text": "", "reasoning": "", "finish_reason": "stop", "tool_calls": [], "raw": inner}
+        return {
+            "text": "",
+            "reasoning": "",
+            "finish_reason": "stop",
+            "tool_calls": [],
+            "raw": inner,
+        }
     candidate = candidates[0] if isinstance(candidates[0], dict) else {}
     content = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
     parts = content.get("parts") if isinstance(content.get("parts"), list) else []
@@ -428,14 +448,20 @@ def merge_stream_chunks(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
                     "content": {
                         "role": "model",
                         "parts": (
-                            ([{"text": "".join(reasoning_parts), "thought": True}] if reasoning_parts else [])
+                            (
+                                [{"text": "".join(reasoning_parts), "thought": True}]
+                                if reasoning_parts
+                                else []
+                            )
                             + ([{"text": "".join(text_parts)}] if text_parts else [])
                             + [
                                 {
                                     "functionCall": {
                                         "name": c.get("name") or c.get("function", {}).get("name"),
                                         "args": c.get("args")
-                                        or _maybe_json_args((c.get("function") or {}).get("arguments")),
+                                        or _maybe_json_args(
+                                            (c.get("function") or {}).get("arguments")
+                                        ),
                                     }
                                 }
                                 for c in tool_calls
@@ -458,9 +484,7 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
     original_arguments = dict(arguments or {})
     explicit_model = str(original_arguments.get("model") or "").strip()
     explicit_task = str(original_arguments.get("task") or "").strip()
-    explicit_thinking = bool(
-        str(original_arguments.get("thinking_level") or "").strip()
-    )
+    explicit_thinking = bool(str(original_arguments.get("thinking_level") or "").strip())
     try:
         from . import profiles
 
@@ -499,7 +523,11 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-    grounding = str(arguments.get("grounding") or os.getenv("GOOGLE_ANTIGRAVITY_GROUNDING") or "off").strip().lower()
+    grounding = (
+        str(arguments.get("grounding") or os.getenv("GOOGLE_ANTIGRAVITY_GROUNDING") or "off")
+        .strip()
+        .lower()
+    )
     if grounding not in {"off", "auto", "always"}:
         grounding = "off"
     tools = arguments.get("tools") if isinstance(arguments.get("tools"), list) else None

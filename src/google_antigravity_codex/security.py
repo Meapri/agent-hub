@@ -53,14 +53,7 @@ def consent_payload_enabled(data: object) -> bool:
     if not isinstance(data, dict) or data.get("accepted") is not True:
         return False
     stored_version = data.get("version")
-    return (
-        type(stored_version) is int
-        and stored_version == CONSENT_FILE_VERSION
-    )
-
-
-def cli_bridge_enabled() -> bool:
-    return user_consent_enabled() or env_flag("GOOGLE_ANTIGRAVITY_ENABLE_CLI_BRIDGE")
+    return type(stored_version) is int and stored_version == CONSENT_FILE_VERSION
 
 
 def agy_session_enabled() -> bool:
@@ -102,7 +95,11 @@ def consent_file_path() -> Path:
     if override:
         return Path(override).expanduser()
     config = os.getenv("GOOGLE_ANTIGRAVITY_CONFIG_DIR", "").strip()
-    root = Path(config).expanduser() if config else Path.home() / ".config" / "google-antigravity-codex"
+    root = (
+        Path(config).expanduser()
+        if config
+        else Path.home() / ".config" / "google-antigravity-codex"
+    )
     return root / "user-consent.json"
 
 
@@ -110,13 +107,12 @@ def consent_status() -> dict[str, object]:
     env_consent = env_flag("GOOGLE_ANTIGRAVITY_USER_CONSENT")
     file_consent = user_consent_enabled() and not env_consent
     master = env_consent or file_consent
-    cli_specific = env_flag("GOOGLE_ANTIGRAVITY_ENABLE_CLI_BRIDGE")
     agy_session_specific = env_flag("GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION")
     if env_consent:
         source = "GOOGLE_ANTIGRAVITY_USER_CONSENT"
     elif file_consent:
         source = "user-consent.json"
-    elif cli_specific or agy_session_specific:
+    elif agy_session_specific:
         source = "feature_specific_environment"
     else:
         source = "none"
@@ -125,17 +121,14 @@ def consent_status() -> dict[str, object]:
         "consent_source": source,
         "consent_file": str(consent_file_path()),
         "consent_file_active": file_consent,
-        "cli_bridge_enabled": master or cli_specific,
         "agy_session_enabled": master or agy_session_specific,
         "running_under_agy": running_under_agy(),
         "configuration": {
             "grant_command": (
-                "python3 scripts/google_antigravity_consent.py grant "
-                "--i-understand-and-consent"
+                "python3 scripts/google_antigravity_consent.py grant --i-understand-and-consent"
             ),
             "revoke_command": "python3 scripts/google_antigravity_consent.py revoke",
             "enable_all": "GOOGLE_ANTIGRAVITY_USER_CONSENT=1",
-            "enable_cli_bridge_only": "GOOGLE_ANTIGRAVITY_ENABLE_CLI_BRIDGE=1",
             "enable_agy_session_only": "GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION=1",
         },
     }
@@ -212,7 +205,9 @@ def resolve_allowed_path(
         # MCP servers are commonly started outside the user's repository.  A
         # relative path paired with a visible workspace_root must therefore be
         # resolved from that root, not from the long-lived server process cwd.
-        path = (explicit / requested).resolve() if not requested.is_absolute() else requested.resolve()
+        path = (
+            (explicit / requested).resolve() if not requested.is_absolute() else requested.resolve()
+        )
     else:
         path = requested.resolve()
     roots = list(dict.fromkeys(roots))

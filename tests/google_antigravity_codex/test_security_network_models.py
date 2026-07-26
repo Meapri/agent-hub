@@ -117,11 +117,9 @@ def test_explicit_workspace_root_rejects_broad_and_sensitive_roots(tmp_path):
         security.explicit_workspace_root(sensitive)
 
 
-def test_master_consent_enables_agy_backends(monkeypatch):
+def test_master_consent_enables_agy_session(monkeypatch):
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_USER_CONSENT", "1")
-    monkeypatch.delenv("GOOGLE_ANTIGRAVITY_ENABLE_CLI_BRIDGE", raising=False)
     monkeypatch.delenv("GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION", raising=False)
-    assert security.cli_bridge_enabled() is True
     assert security.agy_session_enabled() is True
     status = security.consent_status()
     assert status["user_consent"] is True

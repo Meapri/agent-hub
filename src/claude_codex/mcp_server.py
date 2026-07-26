@@ -97,7 +97,6 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "description": "List curated (and optionally live) models.",
             "inputSchema": LIST_MODELS_SCHEMA,
         },
-
         {
             "name": "claude_codex_login_status",
             "description": "Claude Code / subscription OAuth credential status (no secrets).",
@@ -156,23 +155,38 @@ def _doctor(_args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-
-
 def _login_status(_args):
     st = subscription_auth.status()
-    return {"text": json.dumps(st, indent=2), **st, **response.standard_fields(provider="anthropic", backend="subscription-oauth", success=bool(st.get("logged_in")))}
+    return {
+        "text": json.dumps(st, indent=2),
+        **st,
+        **response.standard_fields(
+            provider="anthropic", backend="subscription-oauth", success=bool(st.get("logged_in"))
+        ),
+    }
 
 
 def _login_refresh(_args):
     security.require_consent()
     subscription_auth.refresh_access_token()
     out = {"success": True}
-    return {"text": json.dumps(out, indent=2), **out, **response.standard_fields(provider="anthropic", backend="subscription-oauth")}
+    return {
+        "text": json.dumps(out, indent=2),
+        **out,
+        **response.standard_fields(provider="anthropic", backend="subscription-oauth"),
+    }
 
 
 def _mirror_keychain(_args):
     out = subscription_auth.mirror_keychain_to_file()
-    return {"text": json.dumps(out, indent=2), **out, **response.standard_fields(success=bool(out.get("success")), provider="anthropic", backend="subscription-oauth")}
+    return {
+        "text": json.dumps(out, indent=2),
+        **out,
+        **response.standard_fields(
+            success=bool(out.get("success")), provider="anthropic", backend="subscription-oauth"
+        ),
+    }
+
 
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     table: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {

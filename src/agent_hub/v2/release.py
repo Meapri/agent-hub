@@ -283,7 +283,9 @@ def plan_update(
             "The installed LaunchAgent has no daemon command.",
             scope="release",
         )
-    candidate = Path(candidate_root).expanduser().resolve(strict=True) / "bin/agent-hubd"
+    resolved_candidate_root = Path(candidate_root).expanduser().resolve(strict=True)
+    candidate_bin = resolved_candidate_root / "bin"
+    candidate = candidate_bin / "agent-hubd"
     candidate_content = _safe_file(candidate, executable=True)
     previous = str(arguments[0])
     state_db = _state_db_path(current)
@@ -291,8 +293,23 @@ def plan_update(
     rollback, _, rollback_db = _rollback_paths(rollback_path)
     updated = dict(current)
     updated["ProgramArguments"] = [str(candidate), *arguments[1:]]
+    updated["WorkingDirectory"] = str(resolved_candidate_root)
+    environment = dict(current.get("EnvironmentVariables") or {})
+    existing_path = str(environment.get("PATH") or os.defpath)
+    path_entries = [item for item in existing_path.split(os.pathsep) if item]
+    releases_root = resolved_candidate_root.parent
+    path_entries = [
+        item
+        for item in path_entries
+        if not (
+            Path(item).expanduser().name == "bin"
+            and Path(item).expanduser().parent.parent == releases_root
+        )
+    ]
+    environment["PATH"] = os.pathsep.join([str(candidate_bin), *path_entries])
+    updated["EnvironmentVariables"] = environment
     after = plistlib.dumps(updated, fmt=plistlib.FMT_XML, sort_keys=True)
-    return _proposal(
+    proposal = _proposal(
         mode="update",
         launch_path=launch_path,
         before=before,
@@ -305,6 +322,10 @@ def plan_update(
         rollback_path=rollback,
         rollback_db_path=rollback_db,
     )
+    proposal["proposed_working_directory"] = str(resolved_candidate_root)
+    proposal["proposed_path_entry"] = str(candidate_bin)
+    proposal["proposal_sha256"] = _proposal_digest(proposal)
+    return proposal
 
 
 def plan_rollback(

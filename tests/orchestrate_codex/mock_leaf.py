@@ -80,7 +80,12 @@ def main() -> int:
                     "isError": False,
                 }
         else:
-            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": method}}) + "\n")
+            sys.stdout.write(
+                json.dumps(
+                    {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": method}}
+                )
+                + "\n"
+            )
             sys.stdout.flush()
             continue
         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}) + "\n")

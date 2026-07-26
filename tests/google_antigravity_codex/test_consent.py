@@ -21,7 +21,6 @@ def test_local_consent_file_grant_and_revoke(tmp_path, monkeypatch):
     assert payload["version"] == security.CONSENT_FILE_VERSION
     if os.name == "posix":
         assert oct(path.stat().st_mode & 0o777) == "0o600"
-    assert security.cli_bridge_enabled() is True
     assert security.agy_session_enabled() is True
     assert security.consent_status()["consent_source"] == "user-consent.json"
     before = path.read_bytes()

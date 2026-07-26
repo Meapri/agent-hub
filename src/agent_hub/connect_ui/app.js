@@ -39,6 +39,9 @@ const state = {
   egressReviews: [],
   egressError: "",
   egressBusy: {},
+  egressSettings: { revision: 0, auto_approve: false },
+  egressSettingsError: "",
+  egressSettingsBusy: false,
   detailFocusAction: null,
   jobAnnouncement: "",
 };
@@ -228,7 +231,7 @@ async function loadStatus({ quiet = false } = {}) {
       state.selected = providerOrder.find((id) => state.providers[id]) || "claude";
     }
     render();
-    await loadEgressReviews();
+    await Promise.all([loadEgressReviews(), loadEgressSettings()]);
     return true;
   } catch (error) {
     if (state.statusGeneration !== generation) return false;
@@ -251,6 +254,7 @@ async function loadStatus({ quiet = false } = {}) {
 
 function render() {
   renderSummary();
+  renderEgressSettings();
   renderEgressReviews();
   renderProviderList();
   renderDetail();
@@ -267,18 +271,48 @@ async function loadEgressReviews() {
   renderEgressReviews();
 }
 
+async function loadEgressSettings() {
+  try {
+    const payload = await request("/api/egress-settings");
+    state.egressSettings = {
+      revision: Number(payload.revision || 0),
+      auto_approve: Boolean(payload.auto_approve),
+    };
+    state.egressSettingsError = "";
+  } catch (error) {
+    state.egressSettingsError = error.message;
+  }
+  renderEgressSettings();
+}
+
+function renderEgressSettings() {
+  const toggle = $("#global-egress-auto-approve");
+  const status = $("#egress-auto-approve-status");
+  const error = $("#egress-settings-error");
+  if (!toggle || !status || !error) return;
+  toggle.checked = Boolean(state.egressSettings.auto_approve);
+  toggle.disabled = state.egressSettingsBusy;
+  status.textContent = state.egressSettingsBusy
+    ? "저장 중…"
+    : state.egressSettings.auto_approve
+      ? "켜짐 · 모든 프로젝트"
+      : "꺼짐";
+  error.textContent = state.egressSettingsError;
+  error.hidden = !state.egressSettingsError;
+}
+
 function renderEgressReviews() {
   const panel = $("#egress-reviews");
   const list = $("#egress-review-list");
   if (!panel || !list) return;
   const reviews = state.egressReviews;
-  panel.hidden = reviews.length === 0 && !state.egressError;
   $("#egress-count").textContent = reviews.length ? `${reviews.length}건` : "";
   if (state.egressError) {
     list.innerHTML = `<p class="form-error" role="alert">${escapeHtml(state.egressError)}</p>`;
     return;
   }
-  list.innerHTML = reviews
+  list.innerHTML = reviews.length
+    ? reviews
     .map((review) => {
       const pending = review.status === "pending";
       const busy = Boolean(state.egressBusy[review.review_id]);
@@ -304,12 +338,58 @@ function renderEgressReviews() {
                   <button class="primary-button" type="button"
                     data-egress-action="approve" data-review-id="${escapeHtml(review.review_id)}"
                     ${busy ? "disabled" : ""}>${busy ? "저장 중…" : "전송 승인"}</button>`
-                : `<span class="egress-approved">승인됨 · 작업 재개 대기</span>`
+                : `<span class="egress-approved">${
+                    review.decision_source === "global_auto_approve"
+                      ? "전역 자동 승인 · 작업 재개 대기"
+                      : "승인됨 · 작업 재개 대기"
+                  }</span>`
             }
           </div>
         </article>`;
     })
-    .join("");
+    .join("")
+    : "";
+}
+
+async function updateEgressSettings(autoApprove) {
+  if (state.egressSettingsBusy) return;
+  if (
+    autoApprove &&
+    !window.confirm(
+      "전역 자동 승인을 켜면 모든 프로젝트의 허용된 저장소·결과물 전송이 개별 확인 없이 승인됩니다. 계속할까요?",
+    )
+  ) {
+    renderEgressSettings();
+    return;
+  }
+  state.egressSettingsBusy = true;
+  state.egressSettingsError = "";
+  renderEgressSettings();
+  try {
+    const payload = await request("/api/egress-settings", {
+      method: "POST",
+      body: {
+        auto_approve: autoApprove,
+        expected_revision: state.egressSettings.revision,
+      },
+    });
+    state.egressSettings = {
+      revision: Number(payload.revision || 0),
+      auto_approve: Boolean(payload.auto_approve),
+    };
+    showToast(
+      autoApprove
+        ? "전역 자동 승인을 켰습니다."
+        : "전역 자동 승인을 껐습니다. 새 외부 전송은 개별 승인이 필요합니다.",
+    );
+  } catch (error) {
+    state.egressSettingsError = error.message;
+    showToast(error.message);
+    await loadEgressSettings();
+  } finally {
+    state.egressSettingsBusy = false;
+    renderEgressSettings();
+  }
 }
 
 async function decideEgressReview(reviewId, decision) {
@@ -1265,6 +1345,10 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  if (event.target.id === "global-egress-auto-approve") {
+    updateEgressSettings(event.target.checked);
+    return;
+  }
   if (event.target.id === "inline-consent-check") {
     state.inlineConsent = event.target.checked;
     const primary = document.querySelector(

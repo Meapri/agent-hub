@@ -57,6 +57,30 @@ def test_policy_prepare_apply_is_revision_and_digest_fenced(tmp_path):
     assert stale.value.code == "policy_file_conflict"
 
 
+def test_policy_migrates_legacy_max_tokens_without_limiting_input_context(tmp_path):
+    policy_dir = tmp_path / ".agent-hub"
+    policy_dir.mkdir()
+    (policy_dir / "project.toml").write_text(
+        "\n".join(
+            [
+                'schema = "agent_hub_project_policy_v2"',
+                "revision = 3",
+                "",
+                "[budgets]",
+                "max_tokens = 4096",
+            ]
+        )
+        + "\n"
+    )
+
+    policy = load_policy(str(tmp_path)).policy
+
+    assert policy["budgets"]["max_output_tokens"] == 4096
+    assert policy["budgets"]["max_total_tokens"] == 4096
+    assert "max_input_tokens" not in policy["budgets"]
+    assert "max_tokens" not in policy["budgets"]
+
+
 def test_experimental_runtime_requires_project_flag_and_tool_sandbox(tmp_path):
     registry = ExperimentalRuntimeRegistry()
     policy = load_policy(str(tmp_path)).policy

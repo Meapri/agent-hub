@@ -1,7 +1,7 @@
 {
   "name": "google-antigravity-codex",
   "version": "0.9.8",
-  "description": "Codex skills and MCP tools for Google Antigravity: direct OAuth login, agy CLI sessions, and Code Assist tools.",
+  "description": "Codex skills and MCP tools for Google Antigravity: direct OAuth login and Code Assist tools.",
   "author": {
     "name": "Park Chanwoo",
     "url": "https://github.com/Meapri"
@@ -22,13 +22,11 @@
   "interface": {
     "displayName": "Google Antigravity Codex",
     "shortDescription": "Native Antigravity sessions for Codex.",
-    "longDescription": "Google Antigravity Codex provides Codex skills and an MCP stdio server with direct Google Antigravity OAuth login (PKCE), the official agy CLI session, and optional token-export reuse. It includes chat, writing, releases, models, diagnostics, and capability-gated grounding and image tools. Provider calls require explicit user consent.",
+    "longDescription": "Google Antigravity Codex provides Codex skills and an MCP stdio server with direct Google Antigravity OAuth login (PKCE) and optional compatible token-export reuse. It includes chat, writing, releases, models, diagnostics, and capability-gated grounding and image tools. Provider calls require explicit user consent.",
     "developerName": "Park Chanwoo",
     "category": "Developer Tools",
     "capabilities": [
-      "Native agy CLI 1.1.x plugin",
-      "Guarded optional CLI diagnostics",
-      "Antigravity CLI doctor",
+      "Antigravity doctor",
       "Coding assistance",
       "Code review",
       "Direct Google Antigravity OAuth login (PKCE)",

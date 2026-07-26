@@ -90,9 +90,7 @@ def _existing_pending_is_active(path: Path) -> bool:
             "Existing xAI login state is invalid; clear it before starting again."
         ) from exc
     if not isinstance(pending, dict):
-        raise RuntimeError(
-            "Existing xAI login state is invalid; clear it before starting again."
-        )
+        raise RuntimeError("Existing xAI login state is invalid; clear it before starting again.")
     created_at = float(pending.get("created_at") or 0)
     expires_in = int(pending.get("expires_in") or 900)
     return bool(created_at and time.time() < created_at + max(1, expires_in))
@@ -177,9 +175,7 @@ def _http_json(
     except urllib.error.HTTPError as exc:
         oauth_error = "oauth_http_error"
         try:
-            payload = json.loads(
-                exc.read(4096).decode("utf-8", errors="replace")
-            )
+            payload = json.loads(exc.read(4096).decode("utf-8", errors="replace"))
         except (ValueError, TypeError):
             payload = None
         if isinstance(payload, dict) and payload.get("error") in {
@@ -302,9 +298,7 @@ def _token_timing(data: Dict[str, Any]) -> tuple[Optional[bool], Optional[bool]]
     last = data.get("last_refresh")
     try:
         expires_in = int(data.get("expires_in") or 0)
-        refreshed_at = datetime.fromisoformat(
-            str(last).replace("Z", "+00:00")
-        ).timestamp()
+        refreshed_at = datetime.fromisoformat(str(last).replace("Z", "+00:00")).timestamp()
     except (TypeError, ValueError):
         return None, None
     if expires_in <= 0:
@@ -324,11 +318,7 @@ def clear_pending_login(*, expected_flow_id: str | None = None) -> bool:
                 pending = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
                 return False
-            current_flow_id = (
-                str(pending.get("flow_id") or "")
-                if isinstance(pending, dict)
-                else ""
-            )
+            current_flow_id = str(pending.get("flow_id") or "") if isinstance(pending, dict) else ""
             if not current_flow_id or not secrets.compare_digest(
                 current_flow_id,
                 expected_flow_id,
@@ -446,12 +436,8 @@ def _refresh_access_token_under_operation_lock(
         access_token = str(data["access_token"])
         token_valid, refresh_recommended = _token_timing(data)
         refresh_token = str(data.get("refresh_token") or "").strip()
-        if (
-            token_valid is True
-            and refresh_recommended is False
-        ) or (
-            only_if_recommended
-            and (refresh_recommended is not True or not refresh_token)
+        if (token_valid is True and refresh_recommended is False) or (
+            only_if_recommended and (refresh_recommended is not True or not refresh_token)
         ):
             return access_token, True
         if not refresh_token:
@@ -483,9 +469,7 @@ def _refresh_access_token_under_operation_lock(
             save_tokens(
                 refreshed,
                 discovery_info={
-                    "token_endpoint": (
-                        refreshed.get("token_endpoint") or token_endpoint
-                    )
+                    "token_endpoint": (refreshed.get("token_endpoint") or token_endpoint)
                 },
             )
     return str(refreshed["access_token"]), False

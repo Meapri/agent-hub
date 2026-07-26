@@ -180,13 +180,8 @@ def review_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "task": "code",
             "temperature": arguments.get("temperature", 0.2),
             "max_tokens": int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS),
-            "timeout_sec": (
-                arguments.get("timeout_sec")
-                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-            ),
-            "retry_count": arguments.get(
-                "retry_count", limits.MAX_PROVIDER_RETRIES
-            ),
+            "timeout_sec": (arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS),
+            "retry_count": arguments.get("retry_count", limits.MAX_PROVIDER_RETRIES),
             "thinking_level": str(arguments.get("thinking_level") or "high"),
         }
     )
@@ -195,9 +190,7 @@ def review_diff(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if truncated:
         warnings.append("diff_truncated")
     if diagnostics.get("capacity_fallback"):
-        warnings.append(
-            f"capacity_fallback_used:{diagnostics.get('used_model') or 'unknown'}"
-        )
+        warnings.append(f"capacity_fallback_used:{diagnostics.get('used_model') or 'unknown'}")
 
     return {
         "text": str(chat_response.get("text") or ""),

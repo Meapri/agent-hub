@@ -39,14 +39,30 @@
         <p>사용할 제공자와 저장소 외부 전송 승인을 한곳에서 관리하세요.</p>
       </section>
 
-      <section class="egress-reviews" id="egress-reviews" aria-labelledby="egress-title" hidden>
+      <section class="egress-reviews" id="egress-reviews" aria-labelledby="egress-title">
         <div class="egress-header">
           <div>
-            <h2 id="egress-title">외부 전송 검토</h2>
-            <p>에이전트가 준비한 파일 목록과 전송 대상을 확인해야 작업이 계속됩니다.</p>
+            <h2 id="egress-title">외부 전송 승인</h2>
+            <p>저장소 파일과 저장된 결과물을 외부 모델에 보낼 때 적용할 승인 방식을 관리합니다.</p>
           </div>
-          <span class="egress-count" id="egress-count"></span>
+          <div class="egress-header-meta">
+            <span class="egress-count" id="egress-count"></span>
+            <label class="global-switch" for="global-egress-auto-approve">
+              <span>
+                <strong>전역 자동 승인</strong>
+                <small id="egress-auto-approve-status">꺼짐</small>
+              </span>
+              <input id="global-egress-auto-approve" type="checkbox" role="switch"
+                aria-describedby="egress-auto-approve-help">
+              <i aria-hidden="true"></i>
+            </label>
+          </div>
         </div>
+        <p class="egress-warning" id="egress-auto-approve-help">
+          켜면 모든 프로젝트의 허용된 외부 전송을 개별 확인 없이 승인합니다.
+          프로젝트의 전송 금지 정책과 민감 정보 보호는 계속 적용됩니다.
+        </p>
+        <p class="form-error" id="egress-settings-error" role="alert" hidden></p>
         <div id="egress-review-list"></div>
       </section>
 

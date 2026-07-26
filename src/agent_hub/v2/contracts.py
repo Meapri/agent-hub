@@ -255,7 +255,15 @@ def validate_task(raw: Any) -> dict[str, Any]:
     constraints = require_object(value.get("constraints", {}), field="constraints")
     _reject_unknown_fields(
         constraints,
-        allowed={"provider_allowlist", "max_tokens", "max_leaf_calls", "timeout_seconds"},
+        allowed={
+            "provider_allowlist",
+            "max_tokens",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_total_tokens",
+            "max_leaf_calls",
+            "timeout_seconds",
+        },
         field="task.constraints",
     )
     provider_allowlist = _string_list(
@@ -264,9 +272,22 @@ def validate_task(raw: Any) -> dict[str, Any]:
         maximum_items=32,
     )
     budgets: dict[str, int | float] = {}
-    for key in ("max_tokens", "max_leaf_calls"):
+    for key in (
+        "max_tokens",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_total_tokens",
+        "max_leaf_calls",
+    ):
         if key in constraints:
             budgets[key] = require_non_negative_int(constraints[key], field=f"constraints.{key}")
+    legacy_max_tokens = budgets.get("max_tokens")
+    if legacy_max_tokens is not None:
+        # max_tokens was historically overloaded as both a per-call output
+        # limit and an aggregate run limit. Keep those two meanings for old
+        # callers, but never use it to shrink the input context window.
+        budgets.setdefault("max_output_tokens", legacy_max_tokens)
+        budgets.setdefault("max_total_tokens", legacy_max_tokens)
     if "timeout_seconds" in constraints:
         budgets["timeout_seconds"] = require_finite_number(
             constraints["timeout_seconds"],
@@ -290,6 +311,29 @@ def validate_task(raw: Any) -> dict[str, Any]:
         "output_contract": output_contract,
         "retention": retention,
     }
+
+
+def input_token_limit(constraints: Mapping[str, Any]) -> int | None:
+    value = constraints.get("max_input_tokens")
+    return int(value) if value is not None else None
+
+
+def output_token_limit(
+    constraints: Mapping[str, Any],
+    *,
+    default: int = 131_072,
+) -> int:
+    value = constraints.get("max_output_tokens", constraints.get("max_tokens", default))
+    return int(value)
+
+
+def total_token_limit(
+    constraints: Mapping[str, Any],
+    *,
+    default: int = 131_072,
+) -> int:
+    value = constraints.get("max_total_tokens", constraints.get("max_tokens", default))
+    return int(value)
 
 
 def validate_plan(raw: Any) -> dict[str, Any]:

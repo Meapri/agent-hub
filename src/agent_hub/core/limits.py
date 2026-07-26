@@ -13,9 +13,7 @@ GEMINI_MAX_OUTPUT_TOKENS = 65_536
 # return margin so they can persist state and return a structured result.
 MAX_PROVIDER_TIMEOUT_SECONDS = 1_800
 MCP_RETURN_MARGIN_SECONDS = 10
-MAX_ADAPTIVE_TIMEOUT_SECONDS = (
-    MAX_PROVIDER_TIMEOUT_SECONDS - MCP_RETURN_MARGIN_SECONDS
-)
+MAX_ADAPTIVE_TIMEOUT_SECONDS = MAX_PROVIDER_TIMEOUT_SECONDS - MCP_RETURN_MARGIN_SECONDS
 
 # These are the existing public schema maxima. Keeping them here prevents
 # direct leaves and unified workflows from drifting back to smaller defaults.

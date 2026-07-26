@@ -113,9 +113,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     model = str(arguments.get("model") or DEFAULT_MODEL).strip()
     reasoning_effort = str(arguments.get("reasoning_effort") or "").strip().lower()
     if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
-        raise ValueError(
-            "reasoning_effort must be low, medium, high, xhigh, max, or ultra"
-        )
+        raise ValueError("reasoning_effort must be low, medium, high, xhigh, max, or ultra")
     prompt, image_urls = _conversation(arguments)
     warnings: List[str] = []
     if arguments.get("temperature") is not None:

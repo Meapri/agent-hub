@@ -121,7 +121,9 @@ def test_release_snapshot_and_draft_from_git_repo(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
 
     snapshot_result = release.release_snapshot({"repo": str(tmp_path)})
-    draft_result = release.release_draft({"repo": str(tmp_path), "version": "1.2.4", "tag": "v1.2.4"})
+    draft_result = release.release_draft(
+        {"repo": str(tmp_path), "version": "1.2.4", "tag": "v1.2.4"}
+    )
 
     snapshot = snapshot_result["snapshot"]
     assert snapshot["recommended_bump"] == "minor"
@@ -148,15 +150,16 @@ def test_writing_workspace_root_authorizes_source_file(tmp_path, monkeypatch):
     source.write_text("hello", encoding="utf-8")
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_ALLOWED_ROOTS", "")
 
-    assert writing.read_source(
-        {"source_file": str(source), "workspace_root": str(workspace)}
-    ) == "hello"
-    assert writing.read_source(
-        {"source_file": "note.md", "workspace_root": str(workspace)}
-    ) == "hello"
-    assert writing.read_source(
-        {"source_file": "note.md", "project_root": str(workspace)}
-    ) == "hello"
+    assert (
+        writing.read_source({"source_file": str(source), "workspace_root": str(workspace)})
+        == "hello"
+    )
+    assert (
+        writing.read_source({"source_file": "note.md", "workspace_root": str(workspace)}) == "hello"
+    )
+    assert (
+        writing.read_source({"source_file": "note.md", "project_root": str(workspace)}) == "hello"
+    )
 
 
 def test_writing_infers_durable_document_tasks_before_source_polish():

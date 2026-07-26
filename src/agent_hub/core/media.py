@@ -37,7 +37,11 @@ def _workspace_root(value: Any) -> Path:
 def _public_https_url(source: str) -> bool:
     parsed = urlparse(source)
     hostname = str(parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not hostname or hostname in {"localhost", "localhost.localdomain"}:
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or hostname in {"localhost", "localhost.localdomain"}
+    ):
         return False
     if hostname.endswith((".local", ".internal")):
         return False

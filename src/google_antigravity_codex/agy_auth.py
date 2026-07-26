@@ -114,32 +114,52 @@ def _read_token_file(path: Path) -> str:
             code="agy_token_file_missing",
         ) from exc
     if not stat.S_ISREG(path_info.st_mode) or stat.S_ISLNK(path_info.st_mode):
-        raise AgyAuthError("agy token export must be a regular, non-symlink file.", code="agy_token_file_unsafe")
+        raise AgyAuthError(
+            "agy token export must be a regular, non-symlink file.", code="agy_token_file_unsafe"
+        )
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise AgyAuthError("agy token export could not be opened safely.", code="agy_token_file_unsafe") from exc
+        raise AgyAuthError(
+            "agy token export could not be opened safely.", code="agy_token_file_unsafe"
+        ) from exc
     try:
         info = os.fstat(descriptor)
         if (info.st_dev, info.st_ino) != (path_info.st_dev, path_info.st_ino):
-            raise AgyAuthError("agy token export changed while it was being opened.", code="agy_token_file_unsafe")
+            raise AgyAuthError(
+                "agy token export changed while it was being opened.", code="agy_token_file_unsafe"
+            )
         if not stat.S_ISREG(info.st_mode):
-            raise AgyAuthError("agy token export must be a regular file.", code="agy_token_file_unsafe")
+            raise AgyAuthError(
+                "agy token export must be a regular file.", code="agy_token_file_unsafe"
+            )
         if info.st_size <= 0 or info.st_size > MAX_TOKEN_FILE_BYTES:
-            raise AgyAuthError("agy token export has an invalid size.", code="agy_token_file_size_invalid")
+            raise AgyAuthError(
+                "agy token export has an invalid size.", code="agy_token_file_size_invalid"
+            )
         if os.name == "posix":
             if info.st_uid != os.getuid():
-                raise AgyAuthError("agy token export is not owned by the current user.", code="agy_token_file_owner_invalid")
+                raise AgyAuthError(
+                    "agy token export is not owned by the current user.",
+                    code="agy_token_file_owner_invalid",
+                )
             if stat.S_IMODE(info.st_mode) & 0o077:
-                raise AgyAuthError("agy token export permissions must be 0600 or stricter.", code="agy_token_file_permissions_invalid")
+                raise AgyAuthError(
+                    "agy token export permissions must be 0600 or stricter.",
+                    code="agy_token_file_permissions_invalid",
+                )
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
         if len(raw) > MAX_TOKEN_FILE_BYTES:
-            raise AgyAuthError("agy token export has an invalid size.", code="agy_token_file_size_invalid")
+            raise AgyAuthError(
+                "agy token export has an invalid size.", code="agy_token_file_size_invalid"
+            )
         return raw.decode("utf-8")
     except UnicodeError as exc:
-        raise AgyAuthError("agy token export is not valid UTF-8.", code="agy_token_file_invalid") from exc
+        raise AgyAuthError(
+            "agy token export is not valid UTF-8.", code="agy_token_file_invalid"
+        ) from exc
     finally:
         os.close(descriptor)
 
@@ -154,9 +174,13 @@ def load_credentials() -> AgyCredentials:
     try:
         data = json.loads(_read_token_file(path))
     except json.JSONDecodeError as exc:
-        raise AgyAuthError("agy token export is not valid JSON.", code="agy_token_file_invalid") from exc
+        raise AgyAuthError(
+            "agy token export is not valid JSON.", code="agy_token_file_invalid"
+        ) from exc
     if not isinstance(data, dict):
-        raise AgyAuthError("agy token export must contain a JSON object.", code="agy_token_file_invalid")
+        raise AgyAuthError(
+            "agy token export must contain a JSON object.", code="agy_token_file_invalid"
+        )
     token = data.get("token") if isinstance(data.get("token"), dict) else data
     access = str(token.get("access_token") or token.get("access") or "").strip()
     refresh = str(token.get("refresh_token") or token.get("refresh") or "").strip()
@@ -175,8 +199,12 @@ def load_credentials() -> AgyCredentials:
         or ""
     ).strip()
     if not access:
-        raise AgyAuthError("agy token export does not contain an access token.", code="agy_access_token_missing")
-    return AgyCredentials(access_token=access, refresh_token=refresh, expires_at_ms=expires, project_id=project)
+        raise AgyAuthError(
+            "agy token export does not contain an access token.", code="agy_access_token_missing"
+        )
+    return AgyCredentials(
+        access_token=access, refresh_token=refresh, expires_at_ms=expires, project_id=project
+    )
 
 
 def _refresh_via_oauth_client(

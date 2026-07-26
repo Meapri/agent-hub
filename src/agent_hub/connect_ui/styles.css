@@ -247,6 +247,89 @@ select:focus-visible {
   font-weight: 700;
 }
 
+.egress-header-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.global-switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.global-switch > span {
+  display: grid;
+  gap: 1px;
+  text-align: right;
+}
+
+.global-switch small {
+  color: var(--muted);
+}
+
+.global-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.global-switch i {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  border: 1px solid #c8b778;
+  border-radius: 999px;
+  background: #e5dcbf;
+  transition: 150ms ease;
+}
+
+.global-switch i::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 18%);
+  content: "";
+  transition: 150ms ease;
+}
+
+.global-switch input:checked + i {
+  border-color: #9d7100;
+  background: #c58d00;
+}
+
+.global-switch input:checked + i::after {
+  transform: translateX(20px);
+}
+
+.global-switch input:focus-visible + i {
+  outline: 3px solid rgb(39 94 254 / 22%);
+  outline-offset: 2px;
+}
+
+.global-switch input:disabled + i {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.egress-warning {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 62%);
+  color: #67531e;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .egress-card {
   margin-top: 16px;
   padding-top: 16px;
@@ -1149,6 +1232,11 @@ select:focus-visible {
   .egress-card-copy li {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .egress-header-meta {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .egress-actions {

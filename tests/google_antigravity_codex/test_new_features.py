@@ -36,11 +36,17 @@ def test_use_profile_coding(tmp_path, monkeypatch):
 def test_logout_removes_token_file(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_CONFIG_DIR", str(tmp_path))
     token = tmp_path / "oauth-token.json"
-    token.write_text(json.dumps({"access": "secret", "refresh": "r", "expires": 9e12}), encoding="utf-8")
+    token.write_text(
+        json.dumps({"access": "secret", "refresh": "r", "expires": 9e12}), encoding="utf-8"
+    )
     token.chmod(0o600)
-    with patch.object(account.agy_auth, "token_file_path", return_value=token), patch.object(
-        account.oauth_login, "token_file_path", return_value=token
-    ), patch.object(account.oauth_login, "pending_file_path", return_value=tmp_path / "pending.json"):
+    with (
+        patch.object(account.agy_auth, "token_file_path", return_value=token),
+        patch.object(account.oauth_login, "token_file_path", return_value=token),
+        patch.object(
+            account.oauth_login, "pending_file_path", return_value=tmp_path / "pending.json"
+        ),
+    ):
         result = account.logout({})
     assert result["success"] is True
     assert result["failed_count"] == 0
@@ -156,12 +162,14 @@ def test_whoami_is_read_only_and_never_refreshes_or_rewrites_token(
     monkeypatch.setattr(
         account.agy_auth,
         "valid_credentials",
-        lambda *, refresh: refresh_flags.append(refresh)
-        or account.agy_auth.AgyCredentials(
-            access_token="access",
-            refresh_token="refresh",
-            expires_at_ms=int(9e12),
-            project_id="project",
+        lambda *, refresh: (
+            refresh_flags.append(refresh)
+            or account.agy_auth.AgyCredentials(
+                access_token="access",
+                refresh_token="refresh",
+                expires_at_ms=int(9e12),
+                project_id="project",
+            )
         ),
     )
     monkeypatch.setattr(
@@ -209,7 +217,9 @@ def test_review_diff_on_temp_repo(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@example.com"], cwd=repo, check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
     f = repo / "a.py"
     f.write_text("print(1)\n", encoding="utf-8")
@@ -230,8 +240,9 @@ def test_review_diff_on_temp_repo(tmp_path, monkeypatch):
             "warnings": [],
         }
 
-    with patch.object(diff_review.chat, "run_chat", side_effect=fake_chat), patch.object(
-        diff_review.security, "explicit_workspace_root", return_value=repo
+    with (
+        patch.object(diff_review.chat, "run_chat", side_effect=fake_chat),
+        patch.object(diff_review.security, "explicit_workspace_root", return_value=repo),
     ):
         result = diff_review.review_diff({"cwd": str(repo), "include_untracked": True})
     assert result["success"] is True
@@ -250,9 +261,7 @@ def test_review_diff_untracked_is_opt_in_and_binary_is_skipped(tmp_path, monkeyp
         check=True,
         capture_output=True,
     )
-    subprocess.run(
-        ["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True
-    )
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True, capture_output=True)
     tracked = repo / "tracked.py"
     tracked.write_text("VALUE = 1\n", encoding="utf-8")
     subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True, capture_output=True)

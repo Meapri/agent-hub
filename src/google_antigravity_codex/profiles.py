@@ -252,7 +252,9 @@ def save_custom_profile_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
     custom = _load_custom()
     body = {
         "description": str(arguments.get("description") or f"Custom profile {name}"),
-        "model": model_prefs.normalize_model_id(str(arguments.get("model") or "gemini-3.5-flash-high")),
+        "model": model_prefs.normalize_model_id(
+            str(arguments.get("model") or "gemini-3.5-flash-high")
+        ),
         "task": str(arguments.get("task") or "chat"),
         "grounding": str(arguments.get("grounding") or "off"),
         "thinking_level": str(arguments.get("thinking_level") or ""),

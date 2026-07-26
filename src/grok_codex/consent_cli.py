@@ -1,4 +1,5 @@
 """Compatibility shim — implementation in agent_hub.core.consent_cli."""
+
 from agent_hub.core import consent_cli as _core
 from . import security
 

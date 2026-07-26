@@ -23,6 +23,9 @@
 provider가 명확한 retryable 오류를 반환해 `failed`가 된 step만 최신 run revision과
 `retry_failed_steps` 목록으로 명시적으로 `queued`에 되돌릴 수 있습니다. 재시도는 step 상태,
 retry-safe checkpoint와 lease 부재를 하나의 transaction에서 다시 확인합니다.
+`agent_hub_get`은 해당 step ID와 바로 사용할 수 있는 revision-fenced `next_action`을
+반환합니다. 취소는 run과 아직 완료되지 않은 step을 한 transaction에서 `cancelled`로 바꾸며,
+뒤늦게 도착한 worker 결과는 step output으로 연결하지 않습니다.
 
 DB schema migration은 기존 DB integrity check, SQLite backup, migration, 사후 integrity check 순서로
 수행합니다. 실패하면 pre-migration backup으로 복구합니다. release candidate는 현재 DB의 복사본으로
@@ -43,6 +46,10 @@ repository source는 `agent_hub_plan(mode="prepare")`에서 `fact_pack_v2`와
 전달합니다. manifest는 source entry와 실제 egress destination provider를 함께 고정합니다.
 source entry가 있으면 daemon은 15분짜리 `egress_review_v1`을 만들고 연결 GUI에 표시합니다.
 session header와 same-origin intent 검사를 통과한 GUI action만 approve/reject할 수 있습니다.
+사용자 전역 `자동 승인`은 기본적으로 꺼져 있으며 daemon SQLite의 revision-fenced 설정으로만
+변경합니다. 켜져 있으면 허용된 review를 즉시 승인하되 `decision_source`와 설정 revision을
+남깁니다. 프로젝트의 `denied` 정책, 민감 경로 차단과 secret redaction은 자동 승인보다 먼저
+적용됩니다.
 `apply`는 proposal·manifest·policy revision에 묶인 `approval_request_id`를 원자적으로 한 번
 소비한 뒤에만 planner를 호출합니다. MCP 공개 도구에는 review 승인 mutation을 노출하지 않습니다.
 기존 artifact도 같은 manifest에 artifact ID, 원문 digest, redaction 후 전송 digest를 기록하고
@@ -58,6 +65,9 @@ filesystem write는 임시 디렉터리와 provider config/cache로 제한하며
 전달합니다.
 filesystem read는 사용자 홈 전체가 아니라 실행 코드와 해당 provider의 config/cache 경로로
 제한합니다. 다른 provider credential 디렉터리와 `~/.ssh` 같은 홈 하위 경로는 읽을 수 없습니다.
+환경에서 지정한 provider config/cache/credential 경로는 absolute HOME strict descendant만
+허용합니다. HOME, HOME 상위 경로, `/`, 상대 경로와 넓은 경로를 가리키는 symlink는 profile
+생성 단계에서 거부합니다.
 Python과 macOS runtime 파일은 worker 기동을 위해 읽을 수 있습니다. 직접 DNS lookup과
 사용자 홈·request runtime·`/tmp` 아래 Unix socket은 거부하고, provider HTTP(S)는 request별
 localhost proxy port만 허용합니다. macOS runtime에 필요한 system socket은 이 경계 밖입니다.
@@ -72,9 +82,16 @@ step에 fallback을 선언하면 primary와 그 fallback만 실행 후보가 됩
 호출 성공은 품질 점수가 아니며, 사용자 feedback이나 명시적 deterministic verifier만 quality signal로
 기록합니다. 병렬 run의 time budget은 DAG critical path로 계산하고, completed step은 실제
 `input_artifact_ids`와 `output_artifact_ids`를 함께 보존합니다.
+`shadow`와 `advisory`는 planner provider가 capability·policy·readiness·context 검사를 통과할
+때 선택을 유지합니다. 부적격 provider를 강제로 실행하지는 않습니다.
 catalog가 model별 `max_input_tokens`를 제공하면 daemon은 catalog revision과 5분 TTL로 이를
-캐시해 manifest fallback보다 우선합니다. routing은 task budget과 유효한 model limit 중 작은 값을
-넘는 candidate를 worker 호출 전에 제외합니다.
+캐시해 manifest fallback보다 우선합니다. 입력 context는 선택적인 task `max_input_tokens`와
+유효한 model limit 중 작은 값을 넘으면 worker 호출 전에 거부합니다. `max_output_tokens`는
+provider 호출 출력에만, `max_total_tokens`는 run 누적 사용량에만 적용합니다. 이전
+`max_tokens`는 output과 total의 호환 별칭이며 input limit으로 사용하지 않습니다.
+dependency artifact가 `fact_pack_v2` 모양이어도 현재 run에서 완료된 `local inspect` step이
+생성했다는 artifact·plan·step provenance가 모두 맞을 때만 구조화 병합합니다. Provider 출력과
+이전 run의 입력 artifact는 원문 text segment로 보존합니다.
 긴 provider 호출은 content-free `provider_attempt_started`, `provider_attempt_failed`,
 `provider_attempt_completed` event로 관찰할 수 있습니다. event에는 prompt와 결과 본문을
 기록하지 않습니다.

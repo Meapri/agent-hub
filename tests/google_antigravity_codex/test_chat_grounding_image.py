@@ -73,9 +73,7 @@ def test_chat_infers_thinking_level_from_gemini_36_tier(level):
         model=f"gemini-3.6-flash-{level}",
     )
 
-    assert request["generationConfig"]["thinkingConfig"] == {
-        "thinkingLevel": level
-    }
+    assert request["generationConfig"]["thinkingConfig"] == {"thinkingLevel": level}
 
 
 def test_chat_uses_grounding_env_default():
@@ -85,8 +83,9 @@ def test_chat_uses_grounding_env_default():
         seen.update(kwargs)
         return {"response": {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}}
 
-    with patch.dict(os.environ, {"GOOGLE_ANTIGRAVITY_GROUNDING": "always"}), patch.object(
-        chat.provider, "generate_content", fake_generate_content
+    with (
+        patch.dict(os.environ, {"GOOGLE_ANTIGRAVITY_GROUNDING": "always"}),
+        patch.object(chat.provider, "generate_content", fake_generate_content),
     ):
         result = chat.run_chat({"prompt": "latest"})
 
@@ -94,7 +93,9 @@ def test_chat_uses_grounding_env_default():
     assert result["success"] is True
     assert result["backend"] == "agy-session"
     assert {"google_search": {}} in seen["request"]["tools"]
-    assert seen["request"]["generationConfig"]["maxOutputTokens"] == chat.DEFAULT_MAX_TOKENS == 65536
+    assert (
+        seen["request"]["generationConfig"]["maxOutputTokens"] == chat.DEFAULT_MAX_TOKENS == 65536
+    )
 
 
 def test_chat_clamps_output_to_gemini_limit():
@@ -120,8 +121,9 @@ def test_chat_marks_max_token_response_incomplete():
         }
     }
 
-    with patch.dict(os.environ, {"GOOGLE_ANTIGRAVITY_USER_CONSENT": "1"}), patch.object(
-        chat.provider, "generate_content", return_value=payload
+    with (
+        patch.dict(os.environ, {"GOOGLE_ANTIGRAVITY_USER_CONSENT": "1"}),
+        patch.object(chat.provider, "generate_content", return_value=payload),
     ):
         result = chat.run_chat({"prompt": "long document"})
 
@@ -133,7 +135,11 @@ def test_chat_extracts_text_and_usage():
     payload = {
         "response": {
             "candidates": [{"content": {"parts": [{"text": "hello"}]}, "finishReason": "STOP"}],
-            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 2, "totalTokenCount": 3},
+            "usageMetadata": {
+                "promptTokenCount": 1,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 3,
+            },
         }
     }
 
@@ -171,11 +177,17 @@ def test_grounded_search_rejects_agy_cli_provider(monkeypatch):
 
 
 def test_grounded_search_exposes_text_alias():
-    with patch.object(
-        grounding.chat,
-        "run_chat",
-        lambda args: {"text": "The official site is https://openai.com.", "usage": {"total_tokens": 3}},
-    ), patch.object(grounding.provider, "require_capability"):
+    with (
+        patch.object(
+            grounding.chat,
+            "run_chat",
+            lambda args: {
+                "text": "The official site is https://openai.com.",
+                "usage": {"total_tokens": 3},
+            },
+        ),
+        patch.object(grounding.provider, "require_capability"),
+    ):
         result = grounding.run_grounded_search({"query": "official site", "resolve_sources": False})
 
     assert result["answer"] == "The official site is https://openai.com."
@@ -194,23 +206,34 @@ def test_grounded_search_recovers_direct_sources_from_failed_redirect():
         calls.append(args)
         if len(calls) == 1:
             return {"text": f"Answer with source {redirect}", "usage": {"total_tokens": 3}}
-        return {"text": "https://nvidianews.nvidia.com/news/nvidia-microsoft-windows-pcs-agents-rtx-spark"}
+        return {
+            "text": "https://nvidianews.nvidia.com/news/nvidia-microsoft-windows-pcs-agents-rtx-spark"
+        }
 
-    with patch.object(grounding.chat, "run_chat", fake_run_chat), patch.object(
-        grounding, "resolve_url_with_curl", lambda url, timeout_sec=8: ""
-    ), patch.object(grounding.urllib.request, "urlopen", side_effect=RuntimeError("404")):
+    with (
+        patch.object(grounding.chat, "run_chat", fake_run_chat),
+        patch.object(grounding, "resolve_url_with_curl", lambda url, timeout_sec=8: ""),
+        patch.object(grounding.urllib.request, "urlopen", side_effect=RuntimeError("404")),
+    ):
         with patch.object(grounding.provider, "require_capability"):
             result = grounding.run_grounded_search({"query": "rtx spark", "max_sources": 3})
 
     assert len(calls) == 2
     assert result["quality_signals"]["unresolved_redirect_count"] == 0
     assert result["quality_signals"]["needs_manual_source_check"] is False
-    assert result["sources"][0]["resolved_url"] == "https://nvidianews.nvidia.com/news/nvidia-microsoft-windows-pcs-agents-rtx-spark"
+    assert (
+        result["sources"][0]["resolved_url"]
+        == "https://nvidianews.nvidia.com/news/nvidia-microsoft-windows-pcs-agents-rtx-spark"
+    )
     assert result["sources"][0]["recovered_by"] == "direct_source_retry"
 
 
 def test_image_result_extraction():
-    payload = {"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": b64_png()}}]}}]}
+    payload = {
+        "candidates": [
+            {"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": b64_png()}}]}}
+        ]
+    }
 
     data, kind, extension = image.extract_image_result(payload)
 
@@ -226,18 +249,17 @@ def test_image_model_normalization():
 
 
 def test_generate_image_exposes_path_alias_and_metadata(tmp_path):
-    payload = {
-        "generatedImages": [
-            {"image": {"mimeType": "image/png", "imageBytes": b64_png()}}
-        ]
-    }
+    payload = {"generatedImages": [{"image": {"mimeType": "image/png", "imageBytes": b64_png()}}]}
 
-    with patch.object(
-        image, "available_model_catalog", lambda: {"gemini-3.1-flash-image": {}}
-    ), patch.object(image.provider, "generate_image", lambda **kwargs: payload), patch.object(
-        image.paths, "images_dir", lambda: tmp_path
-    ), patch.object(image.provider, "require_capability"):
-        result = image.generate_image({"prompt": "draw", "aspect_ratio": "square", "image_size": "512"})
+    with (
+        patch.object(image, "available_model_catalog", lambda: {"gemini-3.1-flash-image": {}}),
+        patch.object(image.provider, "generate_image", lambda **kwargs: payload),
+        patch.object(image.paths, "images_dir", lambda: tmp_path),
+        patch.object(image.provider, "require_capability"),
+    ):
+        result = image.generate_image(
+            {"prompt": "draw", "aspect_ratio": "square", "image_size": "512"}
+        )
 
     assert result["success"] is True
     assert result["image"] == result["path"]

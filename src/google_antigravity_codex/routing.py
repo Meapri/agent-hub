@@ -46,7 +46,11 @@ ROUTES: Dict[str, Dict[str, Any]] = {
     },
     "writing": {
         "model": "gemini-3.1-pro-high",
-        "candidates": ["gemini-3.1-pro-high", "gemini-3.5-flash-high", "claude-sonnet-4-6-thinking"],
+        "candidates": [
+            "gemini-3.1-pro-high",
+            "gemini-3.5-flash-high",
+            "claude-sonnet-4-6-thinking",
+        ],
         "tool": "google_antigravity_write",
         "reason": "Best default for polished prose and Korean/English tone work.",
     },
@@ -119,7 +123,11 @@ def route_model(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "saved_pref": saved or None,
         "tool": route["tool"],
         "reason": route["reason"],
-        **({"required_provider": route["required_provider"]} if route.get("required_provider") else {}),
+        **(
+            {"required_provider": route["required_provider"]}
+            if route.get("required_provider")
+            else {}
+        ),
         "arguments_template": {
             "model": model,
             **({"grounding": "always"} if task == "grounded-search" else {}),

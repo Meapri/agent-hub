@@ -1,14 +1,13 @@
 # Notice
 
-This plugin provides an official `agy` CLI transport plus an optional
-compatibility transport for an `agy`-owned Antigravity token export. All
-provider calls require explicit user consent.
+This archived plugin snapshot provides a direct Google OAuth Code Assist
+transport plus optional compatibility with a user-selected Antigravity token
+export. All provider calls require explicit user consent.
 
 The compatibility transport can read a user-selected JSON token export using
-the schema and default path used by Antigravity-Proxy. It does not include or
-derive an OAuth client, inspect browser state or macOS Keychain, scrape the
-official CLI binary, or vendor proxy runtime code. Token values are never
-returned through MCP.
+the schema demonstrated by Antigravity-Proxy. It does not inspect browser state
+or macOS Keychain, scrape an official CLI binary, or vendor proxy runtime code.
+Token values are never returned through MCP.
 
 Architecture ideas were informed by the MIT-licensed
 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and

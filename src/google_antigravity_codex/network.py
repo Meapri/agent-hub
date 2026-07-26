@@ -75,7 +75,9 @@ def max_download_bytes() -> int:
 
 
 def read_limited(response, limit: int) -> bytes:  # type: ignore[no-untyped-def]
-    raw_length = response.headers.get("Content-Length") if getattr(response, "headers", None) else None
+    raw_length = (
+        response.headers.get("Content-Length") if getattr(response, "headers", None) else None
+    )
     if raw_length:
         try:
             if int(raw_length) > limit:

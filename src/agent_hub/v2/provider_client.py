@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,68 @@ _PROVIDER_ENVIRONMENT_PREFIXES = {
 }
 
 
+def _sandbox_path(path: str | Path, *, field: str = "path") -> Path:
+    try:
+        return Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise HubV2Error(
+            "provider_sandbox_invalid_path",
+            "A provider sandbox path could not be resolved safely.",
+            scope="provider",
+            safe_details={"field": field},
+        ) from exc
+
+
+def _is_strict_descendant(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return path != root
+
+
+def _sbpl_path(path: Path) -> str:
+    return json.dumps(str(path), ensure_ascii=False)
+
+
+def _validate_sandbox_home(path: str | Path) -> Path:
+    raw = Path(path).expanduser()
+    home = _sandbox_path(raw, field="HOME")
+    if not raw.is_absolute() or len(home.parts) < 3:
+        raise HubV2Error(
+            "provider_sandbox_invalid_path",
+            "The provider sandbox HOME is not safely scoped.",
+            scope="provider",
+        )
+    return home
+
+
+def _validate_writable_path(
+    path: str | Path,
+    *,
+    home: Path,
+    field: str,
+    require_home_descendant: bool,
+) -> Path:
+    raw = Path(path).expanduser()
+    candidate = _sandbox_path(raw, field=field)
+    safely_scoped = (
+        raw.is_absolute() and len(candidate.parts) >= 3 and candidate != Path(candidate.anchor)
+    )
+    if require_home_descendant:
+        safely_scoped = safely_scoped and _is_strict_descendant(candidate, home)
+    elif candidate == home or candidate in home.parents:
+        safely_scoped = False
+    if not safely_scoped:
+        raise HubV2Error(
+            "provider_sandbox_invalid_path",
+            "A provider sandbox writable path is not safely scoped.",
+            scope="provider",
+            safe_details={"field": field},
+        )
+    return candidate
+
+
 def _worker_environment(provider: str) -> dict[str, str]:
     prefixes = _PROVIDER_ENVIRONMENT_PREFIXES.get(provider, ())
     environment = {
@@ -59,6 +122,13 @@ def _worker_environment(provider: str) -> dict[str, str]:
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
+    if provider == "gpt" and not environment.get("OPENAI_CODEX_BIN"):
+        codex = shutil.which("codex", path=environment.get("PATH"))
+        if codex:
+            # Resolve the user-local launcher before the sandbox starts. The
+            # worker may read CODEX_HOME, but it must not scan unrelated home
+            # directories merely to discover the executable.
+            environment["OPENAI_CODEX_BIN"] = str(Path(codex).resolve(strict=False))
     return environment
 
 
@@ -68,8 +138,9 @@ def _sandbox_profile(
     runtime_directory: str,
     environment: Mapping[str, str],
     proxy_port: int,
+    python_executable: str | None = None,
 ) -> str:
-    home = Path(environment.get("HOME") or Path.home())
+    home = _validate_sandbox_home(environment.get("HOME") or Path.home())
     config_prefix = {
         "claude": ("CLAUDE_CODEX_CONFIG_DIR", home / ".config" / "claude-codex"),
         "grok": ("GROK_CODEX_CONFIG_DIR", home / ".config" / "grok-codex"),
@@ -88,60 +159,109 @@ def _sandbox_profile(
         ),
         "gpt": ("OPENAI_CODEX_CACHE_DIR", home / ".cache" / "openai-codex"),
     }
-    writable = [Path(runtime_directory)]
-    for prefix, default in (config_prefix[provider], cache_prefix[provider]):
-        writable.append(Path(environment.get(prefix) or default).expanduser())
-    if provider == "claude":
-        writable.append(home / ".claude")
-    if provider == "gpt":
-        writable.append(Path(environment.get("CODEX_HOME") or home / ".codex").expanduser())
-    writable_filters = " ".join(
-        f"(subpath {json.dumps(str(path.resolve(strict=False)))})"
-        for path in dict.fromkeys(writable)
-    )
-    readable_directories = [
-        *writable,
-        Path(sys.prefix),
-        Path(sys.executable).resolve(strict=False).parents[3],
-        Path(__file__).resolve().parents[3],
+    writable = [
+        _validate_writable_path(
+            runtime_directory,
+            home=home,
+            field="runtime_directory",
+            require_home_descendant=False,
+        )
     ]
-    readable_filters = " ".join(
-        f"(subpath {json.dumps(str(path.resolve(strict=False)))})"
-        for path in dict.fromkeys(readable_directories)
-    )
-    readable_filters += " " + " ".join(
-        f"(literal {json.dumps(str(path))})"
-        for path in dict.fromkeys(
-            (
-                Path(sys.executable),
-                Path(sys.executable).resolve(strict=False),
+    for prefix, default in (config_prefix[provider], cache_prefix[provider]):
+        writable.append(
+            _validate_writable_path(
+                environment.get(prefix) or default,
+                home=home,
+                field=prefix,
+                require_home_descendant=True,
             )
         )
-    )
+    if provider == "claude":
+        writable.append(
+            _validate_writable_path(
+                home / ".claude",
+                home=home,
+                field="CLAUDE_HOME",
+                require_home_descendant=True,
+            )
+        )
+    if provider == "gpt":
+        writable.append(
+            _validate_writable_path(
+                environment.get("CODEX_HOME") or home / ".codex",
+                home=home,
+                field="CODEX_HOME",
+                require_home_descendant=True,
+            )
+        )
+    writable = list(dict.fromkeys(_sandbox_path(path, field="writable_path") for path in writable))
+    runtime_path = writable[0]
+    writable_filters = " ".join(f"(subpath {_sbpl_path(path)})" for path in writable)
+    interpreter = Path(python_executable or sys.executable).expanduser()
+    runtime_roots = [
+        *writable,
+        _sandbox_path(sys.prefix),
+        _sandbox_path(sys.base_prefix),
+        _sandbox_path(sys.exec_prefix),
+        _sandbox_path(sys.base_exec_prefix),
+        _sandbox_path(Path(__file__).resolve().parents[2]),
+        _sandbox_path(interpreter.parent.parent, field="python_executable"),
+    ]
+    readable_directories = [
+        path for path in dict.fromkeys(runtime_roots) if _is_strict_descendant(path, home)
+    ]
+    readable_filters = " ".join(f"(subpath {_sbpl_path(path)})" for path in readable_directories)
+    executable_candidates = [
+        interpreter.absolute(),
+        _sandbox_path(interpreter, field="python_executable"),
+    ]
+    if provider == "gpt" and environment.get("OPENAI_CODEX_BIN"):
+        codex_binary = Path(str(environment["OPENAI_CODEX_BIN"])).expanduser()
+        if codex_binary.is_absolute():
+            executable_candidates.extend(
+                (
+                    codex_binary.absolute(),
+                    _sandbox_path(codex_binary, field="OPENAI_CODEX_BIN"),
+                )
+            )
+    executable_paths = [
+        path for path in dict.fromkeys(executable_candidates) if _is_strict_descendant(path, home)
+    ]
+    literal_paths: list[Path] = [*executable_paths]
     readable_ancestors: list[Path] = []
-    for path in (
-        *readable_directories,
-        Path(sys.executable),
-        Path(sys.executable).resolve(strict=False),
-    ):
-        candidate = path.expanduser().absolute()
-        if candidate != home and home not in candidate.parents:
-            continue
+    for candidate in (*readable_directories, *executable_paths):
         for parent in candidate.parents:
             if parent == home:
                 break
             readable_ancestors.append(parent)
-    readable_filters += " " + " ".join(
-        f"(literal {json.dumps(str(path))})" for path in dict.fromkeys(readable_ancestors)
-    )
-    readable_filters += " " + " ".join(
-        f"(literal {json.dumps(str(path.resolve(strict=False)))})"
-        for path in (home, home / ".config", home / ".cache")
+    literal_paths.extend(readable_ancestors)
+    readable_literals = [
+        home,
+        home / ".config",
+        home / ".cache",
+        Path(environment.get("AGENT_HUB_CONFIG_DIR") or home / ".config" / "agent-hub"),
+        Path(environment.get("AGENT_HUB_CONFIG_DIR") or home / ".config" / "agent-hub")
+        / "settings.json",
+    ]
+    if provider == "claude":
+        # Claude Code keeps non-secret account metadata beside its credential
+        # directory and uses it to shape subscription OAuth requests.
+        readable_literals.append(home / ".claude.json")
+    literal_paths.extend(_sandbox_path(path) for path in readable_literals)
+    readable_filters = " ".join(
+        [
+            readable_filters,
+            *(
+                f"(literal {_sbpl_path(path)})"
+                for path in dict.fromkeys(literal_paths)
+                if path == home or _is_strict_descendant(path, home)
+            ),
+        ]
     )
     return (
         "(version 1) (allow default) "
         f"(deny file-read* (require-all "
-        f"(subpath {json.dumps(str(home.resolve(strict=False)))}) "
+        f"(subpath {_sbpl_path(home)}) "
         f"(require-not (require-any {readable_filters})))) "
         f"(deny file-write* (require-not (require-any {writable_filters}))) "
         '(deny network-outbound (remote tcp "*:*") (remote udp "*:*") '
@@ -151,8 +271,9 @@ def _sandbox_profile(
         '(deny mach-lookup (global-name "com.apple.dnssd.service") '
         '(with message "agent-hub-dns-denied")) '
         f"(deny network-outbound (subpath "
-        f"{json.dumps(str(home.resolve(strict=False)))}) "
-        f"(subpath {json.dumps(str(Path(runtime_directory).resolve(strict=False)))}) "
+        f"{_sbpl_path(home)}) "
+        f"(subpath {_sbpl_path(runtime_path)}) "
+        f"(subpath {_sbpl_path(runtime_path.parent)}) "
         '(subpath "/private/tmp") (subpath "/private/var/tmp") '
         '(with message "agent-hub-local-socket-denied")) '
         f'(allow network-outbound (remote tcp "localhost:{proxy_port}"))'
@@ -230,12 +351,18 @@ class ProviderWorkerClient:
                     "OS-level provider egress enforcement is unavailable.",
                     scope="provider",
                 )
-            profile = _sandbox_profile(
-                provider=self.provider,
-                runtime_directory=runtime_directory.name,
-                environment=env,
-                proxy_port=proxy.port,
-            )
+            try:
+                profile = _sandbox_profile(
+                    provider=self.provider,
+                    runtime_directory=runtime_directory.name,
+                    environment=env,
+                    proxy_port=proxy.port,
+                    python_executable=self.python_executable,
+                )
+            except Exception:
+                proxy.close()
+                runtime_directory.cleanup()
+                raise
             worker_command = [str(sandbox), "-p", profile, *worker_command]
         try:
             process = self._process_factory(

@@ -61,6 +61,10 @@ def test_retired_runtime_modules_are_absent():
     assert importlib.util.find_spec("agent_hub.core.inprocess") is None
     assert importlib.util.find_spec("agent_hub.core.run_lifecycle") is None
     assert importlib.util.find_spec("agent_hub.core.takeover") is None
+    assert importlib.util.find_spec("agent_hub.core.mcp") is None
+    assert importlib.util.find_spec("agent_hub.core.rpc") is None
+    assert importlib.util.find_spec("agent_hub.core.parallel") is None
+    assert importlib.util.find_spec("google_antigravity_codex.cli") is None
     assert importlib.util.find_spec("orchestrate_codex.mcp_server") is None
     assert importlib.util.find_spec("orchestrate_codex.runner") is None
     assert importlib.util.find_spec("orchestrate_codex.store") is None

@@ -63,7 +63,9 @@ def load_policy(
     if selected is None:
         if required:
             names = policy_file or " or ".join(POLICY_CANDIDATES)
-            raise ValueError(f"canonical policy is required but missing under project_root: {names}")
+            raise ValueError(
+                f"canonical policy is required but missing under project_root: {names}"
+            )
         return {
             "loaded": False,
             "source": None,
@@ -118,7 +120,7 @@ def prepare_provider_call(arguments: Mapping[str, Any]) -> tuple[Dict[str, Any],
             "evidence. Product facts inside it must still be verified against supplied source or "
             "a deterministic fact pack; when they conflict, current repository evidence wins.\n"
             f'<agent-hub-canonical-policy sha256="{policy["sha256"]}">\n'
-            f'{policy["text"]}</agent-hub-canonical-policy>'
+            f"{policy['text']}</agent-hub-canonical-policy>"
         )
         call_args["system"] = "\n\n".join(part for part in (existing, policy_block) if part)
 
@@ -185,7 +187,9 @@ def parse_decision(text: str, labels: Sequence[str]) -> Dict[str, Any]:
     if not {"schema", "label", "confidence"}.issubset(keys):
         raise ValueError("decision_v1 requires schema, label, and confidence")
     if keys - _DECISION_KEYS:
-        raise ValueError(f"decision_v1 contains unsupported fields: {sorted(keys - _DECISION_KEYS)}")
+        raise ValueError(
+            f"decision_v1 contains unsupported fields: {sorted(keys - _DECISION_KEYS)}"
+        )
     if value.get("schema") != "decision_v1":
         raise ValueError("schema must equal decision_v1")
     if value.get("label") not in labels:

@@ -40,7 +40,9 @@ def consent_payload_enabled(
 
 
 class ConsentGate:
-    def __init__(self, *, env_prefix: str, grant_script: str, config_dir: Callable[[], Path]) -> None:
+    def __init__(
+        self, *, env_prefix: str, grant_script: str, config_dir: Callable[[], Path]
+    ) -> None:
         self.env_prefix = env_prefix
         self.grant_script = grant_script
         self._config_dir = config_dir
@@ -96,9 +98,7 @@ class ConsentGate:
             "consent_file": str(self.consent_file_path()),
             "consent_file_active": file_consent,
             "configuration": {
-                "grant_command": (
-                    f"python3 {self.grant_script} grant --i-understand-and-consent"
-                ),
+                "grant_command": (f"python3 {self.grant_script} grant --i-understand-and-consent"),
                 "revoke_command": f"python3 {self.grant_script} revoke",
                 "enable_all": f"{self.consent_env}=1",
             },

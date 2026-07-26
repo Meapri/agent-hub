@@ -5,29 +5,21 @@
 Google Antigravity Codex separates three responsibilities:
 
 1. deterministic local MCP and release helpers;
-2. native `agy` installation, diagnostics, and an explicitly invoked CLI
-   bridge; and
-3. model-facing calls through an official `agy` subprocess or an explicitly
-   selected, consented `agy` JSON token export.
+2. a visible, consented Google OAuth PKCE login owned by the plugin; and
+3. model-facing Code Assist calls through the `agy-oauth` provider.
 
-There is no plugin-owned OAuth authorization-code flow and no plugin credential
-store. The `agy-oauth` compatibility provider may invoke the official CLI and
-read a user-selected JSON token export using the schema demonstrated by
-Antigravity-Proxy. It does not obtain OAuth client credentials or inspect
-browser state, macOS Keychain, or the CLI binary.
+The login flow stores its token file under the plugin config directory. It may
+also read a user-selected JSON token export using the schema demonstrated by
+Antigravity-Proxy. It does not inspect browser state, macOS Keychain, or an
+official CLI binary.
 
 Consent is recorded locally or supplied through explicit environment flags.
 MCP can report consent but cannot modify it.
 
-## agy-owned session providers
-
-`agy-cli` delegates the complete authenticated request to the official CLI.
-Plan prompts run in a private disposable directory with a scrubbed child
-environment. This is the normal fallback on current macOS installations where
-`agy 1.1.2` keeps its session outside the proxy-compatible token path.
+## Code Assist session provider
 
 `agy-oauth` reads only `GOOGLE_ANTIGRAVITY_CLI_TOKEN_FILE`, defaulting to
-`~/.gemini/antigravity-cli/antigravity-oauth-token`. The file must be:
+the plugin OAuth token file. A configured compatibility export must be:
 
 - a regular, non-symlink file owned by the current user;
 - mode `0600` or stricter on POSIX;
@@ -40,15 +32,9 @@ settings are blocked, response sizes are bounded, and upstream error bodies
 are omitted. Status returns only presence booleans, expiry state, and project
 ID presence.
 
-`agy-cli` is the only automatic provider. `agy-oauth` must be selected
-explicitly with `GOOGLE_ANTIGRAVITY_PROVIDER=agy-oauth`; merely creating a
-token-export file never changes the active transport. Native grounding and
-image generation are rejected on `agy-cli` because its text bridge does not
-forward hosted tools or image bytes.
-
-If an official CLI refresh succeeds without creating the token export, the
-plugin reports `agy_token_export_unavailable`. It does not fall through to
-Keychain extraction. The user can select `agy-cli` instead.
+`agy-oauth` is the only supported model transport. Legacy `agy-cli` provider
+preferences are rejected with a migration error rather than silently changing
+the authentication boundary.
 
 ## Local file access
 
@@ -61,19 +47,12 @@ Source files are bounded. Git context is redacted and truncated. MCP release
 schemas do not accept arbitrary commands; the lower-level Python API uses
 tokenized arguments without a shell and only after a separate opt-in.
 
-## CLI recursion and mutation
+## OAuth mutation boundary
 
-The child process receives `GOOGLE_ANTIGRAVITY_CLI_BRIDGE_DEPTH=1`; recursive
-bridge calls are rejected. The native plugin disables CLI bridge, refresh,
-chat, grounding, image, and writing tools so `agy -> MCP -> agy` cannot recurse.
-
-Plan mode runs in a disposable directory. Mutating `accept-edits` requires an
-explicit workspace and environment opt-in. Unsandboxed plan mode is blocked.
-Before invoking `agy`, the bridge removes common secret, credential,
-SSH/GPG-agent, `CODEX_`, and `MCP_` environment variables.
-
-Prompt text passed to `agy --print` can be visible to same-user process
-inspection. Never submit secrets or raw credential files.
+Status and model operations are read-only. Login, refresh, logout, and consent
+changes require an explicit local GUI or command initiated by the user. MCP
+status responses never contain access tokens, refresh tokens, authorization
+codes, client secrets, or raw upstream error bodies.
 
 ## Image and network handling
 

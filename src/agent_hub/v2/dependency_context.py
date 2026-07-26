@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .context import FACT_PACK_SCHEMA
 from .contracts import MAX_INLINE_INPUT_CHARS, canonical_json
 from .errors import HubV2Error
 
 
-def assemble_dependency_context(parts: list[str]) -> tuple[str, dict[str, int]]:
+@dataclass(frozen=True)
+class DependencyContextPart:
+    text: str
+    artifact_id: str
+    trusted_fact_pack: bool = False
+
+
+def assemble_dependency_context(
+    parts: Sequence[DependencyContextPart],
+) -> tuple[str, dict[str, int]]:
     """Merge fact-pack artifacts without losing the original provenance IDs."""
 
     segments: list[tuple[str, str]] = []
     fact_pack_segment: int | None = None
     fact_pack_count = 0
+    untrusted_fact_pack_count = 0
     duplicate_plain_count = 0
     duplicate_item_count = 0
     seen_plain: set[str] = set()
@@ -27,17 +38,21 @@ def assemble_dependency_context(parts: list[str]) -> tuple[str, dict[str, int]]:
     missing_paths: list[str] = []
     coverage_complete = True
 
-    for text in parts:
+    for part in parts:
+        text = part.text
         try:
             parsed = json.loads(text)
         except (TypeError, ValueError):
             parsed = None
-        is_fact_pack = (
+        has_fact_pack_shape = (
             isinstance(parsed, Mapping)
             and parsed.get("schema") == FACT_PACK_SCHEMA
             and isinstance(parsed.get("items"), list)
         )
+        is_fact_pack = part.trusted_fact_pack and has_fact_pack_shape
         if not is_fact_pack:
+            if has_fact_pack_shape:
+                untrusted_fact_pack_count += 1
             digest = sha256(text.encode("utf-8")).hexdigest()
             if digest in seen_plain:
                 duplicate_plain_count += 1
@@ -105,6 +120,7 @@ def assemble_dependency_context(parts: list[str]) -> tuple[str, dict[str, int]]:
         "context_segment_count": len(rendered),
         "duplicate_artifact_count": duplicate_plain_count,
         "fact_pack_count": fact_pack_count,
+        "untrusted_fact_pack_count": untrusted_fact_pack_count,
         "fact_pack_item_count": len(fact_items),
         "fact_pack_duplicate_item_count": duplicate_item_count,
     }
@@ -113,9 +129,9 @@ def assemble_dependency_context(parts: list[str]) -> tuple[str, dict[str, int]]:
 def enforce_provider_context_budget(
     text: str,
     *,
-    max_tokens: int,
     context_stats: Mapping[str, int],
-    max_input_tokens: int | None = None,
+    requested_max_input_tokens: int | None = None,
+    model_max_input_tokens: int | None = None,
     provider: str | None = None,
     model: str | None = None,
 ) -> dict[str, int]:
@@ -123,16 +139,19 @@ def enforce_provider_context_budget(
 
     encoded_bytes = len(text.encode("utf-8"))
     estimated_input_tokens = (encoded_bytes + 3) // 4
-    effective_input_limit = min(
-        max_tokens,
-        max_input_tokens if max_input_tokens is not None else max_tokens,
-    )
+    declared_limits = [
+        int(limit)
+        for limit in (requested_max_input_tokens, model_max_input_tokens)
+        if limit is not None
+    ]
+    effective_input_limit = min(declared_limits) if declared_limits else MAX_INLINE_INPUT_CHARS // 4
     safe_details = {
         "context_chars": len(text),
         "context_bytes": encoded_bytes,
         "estimated_input_tokens": estimated_input_tokens,
-        "token_budget": max_tokens,
-        "model_max_input_tokens": max_input_tokens or max_tokens,
+        "token_budget": effective_input_limit,
+        "requested_max_input_tokens": requested_max_input_tokens or effective_input_limit,
+        "model_max_input_tokens": model_max_input_tokens or effective_input_limit,
         "effective_input_limit": effective_input_limit,
         "max_context_chars": MAX_INLINE_INPUT_CHARS,
         **{

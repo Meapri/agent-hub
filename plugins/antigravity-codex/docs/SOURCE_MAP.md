@@ -14,7 +14,7 @@ agy** package (skills + MCP), not as a Hermes core patch.
 
 | Hermes / Antigravity concept | This plugin |
 | --- | --- |
-| `plugins/model-providers/google-antigravity` + native chat shim | MCP `google_antigravity_chat` + provider selection (`agy-cli` / `agy-oauth`) |
+| `plugins/model-providers/google-antigravity` + native chat shim | MCP `google_antigravity_chat` through `agy-oauth` |
 | Cloud Code PA `generateContent` | `google_antigravity_codex/antigravity_api.py` |
 | `run_antigravity_login()` PKCE + localhost:51121 | `oauth_login.py` + MCP login_start/complete + `scripts/google_antigravity_login.py` |
 | OAuth file (`access`/`refresh`/`expires`) | `agy_auth.py` + plugin `oauth-token.json` / Hermes path / agy export |
@@ -26,16 +26,14 @@ agy** package (skills + MCP), not as a Hermes core patch.
 ## Auth boundary (important)
 
 Hermes’ plugin obtains Google OAuth via PKCE and stores tokens under
-`~/.hermes/auth/`. This Codex plugin **does not** embed Antigravity OAuth client
-credentials or scrape Keychain.
+`~/.hermes/auth/`. This Codex plugin uses its own visible PKCE login and never
+scrapes Keychain or an official CLI process.
 
-Supported transports:
+Supported transport:
 
-1. **`agy-cli` (default)** — official `agy` subprocess owns the session.
-2. **`agy-oauth` (explicit)** — read a user-provided JSON token export
-   (`GOOGLE_ANTIGRAVITY_CLI_TOKEN_FILE`, default
-   `~/.gemini/antigravity-cli/antigravity-oauth-token`, or existing Hermes
-   `~/.hermes/auth/google_antigravity.json`).
+1. **`agy-oauth`** — use the plugin-owned OAuth token file or an explicitly
+   configured compatible JSON token export. Legacy `agy-cli` preferences are
+   rejected.
 
 All model-facing tools require recorded consent
 (`scripts/google_antigravity_consent.py` or process env).

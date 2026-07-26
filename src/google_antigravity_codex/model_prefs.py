@@ -97,11 +97,7 @@ def _load_prefs(*, strict: bool = False) -> Dict[str, Any]:
         return _default_prefs()
     if strict:
         version = data.get("version", PREFS_VERSION)
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != PREFS_VERSION
-        ):
+        if isinstance(version, bool) or not isinstance(version, int) or version != PREFS_VERSION:
             raise ModelPrefsError(
                 "Antigravity model preferences use an unsupported version.",
                 code="model_prefs_invalid",
@@ -118,16 +114,8 @@ def _load_prefs(*, strict: bool = False) -> Dict[str, Any]:
                     code="model_prefs_invalid",
                 )
         for key, value in (data.get("task_models") or {}).items():
-            task = (
-                key.strip().lower().replace("_", "-")
-                if isinstance(key, str)
-                else ""
-            )
-            if (
-                task not in TASK_KEYS
-                or not isinstance(value, str)
-                or not value.strip()
-            ):
+            task = key.strip().lower().replace("_", "-") if isinstance(key, str) else ""
+            if task not in TASK_KEYS or not isinstance(value, str) or not value.strip():
                 raise ModelPrefsError(
                     "Antigravity task model preferences contain an invalid task or model.",
                     code="model_prefs_invalid",
@@ -347,9 +335,7 @@ def clear_prefs(
                 tasks = dict(prefs.get("task_models") or {})
                 tasks.pop(task_key, None)
                 prefs["task_models"] = tasks
-                text = (
-                    f"Cleared Antigravity model preference for task '{task_key}'."
-                )
+                text = f"Cleared Antigravity model preference for task '{task_key}'."
             elif default_scopes:
                 tasks = dict(prefs.get("task_models") or {})
                 tasks.pop("chat", None)
@@ -374,10 +360,7 @@ def get_prefs_tool(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     prefs = load_prefs()
     effective = {
         "default": resolve_model(fallback="gemini-3.5-flash-high"),
-        "tasks": {
-            task: resolve_model(task=task, fallback="")
-            for task in TASK_KEYS
-        },
+        "tasks": {task: resolve_model(task=task, fallback="") for task in TASK_KEYS},
     }
     has_any = bool(prefs.get("default_model") or prefs.get("task_models"))
     return {

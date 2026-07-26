@@ -28,14 +28,14 @@ def test_build_contents_keeps_inline_image_and_function_parts():
                 {
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"},
+                    "function": {"name": "lookup", "arguments": '{"q":"x"}'},
                 }
             ],
         },
         {
             "role": "tool",
             "name": "lookup",
-            "content": "{\"result\":\"ok\"}",
+            "content": '{"result":"ok"}',
         },
     ]
 
@@ -100,15 +100,17 @@ def test_build_request_maps_thinking_level():
 
 def test_run_chat_rejects_thinking_level_for_unsupported_model():
     with pytest.raises(ValueError, match="not supported"):
-        chat.run_chat(
-            {"prompt": "inspect", "model": "gemini-2.5-flash", "thinking_level": "high"}
-        )
+        chat.run_chat({"prompt": "inspect", "model": "gemini-2.5-flash", "thinking_level": "high"})
 
 
 def test_merge_stream_chunks_assembles_text():
     chunks = [
         {"response": {"candidates": [{"content": {"parts": [{"text": "Hel"}]}}]}},
-        {"response": {"candidates": [{"content": {"parts": [{"text": "lo"}]}, "finishReason": "STOP"}]}},
+        {
+            "response": {
+                "candidates": [{"content": {"parts": [{"text": "lo"}]}, "finishReason": "STOP"}]
+            }
+        },
     ]
     merged = chat.merge_stream_chunks(chunks)
     extracted = chat.extract_response_text(merged)
@@ -152,8 +154,9 @@ def test_run_chat_stream_falls_back_to_generate_content():
             "_antigravity_diagnostics": {"backend": "agy-oauth-code-assist"},
         }
 
-    with patch.object(chat.provider, "generate_content_stream", side_effect=boom), patch.object(
-        chat.provider, "generate_content", side_effect=fake_generate
+    with (
+        patch.object(chat.provider, "generate_content_stream", side_effect=boom),
+        patch.object(chat.provider, "generate_content", side_effect=fake_generate),
     ):
         result = chat.run_chat({"prompt": "hi", "stream": True})
 

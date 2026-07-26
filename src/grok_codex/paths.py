@@ -1,4 +1,5 @@
 """Compatibility shim — implementation in agent_hub.core.paths."""
+
 from agent_hub.core import paths as _core
 
 APP_NAME = "grok-codex"

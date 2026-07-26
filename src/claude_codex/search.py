@@ -74,9 +74,7 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
     payload = api.messages_create(
         body,
-        timeout=float(
-            arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-        ),
+        timeout=float(arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS),
     )
     text = chat.extract_text(payload)
     sources = _sources(payload)[:max_sources]

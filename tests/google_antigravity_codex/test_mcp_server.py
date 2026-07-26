@@ -37,25 +37,41 @@ def test_initialize_and_tools_list():
     assert "google_antigravity_cli_status" not in names
     assert "google_antigravity_cli_chat" not in names
     release_tool = next(
-        tool for tool in tools["result"]["tools"] if tool["name"] == "google_antigravity_release_snapshot"
+        tool
+        for tool in tools["result"]["tools"]
+        if tool["name"] == "google_antigravity_release_snapshot"
     )
     assert "check_commands" not in release_tool["inputSchema"]["properties"]
     assert release_tool["title"]
     assert release_tool["annotations"]["readOnlyHint"] is True
     assert release_tool["outputSchema"]["type"] == "object"
     by_name = {tool["name"]: tool for tool in tools["result"]["tools"]}
-    assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
-    assert by_name["google_antigravity_write"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
-    assert by_name["google_antigravity_compare_models"]["inputSchema"]["properties"]["max_tokens"]["default"] == 65536
-    assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["timeout_sec"][
-        "default"
-    ] == 1800
-    assert by_name["google_grounded_search"]["inputSchema"]["properties"]["max_sources"][
-        "default"
-    ] == 10
-    assert by_name["google_antigravity_chat"]["inputSchema"]["properties"]["retry_count"][
-        "default"
-    ] == 5
+    assert (
+        by_name["google_antigravity_chat"]["inputSchema"]["properties"]["max_tokens"]["default"]
+        == 65536
+    )
+    assert (
+        by_name["google_antigravity_write"]["inputSchema"]["properties"]["max_tokens"]["default"]
+        == 65536
+    )
+    assert (
+        by_name["google_antigravity_compare_models"]["inputSchema"]["properties"]["max_tokens"][
+            "default"
+        ]
+        == 65536
+    )
+    assert (
+        by_name["google_antigravity_chat"]["inputSchema"]["properties"]["timeout_sec"]["default"]
+        == 1800
+    )
+    assert (
+        by_name["google_grounded_search"]["inputSchema"]["properties"]["max_sources"]["default"]
+        == 10
+    )
+    assert (
+        by_name["google_antigravity_chat"]["inputSchema"]["properties"]["retry_count"]["default"]
+        == 5
+    )
     for name in (
         "google_antigravity_agy_auth_refresh",
         "google_antigravity_login_start",
@@ -166,13 +182,11 @@ def test_consent_status_is_read_only_and_reports_master_opt_in(monkeypatch):
     )
     result = response["result"]["structuredContent"]
     assert result["user_consent"] is True
-    assert result["cli_bridge_enabled"] is True
     assert result["agy_session_enabled"] is True
     assert "set_consent" not in result
 
 
-def test_cli_error_returns_secret_safe_tool_error():
-    # CLI chat bridge removed — tool should be unknown.
+def test_removed_cli_tool_is_unknown():
     response = mcp_server.handle_request(
         {
             "jsonrpc": "2.0",
@@ -183,7 +197,6 @@ def test_cli_error_returns_secret_safe_tool_error():
     )
     assert "error" in response
     assert response["error"]["code"] in {-32602, -32601}
-
 
 
 def test_route_model_tool_schema_and_result():
@@ -224,7 +237,13 @@ def test_provider_status_is_diagnostic_not_another_model_route():
     with patch.object(
         mcp_server.provider,
         "status",
-        return_value={"configured": True, "enabled": True, "healthy": True, "model_count": 3, "backend": "agy-cli"},
+        return_value={
+            "configured": True,
+            "enabled": True,
+            "healthy": True,
+            "model_count": 3,
+            "backend": "agy-oauth",
+        },
     ):
         response = mcp_server.handle_request(
             {
@@ -237,7 +256,7 @@ def test_provider_status_is_diagnostic_not_another_model_route():
 
     result = response["result"]["structuredContent"]
     assert result["success"] is True
-    assert result["backend"] == "agy-cli"
+    assert result["backend"] == "agy-oauth"
     assert result["provider_status"]["model_count"] == 3
 
 
@@ -245,9 +264,7 @@ def test_agy_provider_error_is_secret_safe():
     with patch.object(
         mcp_server.chat,
         "run_chat",
-        side_effect=mcp_server.provider.ProviderError(
-            "request failed", code="agy_provider_failed"
-        ),
+        side_effect=mcp_server.provider.ProviderError("request failed", code="agy_provider_failed"),
     ):
         response = mcp_server.handle_request(
             {

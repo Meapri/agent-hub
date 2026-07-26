@@ -87,7 +87,9 @@ def resolve_url(url: str, *, timeout_sec: int = 8) -> Dict[str, Any]:
         return source
     try:
         network.validate_public_url(url)
-        request = urllib.request.Request(url, headers={"User-Agent": "google-antigravity-codex/0.1.0"})
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "google-antigravity-codex/0.1.0"}
+        )
         with network.public_url_opener().open(request, timeout=max(1, timeout_sec)) as response:
             final_url = response.geturl()
         network.validate_public_url(final_url)
@@ -123,8 +125,14 @@ def extract_numeric_claims(text: str) -> List[str]:
     return claims[:40]
 
 
-def build_evidence(answer: str, sources: List[Dict[str, Any]], claims: List[str]) -> List[Dict[str, Any]]:
-    official_urls = [str(item.get("resolved_url") or item.get("url")) for item in sources if item.get("source_type") == "official"]
+def build_evidence(
+    answer: str, sources: List[Dict[str, Any]], claims: List[str]
+) -> List[Dict[str, Any]]:
+    official_urls = [
+        str(item.get("resolved_url") or item.get("url"))
+        for item in sources
+        if item.get("source_type") == "official"
+    ]
     fallback_urls = [str(item.get("resolved_url") or item.get("url")) for item in sources]
     urls = official_urls or fallback_urls
     evidence: List[Dict[str, Any]] = []
@@ -162,7 +170,9 @@ def _direct_source_retry_prompt(query: str, answer: str, max_sources: int, langu
     )
 
 
-def recover_direct_sources(arguments: Dict[str, Any], answer: str, existing: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def recover_direct_sources(
+    arguments: Dict[str, Any], answer: str, existing: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     if not any(_is_unresolved_grounding_redirect(item) for item in existing):
         return existing
     if arguments.get("direct_source_retry") is False:
@@ -184,13 +194,8 @@ def recover_direct_sources(arguments: Dict[str, Any], answer: str, existing: Lis
             ),
             "model": str(arguments.get("model") or chat.DEFAULT_MODEL),
             "grounding": "always",
-            "timeout_sec": (
-                arguments.get("timeout_sec")
-                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-            ),
-            "retry_count": arguments.get(
-                "retry_count", limits.MAX_PROVIDER_RETRIES
-            ),
+            "timeout_sec": (arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS),
+            "retry_count": arguments.get("retry_count", limits.MAX_PROVIDER_RETRIES),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
         }
     )
@@ -239,11 +244,14 @@ def run_grounded_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
     from . import model_prefs
 
     provider.require_capability("native_grounding")
-    model = model_prefs.resolve_model(
-        explicit=str(arguments.get("model") or ""),
-        task="grounded-search",
-        fallback=chat.DEFAULT_MODEL,
-    ) or chat.DEFAULT_MODEL
+    model = (
+        model_prefs.resolve_model(
+            explicit=str(arguments.get("model") or ""),
+            task="grounded-search",
+            fallback=chat.DEFAULT_MODEL,
+        )
+        or chat.DEFAULT_MODEL
+    )
     prompt = build_prompt(arguments)
     chat_response = chat.run_chat(
         {
@@ -251,20 +259,17 @@ def run_grounded_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
             "model": model,
             "task": "grounded-search",
             "grounding": "always",
-            "timeout_sec": (
-                arguments.get("timeout_sec")
-                or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-            ),
-            "retry_count": arguments.get(
-                "retry_count", limits.MAX_PROVIDER_RETRIES
-            ),
+            "timeout_sec": (arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS),
+            "retry_count": arguments.get("retry_count", limits.MAX_PROVIDER_RETRIES),
             "retry_sleep_cap_sec": arguments.get("retry_sleep_cap_sec", 8),
         }
     )
     answer = chat_response.get("text", "")
     resolve_sources = bool(arguments.get("resolve_sources", True))
     sources = [
-        resolve_url(url) if resolve_sources else {
+        resolve_url(url)
+        if resolve_sources
+        else {
             "url": url,
             "resolved_url": url,
             "domain": urllib.parse.urlparse(url).netloc.lower(),
@@ -277,7 +282,9 @@ def run_grounded_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if resolve_sources:
         sources = recover_direct_sources(arguments, answer, sources)
     official_count = sum(1 for item in sources if item.get("source_type") == "official")
-    unresolved_redirect_count = sum(1 for item in sources if item.get("source_type") == "grounding_redirect")
+    unresolved_redirect_count = sum(
+        1 for item in sources if item.get("source_type") == "grounding_redirect"
+    )
     claims = extract_numeric_claims(answer)
     quality = {
         "source_count": len(sources),

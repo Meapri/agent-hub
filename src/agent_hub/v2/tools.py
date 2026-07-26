@@ -107,13 +107,18 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_continue",
-            "Claim a run revision and execute the next dependency-ready wave.",
+            "Claim a run revision, optionally requeue explicitly retry-safe failed steps, and execute the next dependency-ready wave. Never retry outcome_unknown steps.",
             _object(
                 {
                     "run_id": text,
                     "expected_revision": integer,
                     "max_waves": {"type": "integer", "minimum": 1, "maximum": 8},
-                    "retry_failed_steps": {"type": "array", "items": text, "maxItems": 64},
+                    "retry_failed_steps": {
+                        "type": "array",
+                        "items": text,
+                        "maxItems": 64,
+                        "description": "Paused failed step IDs listed by agent_hub_get.retryable_failed_steps. The store rejects ambiguous or unsafe retries.",
+                    },
                 },
                 required=["run_id", "expected_revision"],
             ),

@@ -170,9 +170,7 @@ def prepare_provider_registration(
     package_sha256: str,
 ) -> dict[str, Any]:
     normalized = validate_provider_manifest(manifest)
-    if len(package_sha256) != 64 or any(
-        char not in "0123456789abcdef" for char in package_sha256
-    ):
+    if len(package_sha256) != 64 or any(char not in "0123456789abcdef" for char in package_sha256):
         raise HubV2Error(
             "invalid_package_digest",
             "The provider package digest is invalid.",
@@ -255,9 +253,7 @@ def check_provider(
             ConformanceCheck(
                 "initialize_manifest",
                 normalized["provider_id"] == provider_id,
-                "ok"
-                if normalized["provider_id"] == provider_id
-                else "provider_id_mismatch",
+                "ok" if normalized["provider_id"] == provider_id else "provider_id_mismatch",
             )
         )
     except (HubV2Error, KeyError, TypeError):

@@ -24,13 +24,19 @@ from .contracts import (
     PLAN_SCHEMA,
     TASK_SCHEMA,
     canonical_json,
+    input_token_limit,
     require_non_negative_int,
     safe_usage,
+    total_token_limit,
     validate_plan,
     validate_task,
 )
 from .crypto import ArtifactCipher, MacOSKeychainKeyProvider
-from .dependency_context import assemble_dependency_context, enforce_provider_context_budget
+from .dependency_context import (
+    DependencyContextPart,
+    assemble_dependency_context,
+    enforce_provider_context_budget,
+)
 from .egress import prepare_egress, redact_secret_lines, verify_egress_approval
 from .errors import HubV2Error, public_failure, safe_unexpected_error
 from .policy import (
@@ -173,6 +179,20 @@ class HubService:
     ) -> dict[str, Any]:
         return self.store.decide_egress_review(review_id, decision=decision)
 
+    def egress_settings(self) -> dict[str, Any]:
+        return self.store.egress_settings()
+
+    def update_egress_settings(
+        self,
+        *,
+        auto_approve: bool,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        return self.store.update_egress_settings(
+            auto_approve=auto_approve,
+            expected_revision=expected_revision,
+        )
+
     @staticmethod
     def _safe_handoff_error(error: handoff_state.HandoffError) -> HubV2Error:
         if isinstance(
@@ -292,7 +312,13 @@ class HubService:
                 scope="policy",
             )
         constraints["provider_allowlist"] = requested or allowed
-        for field in ("timeout_seconds", "max_tokens"):
+        for field in (
+            "timeout_seconds",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_total_tokens",
+            "max_leaf_calls",
+        ):
             project_limit = policy["budgets"].get(field)
             requested_limit = constraints.get(field)
             if project_limit is not None:
@@ -641,7 +667,7 @@ class HubService:
         planner_provider = explicit or allowed[0]
         base_context_budget = enforce_provider_context_budget(
             str(task.get("inline_input") or ""),
-            max_tokens=int(task["constraints"]["max_tokens"]),
+            requested_max_input_tokens=input_token_limit(task["constraints"]),
             context_stats={"source_artifact_count": 0},
         )
         readiness, states = self._readiness(allowed)
@@ -675,8 +701,8 @@ class HubService:
         )
         context_budget = enforce_provider_context_budget(
             str(task.get("inline_input") or ""),
-            max_tokens=int(task["constraints"]["max_tokens"]),
-            max_input_tokens=int(selected_limit["max_input_tokens"]),
+            requested_max_input_tokens=input_token_limit(task["constraints"]),
+            model_max_input_tokens=int(selected_limit["max_input_tokens"]),
             provider=provider,
             model=selected_model,
             context_stats={"source_artifact_count": 0},
@@ -775,8 +801,9 @@ class HubService:
                 destination_providers=destination_providers,
                 source_paths=source_paths,
                 policy_revision=policy.policy["revision"],
-                estimated_max_tokens=int(
-                    task["constraints"].get("max_tokens") or policy.policy["budgets"]["max_tokens"]
+                estimated_max_tokens=total_token_limit(
+                    task["constraints"],
+                    default=int(policy.policy["budgets"]["max_total_tokens"]),
                 ),
                 artifact_sources=artifact_sources,
             )
@@ -794,18 +821,32 @@ class HubService:
                 ).encode("utf-8")
             ).hexdigest()
             if proposal["manifest"].get("entries"):
-                proposal["approval_required"] = True
-                proposal["approval_request"] = self.store.prepare_egress_review(
+                review = self.store.prepare_egress_review(
                     project_root=project_root,
                     proposal=proposal,
                 )
-                proposal["next_action"] = {
-                    "type": "local_gui",
-                    "command": "agent-hub-connect",
-                    "review_id": proposal["approval_request"]["review_id"],
-                }
+                review = self.store.maybe_auto_approve_egress_review(review["review_id"])
+                proposal["approval_request"] = review
+                if review["status"] == "approved":
+                    proposal["approval_required"] = False
+                    proposal["approval_mode"] = "automatic"
+                    proposal["next_action"] = {
+                        "type": "call_tool",
+                        "tool": "agent_hub_plan",
+                        "mode": "apply",
+                        "approval_request_id": review["review_id"],
+                    }
+                else:
+                    proposal["approval_required"] = True
+                    proposal["approval_mode"] = "manual"
+                    proposal["next_action"] = {
+                        "type": "local_gui",
+                        "command": "agent-hub-connect",
+                        "review_id": review["review_id"],
+                    }
             else:
                 proposal["approval_required"] = False
+                proposal["approval_mode"] = "not_required"
                 proposal["approval_request"] = None
             return proposal
         if mode != "apply":
@@ -1294,12 +1335,14 @@ class HubService:
                 for entry in (approval or {}).get("entries", [])
                 if entry.get("kind") == "artifact"
             }
-            dependency_parts: list[str] = []
+            plan_steps = {str(item["id"]): item for item in plan["steps"]}
+            run_steps = {str(item["step_id"]): item for item in run["steps"]}
+            dependency_parts: list[DependencyContextPart] = []
             for artifact_id in source_refs:
                 artifact_text = self._artifact_text(artifact_id)
+                artifact = self.store.get_artifact(artifact_id, include_content=False)
                 if artifact_id in input_artifacts and artifact_id not in inline_consent:
                     entry = artifact_entries.get(artifact_id)
-                    artifact = self.store.get_artifact(artifact_id, include_content=False)
                     if entry is None or entry.get("source_sha256") != artifact["content_sha256"]:
                         raise HubV2Error(
                             "egress_approval_conflict",
@@ -1313,11 +1356,30 @@ class HubService:
                             "A stored input artifact changed after egress approval.",
                             scope="egress",
                         )
-                dependency_parts.append(artifact_text)
+                producer_step_id = str(artifact.get("producer_step_id") or "")
+                producer_plan_step = plan_steps.get(producer_step_id)
+                producer_run_step = run_steps.get(producer_step_id)
+                trusted_fact_pack = bool(
+                    artifact.get("run_id") == run_id
+                    and producer_plan_step
+                    and producer_plan_step.get("capability") == "inspect"
+                    and producer_run_step
+                    and producer_run_step.get("status") == "completed"
+                    and producer_run_step.get("provider") == "local"
+                    and artifact_id in producer_run_step.get("output_artifact_ids", [])
+                    and artifact.get("media_type") == "application/json"
+                )
+                dependency_parts.append(
+                    DependencyContextPart(
+                        text=artifact_text,
+                        artifact_id=artifact_id,
+                        trusted_fact_pack=trusted_fact_pack,
+                    )
+                )
             dependency_text, dependency_stats = assemble_dependency_context(dependency_parts)
             base_context_budget = enforce_provider_context_budget(
                 dependency_text,
-                max_tokens=int(plan["task"]["constraints"]["max_tokens"]),
+                requested_max_input_tokens=input_token_limit(plan["task"]["constraints"]),
                 context_stats=dependency_stats,
             )
             task = validate_task(
@@ -1420,8 +1482,8 @@ class HubService:
                 )
                 context_budget = enforce_provider_context_budget(
                     dependency_text,
-                    max_tokens=int(plan["task"]["constraints"]["max_tokens"]),
-                    max_input_tokens=int(candidate_limit["max_input_tokens"]),
+                    requested_max_input_tokens=input_token_limit(plan["task"]["constraints"]),
+                    model_max_input_tokens=int(candidate_limit["max_input_tokens"]),
                     provider=candidate,
                     model=candidate_model,
                     context_stats=dependency_stats,
@@ -1518,6 +1580,7 @@ class HubService:
                 "context_segments": dependency_stats["context_segment_count"],
                 "context_duplicate_artifacts": dependency_stats["duplicate_artifact_count"],
                 "context_fact_pack_count": dependency_stats["fact_pack_count"],
+                "context_untrusted_fact_pack_count": dependency_stats["untrusted_fact_pack_count"],
                 "context_fact_pack_items": dependency_stats["fact_pack_item_count"],
                 "context_fact_pack_duplicate_items": dependency_stats[
                     "fact_pack_duplicate_item_count"
@@ -1776,7 +1839,7 @@ class HubService:
                     for item in run["steps"]
                 )
                 elapsed_ms = self._critical_path_elapsed_ms(plan, run)
-                if total_tokens > int(plan["task"]["constraints"]["max_tokens"]):
+                if total_tokens > total_token_limit(plan["task"]["constraints"]):
                     raise HubV2Error(
                         "run_token_budget_exhausted",
                         "The run exhausted its token budget.",
@@ -1803,9 +1866,19 @@ class HubService:
         except HubV2Error as exc:
             try:
                 current = self.store.get_run(run_id)
+                if current["status"] == "cancelled":
+                    return
+                reconciled = self.store.reconcile_running_steps(
+                    run_id,
+                    claim_token=claim_token,
+                    expected_revision=current["revision"],
+                    reason_code=exc.code,
+                )
+                current = reconciled["run"]
                 status = (
                     "outcome_unknown"
-                    if exc.code
+                    if reconciled["outcome_unknown_step_ids"]
+                    or exc.code
                     in {
                         "provider_timeout",
                         "provider_worker_failed",
@@ -1833,6 +1906,8 @@ class HubService:
                     )
             except HubV2Error as finalize_error:
                 try:
+                    if self.store.get_run(run_id)["status"] == "cancelled":
+                        return
                     self.store.record_runtime_event(
                         run_id,
                         event_type="run_finalize_failed",
@@ -1847,11 +1922,22 @@ class HubService:
         except Exception:  # noqa: BLE001
             try:
                 current = self.store.get_run(run_id)
+                if current["status"] == "cancelled":
+                    return
+                reconciled = self.store.reconcile_running_steps(
+                    run_id,
+                    claim_token=claim_token,
+                    expected_revision=current["revision"],
+                    reason_code="run_internal_error",
+                )
+                current = reconciled["run"]
                 self.store.finalize_claim(
                     run_id,
                     claim_token=claim_token,
                     expected_revision=current["revision"],
-                    status="paused",
+                    status=(
+                        "outcome_unknown" if reconciled["outcome_unknown_step_ids"] else "paused"
+                    ),
                     event_type="run_paused",
                     details={
                         "error_code": "run_internal_error",
@@ -1861,6 +1947,8 @@ class HubService:
                 )
             except HubV2Error as finalize_error:
                 try:
+                    if self.store.get_run(run_id)["status"] == "cancelled":
+                        return
                     self.store.record_runtime_event(
                         run_id,
                         event_type="run_finalize_failed",
@@ -2023,17 +2111,21 @@ class HubService:
 
     def _tool_cancel(self, arguments: dict[str, Any]) -> dict[str, Any]:
         run_id = str(arguments.get("run_id") or "")
-        with self._active_lock:
-            workers = list(self._active.get(run_id, []))
-        for worker in workers:
-            worker.cancel()
-        return self.store.cancel_run(
+        cancelled = self.store.cancel_run(
             run_id,
             expected_revision=require_non_negative_int(
                 arguments.get("expected_revision"),
                 field="expected_revision",
             ),
         )
+        with self._active_lock:
+            workers = list(self._active.get(run_id, []))
+        for worker in workers:
+            try:
+                worker.cancel()
+            except Exception:  # noqa: BLE001 - cancellation is best effort after durable CAS
+                continue
+        return cancelled
 
     def _tool_artifact(self, arguments: dict[str, Any]) -> dict[str, Any]:
         action = str(arguments.get("action") or "")

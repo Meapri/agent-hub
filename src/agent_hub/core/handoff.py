@@ -33,9 +33,7 @@ _LATEST_BLOCK_RE = re.compile(r"(?m)^[ \t]*\*\*\[[^\]\n]*최신[^\]\n]*\]\*\*[ \
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEADING_RE = re.compile(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _LIST_ITEM_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.+?)\s*$")
-_LABELED_FIELD_RE = re.compile(
-    r"(?m)^[ \t]*[-*+][ \t]+\*\*([^*\n]+?)\*\*[ \t]*:[ \t]*(.*)$"
-)
+_LABELED_FIELD_RE = re.compile(r"(?m)^[ \t]*[-*+][ \t]+\*\*([^*\n]+?)\*\*[ \t]*:[ \t]*(.*)$")
 _UNSET = object()
 QUALITY_SCHEMA = "agent_hub_handoff_quality_v1"
 REQUIRED_SECTIONS = (
@@ -362,9 +360,7 @@ def _normalize_heading(value: str) -> str:
 def _section_matches(body: str) -> dict[str, list[tuple[str, str]]]:
     headings = list(_HEADING_RE.finditer(body))
     labels = list(_LABELED_FIELD_RE.finditer(body))
-    matched: dict[str, list[tuple[str, str]]] = {
-        key: [] for key in REQUIRED_SECTIONS
-    }
+    matched: dict[str, list[tuple[str, str]]] = {key: [] for key in REQUIRED_SECTIONS}
     aliases = {
         key: {_normalize_heading(alias) for alias in values}
         for key, values in _SECTION_ALIASES.items()
@@ -391,9 +387,7 @@ def _section_matches(body: str) -> dict[str, list[tuple[str, str]]]:
             if title in accepted:
                 matched[key].append(
                     (
-                        "labeled-field-inline"
-                        if inline
-                        else "labeled-field-block",
+                        "labeled-field-inline" if inline else "labeled-field-block",
                         content,
                     )
                 )
@@ -448,9 +442,7 @@ def validate_managed_body(body: str) -> Dict[str, Any]:
         "schema": QUALITY_SCHEMA,
         "valid": not issues,
         "required_sections": list(REQUIRED_SECTIONS),
-        "found_sections": [
-            key for key in REQUIRED_SECTIONS if len(sections[key]) == 1
-        ],
+        "found_sections": [key for key in REQUIRED_SECTIONS if len(sections[key]) == 1],
         "next_step_count": next_step_count,
         "next_step": next_step,
         "issues": issues,
@@ -482,11 +474,7 @@ def _select_text(text: str, limit: int) -> tuple[str, str, bool]:
     keep = max(0, limit - len(suffix))
     return (
         selected[:keep] + suffix,
-        (
-            "latest-block-truncated"
-            if latest is not None
-            else "truncated"
-        ),
+        ("latest-block-truncated" if latest is not None else "truncated"),
         True,
     )
 
@@ -782,12 +770,9 @@ def prepare_handoff_update(
     existing = raw.decode("utf-8") if raw is not None else ""
     current_managed_sha256 = _managed_sha256(existing)
     if base_managed_sha256 is not _UNSET:
-        if (
-            base_managed_sha256 is not None
-            and (
-                not isinstance(base_managed_sha256, str)
-                or _SHA256_RE.fullmatch(base_managed_sha256) is None
-            )
+        if base_managed_sha256 is not None and (
+            not isinstance(base_managed_sha256, str)
+            or _SHA256_RE.fullmatch(base_managed_sha256) is None
         ):
             raise ValueError(
                 "base_managed_sha256 must be omitted, null, or 64 lowercase hex characters"

@@ -1,4 +1,5 @@
 """Compatibility shim — consent gate implementation in agent_hub.core.consent."""
+
 from agent_hub.core.consent import ConsentGate, CONSENT_FILE_VERSION, TRUE_VALUES, env_flag
 from . import paths
 
@@ -17,7 +18,14 @@ grant_consent = _gate.grant_consent
 revoke_consent = _gate.revoke_consent
 
 __all__ = [
-    "CONSENT_FILE_VERSION", "TRUE_VALUES", "env_flag", "consent_file_path",
-    "user_consent_enabled", "require_consent", "consent_status",
-    "consent_revision", "grant_consent", "revoke_consent",
+    "CONSENT_FILE_VERSION",
+    "TRUE_VALUES",
+    "env_flag",
+    "consent_file_path",
+    "user_consent_enabled",
+    "require_consent",
+    "consent_status",
+    "consent_revision",
+    "grant_consent",
+    "revoke_consent",
 ]

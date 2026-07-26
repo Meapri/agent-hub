@@ -37,13 +37,19 @@ def test_bundle_is_allowlisted_and_platform_aware(tmp_path):
         text=True,
     )
 
-    relative_files = {path.relative_to(posix).as_posix() for path in posix.rglob("*") if path.is_file()}
+    relative_files = {
+        path.relative_to(posix).as_posix() for path in posix.rglob("*") if path.is_file()
+    }
     assert "plugin.json" in relative_files
     assert "google_antigravity_codex/mcp_server.py" in relative_files
     assert "google_antigravity_codex/google_api.py" not in relative_files
     assert "google_antigravity_codex/auth_cli.py" not in relative_files
     assert "scripts/google_antigravity_auth.py" not in relative_files
-    assert not any(part in {".git", ".pytest_cache", ".ruff_cache", "tests", "build"} for path in relative_files for part in Path(path).parts)
+    assert not any(
+        part in {".git", ".pytest_cache", ".ruff_cache", "tests", "build"}
+        for path in relative_files
+        for part in Path(path).parts
+    )
 
     posix_config = json.loads((posix / "mcp_config.json").read_text(encoding="utf-8"))
     windows_config = json.loads((windows / "mcp_config.json").read_text(encoding="utf-8"))
@@ -55,8 +61,9 @@ def test_bundle_is_allowlisted_and_platform_aware(tmp_path):
     assert posix_codex_config["mcpServers"]["google-antigravity-codex"]["cwd"] == "."
     assert windows_codex_config["mcpServers"]["google-antigravity-codex"]["cwd"] == "."
     assert (
-        posix_codex_config["mcpServers"]["google-antigravity-codex"]["env"]
-        ["GOOGLE_ANTIGRAVITY_RUNNING_UNDER_CODEX_MCP"]
+        posix_codex_config["mcpServers"]["google-antigravity-codex"]["env"][
+            "GOOGLE_ANTIGRAVITY_RUNNING_UNDER_CODEX_MCP"
+        ]
         == "1"
     )
     manifest = json.loads((posix / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))

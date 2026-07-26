@@ -16,9 +16,9 @@ GPT는 별도 MCP가 아니라 격리된 Agent Hub provider worker의 `gpt` 항�
 2. `agent_hub_catalog(provider="gpt")`에서 `auth_state`, `catalog_state`,
    `generation_state`를 따로 읽는다. connected 또는 live catalog만으로 실제 생성 성공을 단정하지 않는다.
 3. 짧은 inline 요청은 `agent_hub_execute`에 `provider="gpt"`와 필요한 capability를 지정한다.
-4. 저장소나 artifact를 사용하는 작업은 `agent_hub_plan` prepare 뒤 연결 GUI에서 사용자가 egress를
-   승인하고, 반환된 `approval_request_id`로 apply한 뒤 `agent_hub_start`와
-   `agent_hub_continue`로 실행한다.
+4. 저장소나 artifact를 사용하는 작업은 `agent_hub_plan` prepare 뒤 `approval_mode`를 확인한다.
+   `manual`이면 연결 GUI에서 사용자가 egress를 승인하고, `automatic`이면 승인된 review를 사용해
+   반환된 `approval_request_id`로 apply한 뒤 `agent_hub_start`와 `agent_hub_continue`로 실행한다.
 5. 로그인·다시 로그인·로그아웃은 로컬 연결 GUI에서만 수행한다. 상태 도구나 MCP 호출로 credential을
    변경하지 않는다.
 

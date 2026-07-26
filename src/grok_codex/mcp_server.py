@@ -100,7 +100,6 @@ def tool_definitions() -> List[Dict[str, Any]]:
             "description": "List curated (and optionally live) models.",
             "inputSchema": LIST_MODELS_SCHEMA,
         },
-
         {
             "name": "grok_codex_login_status",
             "description": "SuperGrok / xAI OAuth login status (no secrets).",

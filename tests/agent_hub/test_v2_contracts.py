@@ -10,6 +10,9 @@ from agent_hub.v2.contracts import (
     PROVIDER_MANIFEST_SCHEMA,
     TASK_SCHEMA,
     ensure_public_model_id,
+    input_token_limit,
+    output_token_limit,
+    total_token_limit,
     validate_plan,
     validate_provider_manifest,
     validate_task,
@@ -35,6 +38,36 @@ def test_task_contract_normalizes_defaults():
     assert task["schema"] == TASK_SCHEMA
     assert task["input_artifacts"] == []
     assert task["constraints"]["provider_allowlist"] == ["claude", "gpt"]
+
+
+def test_task_contract_separates_input_output_and_total_token_budgets():
+    canonical = validate_task(
+        {
+            **_task(),
+            "constraints": {
+                "provider_allowlist": ["gpt"],
+                "max_input_tokens": 12_000,
+                "max_output_tokens": 4_096,
+                "max_total_tokens": 20_000,
+            },
+        }
+    )
+    legacy = validate_task(
+        {
+            **_task(),
+            "constraints": {
+                "provider_allowlist": ["gpt"],
+                "max_tokens": 8_192,
+            },
+        }
+    )
+
+    assert input_token_limit(canonical["constraints"]) == 12_000
+    assert output_token_limit(canonical["constraints"]) == 4_096
+    assert total_token_limit(canonical["constraints"]) == 20_000
+    assert input_token_limit(legacy["constraints"]) is None
+    assert output_token_limit(legacy["constraints"]) == 8_192
+    assert total_token_limit(legacy["constraints"]) == 8_192
 
 
 @pytest.mark.parametrize(
@@ -284,3 +317,6 @@ def test_packaged_contract_fixture_contains_all_public_v2_schemas():
         "egress_review_v1",
         "egress_manifest_v2",
     }
+    run_properties = fixture["$defs"]["run_v3"]["properties"]
+    assert run_properties["retryable_failed_steps"]["items"] == {"type": "string"}
+    assert run_properties["next_action"]["properties"]["tool"]["const"] == "agent_hub_continue"

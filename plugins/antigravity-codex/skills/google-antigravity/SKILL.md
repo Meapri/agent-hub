@@ -1,6 +1,6 @@
 ---
 name: google-antigravity
-description: "Use Google Antigravity for consent-gated direct Google OAuth login, official agy sessions, chat (multimodal/tool-calls/streaming), writing, models, diagnostics, and capability-gated grounding or images."
+description: "Use Google Antigravity for consent-gated direct Google OAuth login, Code Assist chat (multimodal/tool-calls/streaming), writing, models, diagnostics, and capability-gated grounding or images."
 ---
 
 # Google Antigravity

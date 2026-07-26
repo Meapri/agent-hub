@@ -100,7 +100,9 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
     if source in {"x", "both"}:
         x_tool: Dict[str, Any] = {"type": "x_search"}
         if isinstance(arguments.get("allowed_x_handles"), list):
-            x_tool["allowed_x_handles"] = [str(item) for item in arguments["allowed_x_handles"][:20]]
+            x_tool["allowed_x_handles"] = [
+                str(item) for item in arguments["allowed_x_handles"][:20]
+            ]
         if arguments.get("from_date"):
             x_tool["from_date"] = str(arguments["from_date"])
         if arguments.get("to_date"):
@@ -122,9 +124,7 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
             limits.MAX_PROVIDER_RETRIES,
         ),
     )
-    timeout = float(
-        arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS
-    )
+    timeout = float(arguments.get("timeout_sec") or limits.MAX_PROVIDER_TIMEOUT_SECONDS)
     payloads: List[Dict[str, Any]] = []
     raw_text = ""
     status = "incomplete"

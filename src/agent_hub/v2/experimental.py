@@ -49,9 +49,7 @@ def require_experimental_feature(
             scope="experimental",
         )
     flags = normalize_experimental_flags(
-        policy.get("experimental")
-        if isinstance(policy.get("experimental"), Mapping)
-        else None
+        policy.get("experimental") if isinstance(policy.get("experimental"), Mapping) else None
     )
     if not flags[feature]:
         raise HubV2Error(
@@ -102,9 +100,7 @@ class ExperimentalRuntimeRegistry:
 
     def status(self, policy: Mapping[str, Any]) -> dict[str, Any]:
         flags = normalize_experimental_flags(
-            policy.get("experimental")
-            if isinstance(policy.get("experimental"), Mapping)
-            else None
+            policy.get("experimental") if isinstance(policy.get("experimental"), Mapping) else None
         )
         return {
             "schema": "agent_hub_experimental_features_v1",
@@ -114,14 +110,10 @@ class ExperimentalRuntimeRegistry:
                     "enabled": flags[feature],
                     "registered": feature in self._runtimes,
                     "runtime_id": (
-                        self._runtimes[feature].runtime_id
-                        if feature in self._runtimes
-                        else None
+                        self._runtimes[feature].runtime_id if feature in self._runtimes else None
                     ),
                     "sandboxed": (
-                        self._runtimes[feature].sandboxed
-                        if feature in self._runtimes
-                        else None
+                        self._runtimes[feature].sandboxed if feature in self._runtimes else None
                     ),
                 }
                 for feature in EXPERIMENTAL_FEATURES

@@ -20,9 +20,9 @@ finding set into clear prose.
 3. Verify each retained finding against the actual file and assign its final
    severity, file, line, evidence, and remediation in Codex.
 4. If prose help is useful, send only the verified finding records and residual
-   test gaps to `google_antigravity_write` with `task: "technical-doc"`. If the
-   configured Google writing provider is unavailable, Codex may use consented
-   `google_antigravity_cli_chat` in sandboxed plan mode for prose only.
+   test gaps to `google_antigravity_write` with `task: "technical-doc"`.
+   If the configured Google provider is unavailable, keep the verified local
+   findings and format them in Codex rather than changing transports.
 5. Recheck the returned prose in Codex. Remove invented claims, changed
    severities, unsupported commands, incorrect file/line references, and model
    meta-commentary before presenting it.

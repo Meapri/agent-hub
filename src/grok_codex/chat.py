@@ -195,7 +195,9 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"reasoning_effort is not supported by Grok model: {model}")
     timeout = float(arguments.get("timeout_sec") or DEFAULT_TIMEOUT_SECONDS)
     session_id = str(arguments.get("session_id") or "").strip() or str(uuid4())
-    api_mode = str(arguments.get("api_mode") or os.getenv("GROK_CODEX_API_MODE") or "chat").strip().lower()
+    api_mode = (
+        str(arguments.get("api_mode") or os.getenv("GROK_CODEX_API_MODE") or "chat").strip().lower()
+    )
     messages = _normalize_messages(arguments)
     if _has_images(messages):
         api_mode = "responses"

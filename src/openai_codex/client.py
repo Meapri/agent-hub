@@ -180,9 +180,7 @@ def run_bounded(
                 target = chunks[str(key.data)]
                 target.extend(data)
                 if len(target) > limits[str(key.data)]:
-                    raise CodexProcessError(
-                        f"Codex {key.data} exceeded the bounded output limit"
-                    )
+                    raise CodexProcessError(f"Codex {key.data} exceeded the bounded output limit")
         remaining = max(0.01, deadline - time.monotonic())
         returncode = proc.wait(timeout=remaining)
     except (CodexTimeout, CodexProcessError):
@@ -261,9 +259,7 @@ def _app_server_messages(
         while not expected_ids.issubset(received_ids):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise CodexTimeout(
-                    f"Codex app-server exceeded {float(timeout):g} seconds"
-                )
+                raise CodexTimeout(f"Codex app-server exceeded {float(timeout):g} seconds")
             events = selector.select(timeout=min(remaining, 0.25))
             if not events and proc.poll() is not None:
                 events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
@@ -297,9 +293,7 @@ def _app_server_messages(
                     if not raw_line.strip():
                         continue
                     if len(messages) >= MAX_EVENT_COUNT:
-                        raise CodexProtocolError(
-                            "Codex app-server emitted too many JSONL messages"
-                        )
+                        raise CodexProtocolError("Codex app-server emitted too many JSONL messages")
                     try:
                         value = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -307,9 +301,7 @@ def _app_server_messages(
                             "Codex app-server emitted invalid JSONL output"
                         ) from exc
                     if not isinstance(value, dict):
-                        raise CodexProtocolError(
-                            "Codex app-server JSONL messages must be objects"
-                        )
+                        raise CodexProtocolError("Codex app-server JSONL messages must be objects")
                     messages.append(value)
                     if isinstance(value.get("id"), int):
                         received_ids.add(value["id"])
@@ -452,9 +444,7 @@ def _raise_exec_failure(message: str) -> None:
         marker in lowered
         for marker in ("chatgpt subscription", "subscription login", "subscription required")
     ):
-        raise CodexSubscriptionRequired(
-            "Official Codex requires a ChatGPT subscription login."
-        )
+        raise CodexSubscriptionRequired("Official Codex requires a ChatGPT subscription login.")
     if any(
         marker in lowered
         for marker in ("authentication required", "not logged in", "unauthorized", "401")
@@ -523,8 +513,7 @@ def run_exec_chat(
 
     if returncode != 0 or failure:
         _raise_exec_failure(
-            failure
-            or f"Codex exec exited with {returncode}: {redact(stderr) or 'no details'}"
+            failure or f"Codex exec exited with {returncode}: {redact(stderr) or 'no details'}"
         )
     if not completed:
         raise CodexProtocolError("Codex exec ended without turn.completed")

@@ -34,7 +34,8 @@ DEFAULT_POLICY: dict[str, Any] = {
     "budgets": {
         "timeout_seconds": 1790,
         "max_leaf_calls": 100,
-        "max_tokens": 131072,
+        "max_output_tokens": 131072,
+        "max_total_tokens": 131072,
     },
     "artifact_retention": "durable_private",
     "workflow_locks": {},
@@ -140,6 +141,31 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
             "Policy sections must be objects.",
             scope="policy",
         )
+    numeric_budgets = {
+        str(key): value
+        for key, value in budgets.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    legacy_max_tokens = numeric_budgets.get("max_tokens")
+    normalized_budgets = dict(DEFAULT_POLICY["budgets"])
+    for key in (
+        "timeout_seconds",
+        "max_leaf_calls",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_total_tokens",
+    ):
+        if key in numeric_budgets:
+            normalized_budgets[key] = numeric_budgets[key]
+    if legacy_max_tokens is not None:
+        normalized_budgets["max_output_tokens"] = numeric_budgets.get(
+            "max_output_tokens",
+            legacy_max_tokens,
+        )
+        normalized_budgets["max_total_tokens"] = numeric_budgets.get(
+            "max_total_tokens",
+            legacy_max_tokens,
+        )
     normalized = {
         "schema": POLICY_SCHEMA,
         "revision": revision,
@@ -151,17 +177,8 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
             **DEFAULT_POLICY["egress"],
             **{str(key): str(value) for key, value in egress.items()},
         },
-        "budgets": {
-            **DEFAULT_POLICY["budgets"],
-            **{
-                str(key): value
-                for key, value in budgets.items()
-                if isinstance(value, (int, float)) and not isinstance(value, bool)
-            },
-        },
-        "artifact_retention": str(
-            raw.get("artifact_retention") or "durable_private"
-        ),
+        "budgets": normalized_budgets,
+        "artifact_retention": str(raw.get("artifact_retention") or "durable_private"),
         "workflow_locks": {str(key): str(value) for key, value in workflow_locks.items()},
         "plugin_locks": {str(key): str(value) for key, value in plugin_locks.items()},
         "experimental": normalize_experimental_flags(experimental),
@@ -200,10 +217,7 @@ def load_policy(project_root: str) -> PolicySnapshot:
 
 def _toml_string(value: str) -> str:
     escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
     )
     return f'"{escaped}"'
 
@@ -226,8 +240,7 @@ def render_policy(policy: Mapping[str, Any]) -> bytes:
         "[egress]",
     ]
     lines.extend(
-        f"{key} = {_toml_string(str(item))}"
-        for key, item in sorted(value["egress"].items())
+        f"{key} = {_toml_string(str(item))}" for key, item in sorted(value["egress"].items())
     )
     lines.extend(["", "[budgets]"])
     for key, item in sorted(value["budgets"].items()):

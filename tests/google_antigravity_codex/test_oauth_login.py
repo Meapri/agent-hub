@@ -40,9 +40,7 @@ def test_start_login_returns_auth_url_without_secrets(consent_and_paths):
     assert "code_challenge=" in result["auth_url"]
     assert "test-secret" not in json.dumps(result)
     assert oauth_login.pending_file_path().is_file()
-    pending = json.loads(
-        oauth_login.pending_file_path().read_text(encoding="utf-8")
-    )
+    pending = json.loads(oauth_login.pending_file_path().read_text(encoding="utf-8"))
     assert pending["version"] == oauth_login.PENDING_VERSION
     assert pending["flow_id"] == result["flow_id"]
     assert pending["consent_revision"]
@@ -53,10 +51,7 @@ def test_clear_pending_login_is_idempotent(consent_and_paths):
 
     assert oauth_login.clear_pending_login(expected_flow_id="other-flow") is False
     assert oauth_login.pending_file_path().is_file()
-    assert (
-        oauth_login.clear_pending_login(expected_flow_id=started["flow_id"])
-        is True
-    )
+    assert oauth_login.clear_pending_login(expected_flow_id=started["flow_id"]) is True
     assert oauth_login.clear_pending_login() is False
     assert not oauth_login.pending_file_path().exists()
 
@@ -116,8 +111,13 @@ def test_complete_login_exchanges_code_and_saves_tokens(consent_and_paths):
             "expires_in": 3600,
         }
 
-    with patch.object(oauth_login, "_exchange", side_effect=fake_exchange), patch.object(
-        oauth_login, "_probe_login", return_value={"success": True, "method": "list_models", "model_count": 3}
+    with (
+        patch.object(oauth_login, "_exchange", side_effect=fake_exchange),
+        patch.object(
+            oauth_login,
+            "_probe_login",
+            return_value={"success": True, "method": "list_models", "model_count": 3},
+        ),
     ):
         result = oauth_login.complete_login("auth-code-123")
 
@@ -143,10 +143,13 @@ def test_complete_login_reports_cleanup_warning_after_token_commit(
         "expires_in": 3600,
     }
 
-    with patch.object(oauth_login, "_exchange", return_value=token_payload), patch.object(
-        oauth_login.Path,
-        "unlink",
-        side_effect=OSError("busy"),
+    with (
+        patch.object(oauth_login, "_exchange", return_value=token_payload),
+        patch.object(
+            oauth_login.Path,
+            "unlink",
+            side_effect=OSError("busy"),
+        ),
     ):
         result = oauth_login.complete_login("auth-code-123", probe=False)
 
@@ -159,14 +162,17 @@ def test_complete_login_reports_cleanup_warning_after_token_commit(
 def test_complete_login_probe_failure_still_saves_tokens(consent_and_paths):
     oauth_login.start_login(use_local_redirect=False)
 
-    with patch.object(
-        oauth_login,
-        "_exchange",
-        return_value={"access_token": "a", "refresh_token": "r", "expires_in": 3600},
-    ), patch.object(
-        oauth_login,
-        "_probe_login",
-        return_value={"success": False, "error_type": "network", "error": "down"},
+    with (
+        patch.object(
+            oauth_login,
+            "_exchange",
+            return_value={"access_token": "a", "refresh_token": "r", "expires_in": 3600},
+        ),
+        patch.object(
+            oauth_login,
+            "_probe_login",
+            return_value={"success": False, "error_type": "network", "error": "down"},
+        ),
     ):
         result = oauth_login.complete_login("code", probe=True)
 
@@ -218,8 +224,7 @@ def test_callback_state_validation_does_not_consume_pending_login(
 ):
     started = oauth_login.start_login(use_local_redirect=True)
     valid = (
-        f"http://localhost:{oauth_login.LOCAL_PORT}/auth/callback"
-        f"?code=x&state={started['state']}"
+        f"http://localhost:{oauth_login.LOCAL_PORT}/auth/callback?code=x&state={started['state']}"
     )
 
     oauth_login.validate_callback_state(valid, require_state=True)
@@ -237,8 +242,7 @@ def test_callback_state_validation_does_not_consume_pending_login(
 def test_callback_state_rejects_replaced_flow(consent_and_paths):
     started = oauth_login.start_login(use_local_redirect=True)
     valid = (
-        f"http://localhost:{oauth_login.LOCAL_PORT}/auth/callback"
-        f"?code=x&state={started['state']}"
+        f"http://localhost:{oauth_login.LOCAL_PORT}/auth/callback?code=x&state={started['state']}"
     )
 
     with pytest.raises(oauth_login.OAuthLoginError) as mismatch:
@@ -256,9 +260,7 @@ def test_complete_login_does_not_commit_replaced_flow(consent_and_paths):
     started = oauth_login.start_login(use_local_redirect=False)
 
     def replace_flow(**_kwargs):
-        pending = json.loads(
-            oauth_login.pending_file_path().read_text(encoding="utf-8")
-        )
+        pending = json.loads(oauth_login.pending_file_path().read_text(encoding="utf-8"))
         pending["flow_id"] = "replacement-flow"
         oauth_login.io_util.write_json_secure(
             oauth_login.pending_file_path(),
@@ -280,9 +282,7 @@ def test_complete_login_does_not_commit_replaced_flow(consent_and_paths):
 
     assert replaced.value.code == "oauth_flow_replaced"
     assert not oauth_login.token_file_path().exists()
-    pending = json.loads(
-        oauth_login.pending_file_path().read_text(encoding="utf-8")
-    )
+    pending = json.loads(oauth_login.pending_file_path().read_text(encoding="utf-8"))
     assert pending["flow_id"] == "replacement-flow"
 
 

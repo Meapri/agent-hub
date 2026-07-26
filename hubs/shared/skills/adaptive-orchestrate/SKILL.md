@@ -18,9 +18,11 @@ Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한
    `mode="prepare"`로 먼저 호출한다. `task_v2`, 절대 `project_root`, 필요한 `source_paths`를 넘기고
    반환된 fact pack, `egress_manifest_v2`, `proposal_sha256`, policy revision을 검토한다. prepare는
    provider를 호출하지 않는다.
-3. 저장소 파일이나 기존 artifact가 있으면 `next_action`의 로컬 연결 GUI를 열어 사용자가 전송
-   대상과 파일 목록을 승인하거나 거부하게 한다. 승인 뒤 같은 proposal과
-   `approval_request.review_id`를 `approval_request_id`로 `agent_hub_plan(mode="apply")`에 넘긴다.
+3. 저장소 파일이나 기존 artifact가 있으면 `approval_mode`를 확인한다. `manual`이면
+   `next_action`의 로컬 연결 GUI를 열어 사용자가 전송 대상과 파일 목록을 승인하거나 거부하게
+   한다. `automatic`이고 review 상태가 `approved`이면 전역 자동 승인 기록을 그대로 사용한다.
+   어느 경우든 같은 proposal과 `approval_request.review_id`를 `approval_request_id`로
+   `agent_hub_plan(mode="apply")`에 넘긴다.
    `proposal_sha256`과 `expected_policy_revision`이 일치하지 않거나 review가 만료되면 새로
    prepare한다. MCP 호출자가 review를 대신 승인하려고 하지 않는다.
 4. 반환된 `plan_v2`에서 DAG, capability, verifier, budget, egress digest를 검토한다. 로컬 validator가
@@ -29,7 +31,9 @@ Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한
    `idempotency_key`를 사용한다.
 6. `agent_hub_continue`에 `run_id`와 최신 `expected_revision`을 전달한다. receipt는 외부 생성 완료를
    기다리지 않고 반환된다. `agent_hub_get`과 `agent_hub_events`로 진행을 확인하고, 활성 lease가 있는
-   동안 continue를 중복 호출하지 않는다.
+   동안 continue를 중복 호출하지 않는다. paused run에서 `agent_hub_get`이
+   `retryable_failed_steps`와 `next_action`을 반환하면 사용자가 재시도를 원할 때만 그 최신
+   revision과 step 목록을 `retry_failed_steps`로 전달한다.
 7. 결과 본문은 event가 아니라 `agent_hub_artifact`로 가져온다. digest와 검증 결과를 확인한 뒤 호스트가
    필요한 파일 변경을 수행한다.
 8. 사용자 평가나 deterministic gate 결과가 있으면 `agent_hub_feedback`으로 기록한다. LLM 자기 평가는
@@ -37,12 +41,14 @@ Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한
 
 ## 라우팅과 재개
 
-- `pinned`, `shadow`, `advisory`는 planner의 실제 provider 선택을 바꾸지 않는다.
+- `pinned`는 선택한 provider가 실행 불가능하면 fallback으로 바꾸지 않고 실패한다.
+- `shadow`와 `advisory`는 planner provider가 capability, policy, readiness와 context 검사를
+  통과할 때 선택을 유지한다. 부적격 provider는 eligible fallback으로 바뀔 수 있다.
 - `auto`도 정확한 context 표본이 20건 미만이면 planner 선택을 유지한다.
 - 완료된 step은 재계획으로 바꾸지 않는다. fallback 소진, timeout, context limit, deterministic
   verification 실패, capability 변화에서만 미완료 subgraph를 교체한다.
-- `outcome_unknown`, 인증·동의 문제, HANDOFF drift, 사용자 취소, 전체 예산 소진은 자동 재호출하거나
-  자동 재계획하지 않는다.
+- `outcome_unknown`, 내부 오류, 인증·동의 문제, HANDOFF drift, 사용자 취소, 전체 예산 소진은
+  명시적 retry 목록에도 넣지 않고 자동 재호출하거나 자동 재계획하지 않는다.
 - `agent_hub_cancel`은 새 결과의 반영을 막지만 이미 외부 provider에 전송된 요청을 되돌리지 못할 수 있다.
 
 ## 보고할 근거

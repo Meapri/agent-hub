@@ -19,6 +19,7 @@ class FakeManager:
         self.model_updates = []
         self.model_resets = []
         self.egress_decisions = []
+        self.egress_setting_updates = []
         self.closed = False
 
     def status(self):
@@ -61,6 +62,25 @@ class FakeManager:
             ],
             "pending_count": 1,
             "approved_count": 0,
+        }
+
+    def egress_settings(self):
+        return {
+            "success": True,
+            "schema": "agent_hub_egress_settings_v1",
+            "revision": len(self.egress_setting_updates),
+            "auto_approve": bool(self.egress_setting_updates),
+            "updated_at": 100.0,
+        }
+
+    def update_egress_settings(self, *, auto_approve, expected_revision):
+        self.egress_setting_updates.append((auto_approve, expected_revision))
+        return {
+            "success": True,
+            "schema": "agent_hub_egress_settings_v1",
+            "revision": expected_revision + 1,
+            "auto_approve": auto_approve,
+            "updated_at": 101.0,
         }
 
     def decide_egress_review(self, review_id, *, decision):
@@ -143,9 +163,9 @@ def test_no_open_prints_the_bootstrap_session_url(monkeypatch, capsys):
     assert "브라우저에서 열기: http://127.0.0.1:4567/?session=session-token" in output
 
 
-def _running_server(manager=None):
+def _running_server(manager=None, *, session_token="test-session"):
     manager = manager or FakeManager()
-    server = build_server(manager=manager, session_token="test-session")
+    server = build_server(manager=manager, session_token=session_token)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, manager, thread
@@ -186,6 +206,8 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
             javascript = response.read().decode()
         assert "function clearModelCatalog(provider)" in javascript
         assert "function renderEgressReviews()" in javascript
+        assert "function renderEgressSettings()" in javascript
+        assert "전역 자동 승인을 켜면 모든 프로젝트" in javascript
         assert "data-egress-action" in javascript
         assert (
             'if (["login", "refresh"].includes(job.kind)) clearModelCatalog(provider);'
@@ -228,6 +250,51 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         assert payload["success"] is True
         assert response.headers["Cache-Control"] == "no-store"
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+@pytest.mark.parametrize(
+    "session",
+    ["wrong-session", "", urllib.parse.quote("한글")],
+)
+def test_invalid_bootstrap_session_is_rejected_without_breaking_public_root(session):
+    server, _manager, thread = _running_server()
+    opener = _opener()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as error:
+            opener.open(f"{server.origin}/?session={session}")
+        assert error.value.code == 401
+        assert json.load(error.value)["error"]["code"] == "session_required"
+
+        with opener.open(f"{server.origin}/") as response:
+            assert response.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+@pytest.mark.parametrize(
+    ("server_token", "supplied"),
+    [
+        ("test-session", "é"),
+        ("한글", "test-session"),
+    ],
+)
+def test_non_ascii_session_values_fail_closed_with_http_response(server_token, supplied):
+    server, _manager, thread = _running_server(session_token=server_token)
+    try:
+        request = urllib.request.Request(
+            f"{server.origin}/api/status",
+            headers={"X-Agent-Hub-Session": supplied},
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        assert error.value.code == 401
+        assert json.load(error.value)["error"]["code"] == "session_required"
     finally:
         server.shutdown()
         server.server_close()
@@ -393,6 +460,49 @@ def test_egress_review_requires_authenticated_visible_gui_action():
             payload = json.load(response)
         assert payload["review"]["status"] == "approved"
         assert manager.egress_decisions == [("egr_fixture", "approve")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_global_egress_switch_requires_authenticated_visible_gui_action():
+    server, manager, thread = _running_server()
+    opener = _opener()
+    try:
+        opener.open(f"{server.origin}/?session=test-session").read()
+        with opener.open(_session_request(f"{server.origin}/api/egress-settings")) as response:
+            settings = json.load(response)
+        assert settings["auto_approve"] is False
+
+        body = json.dumps({"auto_approve": True, "expected_revision": 0}).encode()
+        blocked = urllib.request.Request(
+            f"{server.origin}/api/egress-settings",
+            data=body,
+            method="POST",
+            headers={"X-Agent-Hub-Session": "test-session"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            opener.open(blocked)
+        assert error.value.code == 403
+        assert manager.egress_setting_updates == []
+
+        enabled = urllib.request.Request(
+            f"{server.origin}/api/egress-settings",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": server.origin,
+                "X-Agent-Hub-Intent": "provider-management",
+                "X-Agent-Hub-Session": "test-session",
+            },
+        )
+        with opener.open(enabled) as response:
+            payload = json.load(response)
+        assert payload["auto_approve"] is True
+        assert payload["revision"] == 1
+        assert manager.egress_setting_updates == [(True, 0)]
     finally:
         server.shutdown()
         server.server_close()

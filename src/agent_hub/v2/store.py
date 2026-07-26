@@ -35,7 +35,7 @@ from .contracts import (
 from .errors import HubV2Error
 from .metrics import summarize_operation_metrics
 
-STORE_SCHEMA_VERSION = 8
+STORE_SCHEMA_VERSION = 9
 DEFAULT_STATE_DIR = Path("~/.agent-hub").expanduser()
 DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
@@ -98,6 +98,14 @@ _REQUIRED_SCHEMA_COLUMNS = {
         "expires_at",
         "decided_at",
         "consumed_at",
+        "decision_source",
+        "decision_settings_revision",
+    },
+    "egress_settings": {
+        "singleton_id",
+        "revision",
+        "auto_approve",
+        "updated_at",
     },
     "operation_metrics": {
         "metric_id",
@@ -567,12 +575,25 @@ class HubStore:
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
                     decided_at REAL,
-                    consumed_at REAL
+                    consumed_at REAL,
+                    decision_source TEXT,
+                    decision_settings_revision INTEGER
+                        CHECK (
+                            decision_settings_revision IS NULL
+                            OR decision_settings_revision >= 0
+                        )
                 );
                 CREATE INDEX IF NOT EXISTS egress_reviews_status_created
                     ON egress_reviews(status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS egress_reviews_proposal
                     ON egress_reviews(proposal_sha256, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS egress_settings (
+                    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                    revision INTEGER NOT NULL CHECK (revision >= 0),
+                    auto_approve INTEGER NOT NULL CHECK (auto_approve IN (0, 1)),
+                    updated_at REAL NOT NULL
+                );
 
                 CREATE TABLE IF NOT EXISTS provider_health (
                     provider TEXT PRIMARY KEY,
@@ -633,10 +654,28 @@ class HubStore:
                         "ALTER TABLE egress_approvals "
                         "ADD COLUMN destinations_json TEXT NOT NULL DEFAULT '[]'"
                     )
+                review_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(egress_reviews)").fetchall()
+                }
+                if "decision_source" not in review_columns:
+                    connection.execute("ALTER TABLE egress_reviews ADD COLUMN decision_source TEXT")
+                if "decision_settings_revision" not in review_columns:
+                    connection.execute(
+                        "ALTER TABLE egress_reviews ADD COLUMN decision_settings_revision INTEGER"
+                    )
                 connection.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                     (str(STORE_SCHEMA_VERSION),),
                 )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO egress_settings(
+                    singleton_id, revision, auto_approve, updated_at
+                ) VALUES(1, 0, 0, ?)
+                """,
+                (self._clock(),),
+            )
             _assert_required_schema(connection)
             connection.execute("COMMIT")
             integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
@@ -779,7 +818,12 @@ class HubStore:
         }
 
     def _public_run(self, row: sqlite3.Row, steps: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
+        retryable_failed_steps = [
+            step["step_id"]
+            for step in steps
+            if step["status"] == "failed" and step["checkpoint"].get("retry_safe") is True
+        ]
+        result = {
             "schema": row["schema_name"],
             "run_id": row["run_id"],
             "project_root": row["project_root"],
@@ -799,7 +843,19 @@ class HubStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "steps": steps,
+            "retryable_failed_steps": retryable_failed_steps,
         }
+        if row["status"] == "paused" and retryable_failed_steps:
+            result["next_action"] = {
+                "type": "call_tool",
+                "tool": "agent_hub_continue",
+                "arguments": {
+                    "run_id": row["run_id"],
+                    "expected_revision": row["revision"],
+                    "retry_failed_steps": retryable_failed_steps,
+                },
+            }
+        return result
 
     @staticmethod
     def _public_step(row: sqlite3.Row) -> dict[str, Any]:
@@ -1351,6 +1407,105 @@ class HubStore:
             updated, steps = self._load_run(connection, run_id)
             return self._public_run(updated, steps)
 
+    def reconcile_running_steps(
+        self,
+        run_id: str,
+        *,
+        claim_token: str,
+        expected_revision: int,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        expected = require_non_negative_int(
+            expected_revision,
+            field="expected_revision",
+        )
+        token_sha = sha256(str(claim_token).encode("ascii")).hexdigest()
+        now = self._clock()
+        with self._transaction() as connection:
+            row, _ = self._load_run(connection, run_id)
+            if (
+                row["revision"] != expected
+                or row["status"] != "running"
+                or row["lease_token_sha256"] != token_sha
+            ):
+                raise HubV2Error(
+                    "lease_lost",
+                    "Running steps cannot be reconciled without the active claim.",
+                    scope="run",
+                    retryable=True,
+                )
+            running = connection.execute(
+                """
+                SELECT step_id, checkpoint_state
+                FROM steps
+                WHERE run_id = ? AND status = 'running'
+                ORDER BY rowid
+                """,
+                (run_id,),
+            ).fetchall()
+            if not running:
+                current, steps = self._load_run(connection, run_id)
+                return {
+                    "run": self._public_run(current, steps),
+                    "requeued_step_ids": [],
+                    "outcome_unknown_step_ids": [],
+                }
+            requeued: list[str] = []
+            unknown: list[str] = []
+            for step in running:
+                checkpoint = _json_object(step["checkpoint_state"])
+                retry_safe = checkpoint.get("retry_safe") is True
+                status = "queued" if retry_safe else "outcome_unknown"
+                target = requeued if retry_safe else unknown
+                target.append(str(step["step_id"]))
+                connection.execute(
+                    """
+                    UPDATE steps
+                    SET status = ?, revision = revision + 1,
+                        checkpoint_state = ?, updated_at = ?
+                    WHERE run_id = ? AND step_id = ?
+                    """,
+                    (
+                        status,
+                        canonical_json(
+                            {
+                                **checkpoint,
+                                "phase": (
+                                    "coordinator_retry_queued" if retry_safe else "outcome_unknown"
+                                ),
+                                "error_code": str(reason_code or "run_internal_error"),
+                                "retry_safe": retry_safe,
+                            }
+                        ),
+                        now,
+                        run_id,
+                        step["step_id"],
+                    ),
+                )
+            next_revision = expected + 1
+            connection.execute(
+                "UPDATE runs SET revision = ?, updated_at = ? WHERE run_id = ?",
+                (next_revision, now, run_id),
+            )
+            self._append_event_tx(
+                connection,
+                run_id=run_id,
+                run_revision=next_revision,
+                event_type="running_steps_reconciled",
+                occurred_at=now,
+                details={
+                    "reason_code": str(reason_code or "run_internal_error"),
+                    "requeued_step_count": len(requeued),
+                    "outcome_unknown_step_count": len(unknown),
+                },
+            )
+            current, steps = self._load_run(connection, run_id)
+            return {
+                "run": self._public_run(current, steps),
+                "requeued_step_ids": requeued,
+                "outcome_unknown_step_ids": unknown,
+            }
+
     def requeue_failed_steps(
         self,
         run_id: str,
@@ -1484,6 +1639,37 @@ class HubStore:
                     scope="run",
                 )
             next_revision = expected + 1
+            cancelled_steps = 0
+            for step in connection.execute(
+                """
+                SELECT step_id, checkpoint_state
+                FROM steps
+                WHERE run_id = ? AND status IN ('queued', 'running')
+                """,
+                (run_id,),
+            ).fetchall():
+                checkpoint = {
+                    **_json_object(step["checkpoint_state"]),
+                    "phase": "cancelled",
+                    "retry_safe": False,
+                    "reason_code": "user_cancelled",
+                    "late_result_ignored": True,
+                }
+                connection.execute(
+                    """
+                    UPDATE steps
+                    SET status = 'cancelled', revision = revision + 1,
+                        checkpoint_state = ?, updated_at = ?
+                    WHERE run_id = ? AND step_id = ?
+                    """,
+                    (
+                        canonical_json(checkpoint),
+                        now,
+                        run_id,
+                        step["step_id"],
+                    ),
+                )
+                cancelled_steps += 1
             connection.execute(
                 """
                 UPDATE runs
@@ -1499,6 +1685,10 @@ class HubStore:
                 run_revision=next_revision,
                 event_type="run_cancelled",
                 occurred_at=now,
+                details={
+                    "reason_code": "user_cancelled",
+                    "cancelled_step_count": cancelled_steps,
+                },
             )
             updated, steps = self._load_run(connection, run_id)
             return self._public_run(updated, steps)
@@ -2326,7 +2516,138 @@ class HubStore:
             "expires_at": float(row["expires_at"]),
             "decided_at": (float(row["decided_at"]) if row["decided_at"] is not None else None),
             "consumed_at": (float(row["consumed_at"]) if row["consumed_at"] is not None else None),
+            "decision_source": (
+                str(row["decision_source"]) if row["decision_source"] is not None else None
+            ),
+            "decision_settings_revision": (
+                int(row["decision_settings_revision"])
+                if row["decision_settings_revision"] is not None
+                else None
+            ),
         }
+
+    def egress_settings(self) -> dict[str, Any]:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT revision, auto_approve, updated_at FROM egress_settings "
+                "WHERE singleton_id = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise HubV2Error(
+                "store_migration_failed",
+                "The global egress settings are unavailable.",
+                scope="store",
+            )
+        return {
+            "schema": "agent_hub_egress_settings_v1",
+            "revision": int(row["revision"]),
+            "auto_approve": bool(row["auto_approve"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def update_egress_settings(
+        self,
+        *,
+        auto_approve: bool,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        if not isinstance(auto_approve, bool):
+            raise HubV2Error(
+                "invalid_request",
+                "auto_approve must be a boolean.",
+                scope="egress",
+            )
+        revision = require_non_negative_int(
+            expected_revision,
+            field="expected_revision",
+        )
+        now = self._clock()
+        with self._transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE egress_settings
+                SET auto_approve = ?, revision = revision + 1, updated_at = ?
+                WHERE singleton_id = 1 AND revision = ?
+                """,
+                (int(auto_approve), now, revision),
+            )
+            if updated.rowcount != 1:
+                current = connection.execute(
+                    "SELECT revision FROM egress_settings WHERE singleton_id = 1"
+                ).fetchone()
+                raise HubV2Error(
+                    "egress_settings_revision_conflict",
+                    "The global egress setting changed. Refresh and try again.",
+                    scope="egress",
+                    retryable=True,
+                    safe_details={
+                        "expected_revision": revision,
+                        "current_revision": int(current["revision"]) if current else -1,
+                    },
+                )
+            row = connection.execute(
+                "SELECT revision, auto_approve, updated_at FROM egress_settings "
+                "WHERE singleton_id = 1"
+            ).fetchone()
+        assert row is not None
+        return {
+            "schema": "agent_hub_egress_settings_v1",
+            "revision": int(row["revision"]),
+            "auto_approve": bool(row["auto_approve"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def maybe_auto_approve_egress_review(self, review_id: str) -> dict[str, Any]:
+        review = require_identifier(review_id, field="review_id")
+        now = self._clock()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review,),
+            ).fetchone()
+            if row is None:
+                raise HubV2Error(
+                    "egress_review_not_found",
+                    "The egress review was not found.",
+                    scope="egress",
+                )
+            if row["status"] != "pending":
+                return self._public_egress_review(row)
+            setting = connection.execute(
+                "SELECT revision, auto_approve FROM egress_settings WHERE singleton_id = 1"
+            ).fetchone()
+            if setting is None or not bool(setting["auto_approve"]):
+                return self._public_egress_review(row)
+            if float(row["expires_at"]) <= now:
+                connection.execute(
+                    "UPDATE egress_reviews SET status = 'expired' WHERE review_id = ?",
+                    (review,),
+                )
+                raise HubV2Error(
+                    "egress_review_expired",
+                    "The egress review expired. Prepare the plan again.",
+                    scope="egress",
+                    retryable=True,
+                )
+            connection.execute(
+                """
+                UPDATE egress_reviews
+                SET status = 'approved', decided_at = ?,
+                    decision_source = 'global_auto_approve',
+                    decision_settings_revision = ?
+                WHERE review_id = ? AND status = 'pending'
+                """,
+                (now, int(setting["revision"]), review),
+            )
+            updated = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review,),
+            ).fetchone()
+        assert updated is not None
+        return self._public_egress_review(updated)
 
     @staticmethod
     def _require_sha256(value: Any, *, field: str) -> str:
@@ -2515,7 +2836,8 @@ class HubStore:
             connection.execute(
                 """
                 UPDATE egress_reviews
-                SET status = ?, decided_at = ?
+                SET status = ?, decided_at = ?, decision_source = 'local_gui',
+                    decision_settings_revision = NULL
                 WHERE review_id = ? AND status = 'pending'
                 """,
                 (target, now, review),
