@@ -1,11 +1,15 @@
 ---
-description: Plan and run an adaptive Agent Hub workflow with dependency-aware parallel execution
+description: Plan and start an Agent Hub v2 durable run with revision-fenced execution
 argument-hint: Goal to orchestrate
 ---
 
-Use the `adaptive-orchestrate` skill. First call `agent_hub_plan_workflow` for `$ARGUMENTS`, then pass the
-reviewed plan to `agent_hub_run_workflow` with `workflow_id="adaptive"`, the current repository's absolute
-`project_root`, `policy_mode="required"`, bounded `max_concurrency`, and bounded `max_leaf_calls`.
+Use the `adaptive-orchestrate` skill for `$ARGUMENTS`.
 
-Do not manually reorder providers or replace the planner's DAG with a fixed recipe. Report any failed,
-blocked, or human-review result without presenting it as completed.
+Call `agent_hub_plan` with the current repository's absolute `project_root` to prepare and review the
+egress proposal. Apply it to obtain `plan_v2`, then call `agent_hub_start` with the same `project_root`
+and a stable `idempotency_key`. Continue with the latest `expected_revision`. The receipt should return
+before provider generation finishes; use `agent_hub_get` and `agent_hub_events` to follow progress and
+`agent_hub_artifact` to retrieve results.
+
+Do not duplicate an active lease, silently retry `outcome_unknown`, or present failed, blocked, cancelled,
+unverified, or approval-waiting work as complete.

@@ -3,6 +3,7 @@
 > 이건 요약이 아니다. **다음 에이전트(어느 하네스든)를 위한 복구 기록**이다.
 > 실행 확정판은 [`EXECUTION-PLAN.md`](./EXECUTION-PLAN.md)(단계 R0~R6)다 — 이 파일 최상단 재기획 블록을
 > 읽은 뒤 그것부터 통독하라. 설계 근거·전 단계 스펙은 [`BUILD-SPEC.md`](./BUILD-SPEC.md)(특히 §0.0)에 있다.
+> 현재 작업 상태와 다음 한 걸음은 파일 맨 아래 `agent-hub:handoff:v1` managed block이 최신이다.
 
 - **원래 목표**
   여러 AI 코딩 에이전트(Claude Code · Codex/ChatGPT · Antigravity CLI · Grok · Cursor)를 한 사람이 쓸 때
@@ -11,7 +12,7 @@
 
 - **현재 단계**
 
-  **[2026-07-25 README workflow에서 발견한 Agent Hub 구조 문제 수정 — 이 블록이 최신]**
+  **[2026-07-25 README workflow에서 발견한 Agent Hub 구조 문제 수정 — 이전 기록]**
 
   - **원래 목표**: README 결과물보다 작성 과정에서 드러나는 Agent Hub 자체 문제를 재현하고,
     장시간 adaptive 실행·provider 상태 표현·생성 결과 검토 경로의 근본 원인을 수정합니다.
@@ -1139,26 +1140,17 @@
   context에 전달하는 실패 회귀 테스트부터 추가한다.
 
 <!-- agent-hub:handoff:v1:start -->
-## 2026-07-25 README 재작성과 문서 생성 경로 근본 개선
-
-- **원래 목표**: 재시작된 Agent Hub의 adaptive workflow로 저장소 근거를 다시 조사해 README를 완전히 재작성하고, 작성 과정에서 드러나는 Agent Hub 문제를 결과물보다 우선해 수정합니다.
-- **현재 단계**: adaptive run `d7c18dad90b3`은 revision 4, `completed`, leaf call 9회로 끝났고 생성된 README를 코드와 수동 대조해 보정했습니다. 발견한 구현 결함과 회귀 테스트까지 수정했으며 전체 검증을 통과했습니다. 작업 트리 변경은 아직 stage·commit·push하지 않았습니다.
+- **원래 목표**: Agent Hub v2 자체를 사용해 저장소 전체를 조사하고, 현재 코드에 근거한 한국어 README를 처음부터 다시 작성하며 과정에서 드러난 v2 실행 문제를 근본 수정합니다.
+- **현재 단계**: durable run `4092c3e4b769d13c`가 local inspect 2개, Claude 초안, GPT 검토, Claude 최종 작성까지 revision 12로 완료됐습니다. 결과를 코드와 대조해 `README.md`를 전면 재작성하고 전체 회귀 검증을 마쳤습니다. 사용자의 commit·push 요청에 따라 `origin/main`과 divergence 0을 확인하고 Agent Hub v2 changeset 86개 파일을 stage했습니다. 최종 배포 commit은 Git history와 사용자 인계 메시지에서 확인합니다.
 - **완료**:
-  - README를 특징·장점·설치·GUI/CLI 인증·provider별 소유권·공개 도구 37개·모델 카탈로그·adaptive workflow·HANDOFF·보안·저장소 구조·문제 해결 중심으로 새로 작성했습니다.
-  - durable fact pack이 공개 `agent_hub_*` 도구, `hubs/shared/skills`와 host별 `route-to`, 설치 console script와 저장소 script를 서로 구분해 수집하도록 수정했습니다.
-  - `agent_hub_update_settings`가 provider 생략이나 `auto`를 Gemini로 조용히 처리하지 않고 `claude|grok|gemini|gpt` 중 하나를 필수로 요구하도록 고쳤습니다. 네 provider의 설정 조회 공통 필드도 정렬했습니다.
-  - adaptive fallback 성공 시 다음 단계에 `actual_provider`와 실패한 시도의 안정적인 오류 코드만 전달하고, 예외 원문·prompt·자격 문자열·로컬 경로는 숨기도록 수정했습니다.
-  - Claude/Grok live 모델 목록과 통합 catalog 조회 실패가 예외 메시지 원문을 노출하지 않고 오류 코드와 예외 유형만 반환하도록 수정했습니다.
-  - 더 이상 배포하지 않는 standalone bundle script는 잘못된 bundle을 만들지 않고 `python -m build`, `agent-hub-setup` 안내로 종료하며, 네 legacy plugin README에 보관용 snapshot 표시를 추가했습니다.
-  - README adaptive 실행에서 `background=true` continue가 즉시 반환하고 같은 MCP의 `agent_hub_get_run`이 실행 중에도 응답하는 것을 확인했습니다. 동일한 약 10만 byte GPT review 입력과 high reasoning은 120초 진단 제한을 넘어 `codex_timeout`으로 재현됐습니다.
-  - Codex의 내부 `turn.failed`가 timeout·로그인·구독 문제를 보고할 때 이를 generic `codex_process_error`가 아니라 각각의 안정적인 오류 타입으로 분류하고, GPT leaf 공개 응답에는 예외 원문을 넣지 않도록 수정했습니다.
-- **미완**:
-  - 현재 Codex Desktop MCP process는 이번 세션 중 추가한 fallback provenance, catalog 오류 redaction, GPT 실패 분류 코드를 재시작 전까지 적재하지 않습니다.
-  - 기존 adaptive run에 기록된 `codex_process_error`의 원문은 의도적으로 보존하지 않아 이번에 재현한 120초 timeout과 완전히 같은 원인이었다고 소급 확정할 수 없습니다.
-  - adaptive wave 내부의 개별 step 진행률은 wave commit 전까지 `agent_hub_get_run`에 나타나지 않고 lease 상태만 보입니다.
-- **변경 파일**: `README.md`, `plugins/{antigravity-codex,claude-codex,grok-codex,orchestrate-codex}/README.md`, `scripts/build_plugin_bundle.py`, `src/agent_hub/operations.py`, `src/{claude_codex,grok_codex}/models.py`, `src/openai_codex/{client.py,mcp_server.py}`, `src/orchestrate_codex/gather.py`, `tests/agent_hub/{test_adaptive_orchestration.py,test_hub_plugins.py,test_provider_expansion.py}`, `tests/{claude_codex,grok_codex,openai_codex}/test_core.py`, `tests/orchestrate_codex/test_core.py`입니다.
-- **검증 실행 결과**: GPT 분류 포함 집중 회귀 `139 passed`; README 복사 가능 명령 회귀 `3 passed`; 최종 전체 pytest `736 passed, 2 skipped`; `agent_hub_verify(user_facing=true, doc_class=durable)`, `python -m orchestrate_codex.document_quality README.md`, `ruff check .`, `git diff --check`, `./scripts/check-sync.sh`, `./scripts/check-hub-plugins.sh`, `./scripts/test-phase1.sh` 모두 통과했습니다.
-- **현재 리스크**: adaptive 최종 합성은 이제 fallback provenance를 받지만 provider review 자체의 과신을 결정론적으로 판별하지는 못하므로 로컬 품질 검사와 코드 대조가 계속 필요합니다. 큰 GPT high-reasoning 검토는 짧은 caller timeout에서 정상적으로 시간 제한에 걸릴 수 있습니다. live catalog 표시, 연결됨 상태, 실제 생성 성공은 서로 다른 상태입니다.
-- **Do-Not-Repeat**: README 품질 검사만 통과했다고 기능 목록이 완전하거나 사실이라고 판단하지 마세요. `tests/agent_hub/test_readme_copy.py`가 요구하는 실제 설치·동의·로그인·plugin·빌드 명령과 공개 도구 37개를 생략하지 마세요. fallback review를 원래 provider의 독립 검토 성공으로 표현하거나 catalog fallback을 live 응답으로 표현하지 마세요. 예외 문자열 원문을 workflow dependency, provider leaf 응답, model catalog 응답, HANDOFF에 넣지 마세요.
-- **다음 한 걸음**: Codex Desktop을 완전히 종료한 뒤 다시 실행해 현재 MCP process가 `src/agent_hub/operations.py`와 `src/openai_codex/mcp_server.py`의 최신 schema·오류 분류 코드를 다시 적재하게 하세요.
+  - egress prepare/apply manifest `91c389675a3db95c8c36a67e85c506c4e75b2baa917a65f193f49f7e7643488f`와 plan `6b7f4af9c81244b68bddb071a56aabe74a755a90024dc4264348b52fedb39394`로 승인 경계를 지켰습니다. 최종 artifact는 `art_21c7f6cd6c790c1be290c89c`, content digest는 `8606ed42752d291ba8e55b9a29f7de9119a99998610dcc0c9634859084283fb5`이며 암호화·content authentication·non-empty 검증을 통과했습니다.
+  - `README.md`에 제품 목적과 장점, daemon/bridge/worker 구조, 설치·LaunchAgent·GUI 연결, provider capability, 정확한 14개 MCP 도구, durable 실행·routing·policy·egress·artifact·HANDOFF·CLI·SDK·v1 이전·제약을 코드 근거로 다시 작성했습니다.
+  - bridge의 고정 10초 timeout, planner prompt의 저장소 원문 중복, v1/v2 capability 불일치, 예산·fallback 전달 누락, egress proxy의 30초 relay timeout, provider 시간보다 짧은 60초 lease, 숨은 write rewrite 호출을 수정했습니다. 실패 응답은 safe reason code로 정규화했습니다.
+  - 첫 재현 run `be0d2593d1693ea1`은 정확히 60초 lease 만료 뒤 `outcome_unknown`이 된 증거를 보존한 뒤 revision 8에서 명시적으로 취소했습니다. 완료 run에는 accepted/rating 5 feedback을 기록했습니다.
+- **미완**: 팀 공유·SaaS와 experimental backend 구현은 기존 v2 제외 범위입니다. v2 local inspect는 현재 FTS5 발췌를 `partial` fact pack으로 반환하므로 넓은 문서 작업은 결정적 로컬 조사와 교차 확인이 계속 필요합니다.
+- **변경 파일**: `README.md`, `docs/architecture/agent-hub-v2-protocol.md`, `src/agent_hub/v2/` 전체, `src/agent_hub/{__init__.py,connect_service.py,local_setup.py,orchestrator.py}`, provider transport 보강, `hubs/{shared,codex,claude-code}/`, v2·GUI·plugin 회귀 테스트, `pyproject.toml`, `HANDOFF.md`를 포함한 총 86개 파일입니다.
+- **검증 실행 결과**: `agent_hub_verify(user_facing=true)` 경고 0건, `orchestrate_codex.document_quality README.md`와 `HANDOFF.md` 통과, 전체 pytest `803 passed, 2 skipped`, 전체 Ruff check, `scripts/check-sync.sh`, `scripts/check-hub-plugins.sh`, `python -m build`, 관련 변경 파일 Ruff format check, staged diff secret pattern scan과 `git diff --cached --check`가 통과했습니다. 전체 저장소 Ruff format check는 이번 변경과 무관한 기존 119개 파일의 포맷 차이 때문에 미통과 상태이며 해당 파일은 수정하지 않았습니다.
+- **현재 리스크**: Claude·Grok catalog의 `static_fallback`은 live catalog가 아니며 connected/catalog/generation 상태를 분리해야 합니다. `outcome_unknown`은 자동 재호출하면 안 됩니다. v2 local inspect의 `partial` fact pack만으로 저장소 전체 사실을 단정하면 안 됩니다.
+- **Do-Not-Repeat**: Agent Hub 생성 문서를 사실 검증 없이 그대로 저장하지 마세요. provider timeout만 늘리고 bridge·proxy·lease를 그대로 두지 마세요. v2 budget을 v1 planner로 전달하지 않은 채 기본 24 leaf 제한을 적용하지 마세요. 저장소 원문을 planner prompt에 다시 복제하지 마세요. hidden rewrite가 v2 leaf accounting을 우회하게 두지 마세요.
+- **다음 한 걸음**: 배포된 commit을 새 checkout에서 받아 `agent-hub doctor --project-root .`를 실행하고 daemon socket, DB schema, provider worker manifest가 모두 정상인지 확인하세요.
 <!-- agent-hub:handoff:v1:end -->

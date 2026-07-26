@@ -168,9 +168,14 @@ def _memory_server(repo_root: Path, *, include_type: bool) -> Dict[str, Any]:
     return server
 
 
-def _hub_server(repo_root: Path, *, include_type: bool) -> Dict[str, Any]:
+def _hub_server(
+    repo_root: Path,
+    *,
+    include_type: bool,
+    hub_executable: str = "agent-hub-mcp",
+) -> Dict[str, Any]:
     server: Dict[str, Any] = {
-        "command": str(repo_root / ".venv" / "bin" / "agent-hub-mcp"),
+        "command": str(repo_root / ".venv" / "bin" / hub_executable),
     }
     if include_type:
         server["type"] = "stdio"
@@ -185,6 +190,7 @@ def _merge_json_config(
     wrapper: bool,
     include_type: bool,
     gemini: bool = False,
+    hub_executable: str = "agent-hub-mcp",
 ) -> bytes:
     root = _json_object(existing, path=path)
     if gemini:
@@ -201,7 +207,11 @@ def _merge_json_config(
     else:
         servers = root
     servers["memory"] = _memory_server(repo_root, include_type=include_type)
-    servers["agent-hub"] = _hub_server(repo_root, include_type=include_type)
+    servers["agent-hub"] = _hub_server(
+        repo_root,
+        include_type=include_type,
+        hub_executable=hub_executable,
+    )
     return (
         json.dumps(root, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
     ).encode("utf-8")
@@ -242,6 +252,7 @@ def _render_codex_config(
     *,
     path: Path,
     repo_root: Path,
+    hub_executable: str = "agent-hub-mcp",
 ) -> bytes:
     if existing is None:
         text = ""
@@ -253,7 +264,7 @@ def _render_codex_config(
     prefix = _strip_managed_toml(text)
     memory_config = repo_root / "memory" / ".basic-memory"
     memory_home = repo_root / "memory" / "data"
-    hub_command = repo_root / ".venv" / "bin" / "agent-hub-mcp"
+    hub_command = repo_root / ".venv" / "bin" / hub_executable
     block = "\n".join(
         (
             MANAGED_TOML_BEGIN,
@@ -283,9 +294,15 @@ def _render_one(
     existing: bytes | None,
     target: Path,
     repo_root: Path,
+    hub_executable: str = "agent-hub-mcp",
 ) -> bytes:
     if relative_path == ".codex/config.toml":
-        return _render_codex_config(existing, path=target, repo_root=repo_root)
+        return _render_codex_config(
+            existing,
+            path=target,
+            repo_root=repo_root,
+            hub_executable=hub_executable,
+        )
     if relative_path == ".cursor/mcp.json":
         return _merge_json_config(
             existing,
@@ -293,6 +310,7 @@ def _render_one(
             repo_root=repo_root,
             wrapper=True,
             include_type=True,
+            hub_executable=hub_executable,
         )
     if relative_path == ".gemini/settings.json":
         return _merge_json_config(
@@ -302,6 +320,7 @@ def _render_one(
             wrapper=True,
             include_type=False,
             gemini=True,
+            hub_executable=hub_executable,
         )
     if relative_path == ".mcp.json":
         return _merge_json_config(
@@ -310,6 +329,7 @@ def _render_one(
             repo_root=repo_root,
             wrapper=True,
             include_type=True,
+            hub_executable=hub_executable,
         )
     if relative_path == "hubs/claude-code/.mcp.json":
         return _merge_json_config(
@@ -318,6 +338,7 @@ def _render_one(
             repo_root=repo_root,
             wrapper=True,
             include_type=False,
+            hub_executable=hub_executable,
         )
     if relative_path == "hubs/codex/.mcp.json":
         return _merge_json_config(
@@ -326,6 +347,7 @@ def _render_one(
             repo_root=repo_root,
             wrapper=False,
             include_type=False,
+            hub_executable=hub_executable,
         )
     raise SetupError(f"unsupported local config target: {relative_path}")
 
@@ -334,7 +356,10 @@ def plan_setup(
     repo_root: str | os.PathLike[str],
     *,
     target_root: str | os.PathLike[str] | None = None,
+    hub_executable: str = "agent-hub-mcp",
 ) -> SetupPlan:
+    if hub_executable not in {"agent-hub-mcp", "agent-hub-v2-mcp"}:
+        raise SetupError("unsupported Agent Hub MCP executable")
     source = _canonical_directory(repo_root, label="repo_root")
     destination = _canonical_directory(
         target_root if target_root is not None else source,
@@ -353,6 +378,7 @@ def plan_setup(
             existing=existing,
             target=target,
             repo_root=source,
+            hub_executable=hub_executable,
         )
         expected_sha = _digest(existing) if existing is not None else None
         status = (

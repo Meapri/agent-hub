@@ -1,0 +1,28 @@
+{
+  "schema": "workflow_v2",
+  "id": "release",
+  "version": "1",
+  "description": "Inspect release evidence, review risks, and draft release notes.",
+  "intent": "Prepare a release from verified repository evidence.",
+  "capability": "write",
+  "routing_mode": "shadow",
+  "steps": [
+    {
+      "id": "inspect",
+      "capability": "inspect",
+      "instruction": "Collect version, change, test, and compatibility evidence."
+    },
+    {
+      "id": "review",
+      "capability": "review",
+      "depends_on": ["inspect"],
+      "instruction": "Review release evidence for blockers and rollback risks."
+    },
+    {
+      "id": "draft",
+      "capability": "write",
+      "depends_on": ["review"],
+      "instruction": "Draft release notes using only verified evidence."
+    }
+  ]
+}

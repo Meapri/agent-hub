@@ -1,15 +1,16 @@
 ---
-description: Ask Agent Hub's planner LLM for a validated adaptive DAG without executing it
+description: Prepare an Agent Hub v2 egress manifest and validated plan without executing it
 argument-hint: Goal to plan
 ---
 
-Call `agent_hub_plan_workflow` with:
+Use the `adaptive-orchestrate` skill for `$ARGUMENTS`.
 
-- `workflow_id`: `adaptive`
-- `prompt`: `$ARGUMENTS`
-- `project_root`: the current repository's absolute path
-- `policy_mode`: `required`
+1. Call `agent_hub_plan` with `mode="prepare"`, a `task_v2`, the current repository's absolute
+   `project_root`, and only the source paths required for the goal.
+2. Show the egress entries, redactions, token budget, manifest digest, proposal digest, and policy revision.
+3. Do not call `mode="apply"` until the proposal is approved.
+4. If approved, call apply with the unchanged proposal, `proposal_sha256`, and
+   `expected_policy_revision`; show the resulting `plan_v2` DAG, verifier, provider choices, fallbacks,
+   routing mode, and digests.
 
-Show the returned steps as a dependency graph or compact table. Explain which steps can run concurrently,
-which provider the planner selected, fallbacks, call budget, `plan_sha256`, and policy provenance. Do not
-execute the plan unless the user explicitly asks to continue.
+Do not start the run unless the user explicitly asks to continue.

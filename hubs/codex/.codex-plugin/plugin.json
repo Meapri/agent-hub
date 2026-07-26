@@ -1,21 +1,21 @@
 {
   "name": "agent-hub",
-  "version": "1.4.3",
-  "description": "Use one Agent Hub MCP for LLM-planned adaptive workflows, cross-model consistency, shared memory, and Git-artifact handoff in Codex.",
+  "version": "2.0.0",
+  "description": "Use the Agent Hub v2 local daemon for durable multi-model runs, policy-fenced context egress, encrypted artifacts, and Git handoff in Codex.",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "homepage": "https://github.com/Meapri/agent-hub",
   "repository": "https://github.com/Meapri/agent-hub",
   "interface": {
     "displayName": "Agent Hub",
-    "shortDescription": "Plan and run consistent multi-model workflows",
-    "longDescription": "Agent Hub lets Codex use Claude, Grok, Gemini, and GPT through one provider-neutral MCP, decompose goals into validated dependency DAGs, run independent steps concurrently, and fail closed on policy, provider, or decision disagreement. Shared memory and Git handoffs keep work portable across host apps.",
+    "shortDescription": "Run durable policy-fenced multi-model workflows",
+    "longDescription": "Agent Hub v2 lets Codex use Claude, Grok, Gemini, and GPT through a 14-tool provider-neutral MCP bridge backed by a long-running local daemon. It validates plans locally, keeps revision-fenced run checkpoints in SQLite, isolates provider workers, encrypts durable artifacts, and preserves portable Git handoffs.",
     "developerName": "Meapri",
     "category": "Developer Tools",
     "capabilities": ["Interactive", "Read", "Write"],
     "defaultPrompt": [
-      "Use Agent Hub to plan this task, show which steps can run concurrently, then execute the reviewed plan",
-      "Compare the default Claude, Grok, and Gemini set with a fail-closed consistency gate; use provider=all when GPT should participate"
+      "Use Agent Hub to prepare an egress manifest and a validated plan for this task, then start the reviewed durable run",
+      "Show provider readiness, catalog source, generation verification state, and the routing decision before execution"
     ]
   },
   "author": { "name": "Meapri" },

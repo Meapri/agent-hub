@@ -1,0 +1,22 @@
+{
+  "schema": "workflow_v2",
+  "id": "code-review",
+  "version": "1",
+  "description": "Inspect repository evidence, review the change, then produce a verified summary.",
+  "intent": "Review a code change using repository evidence.",
+  "capability": "review",
+  "routing_mode": "shadow",
+  "steps": [
+    {
+      "id": "inspect",
+      "capability": "inspect",
+      "instruction": "Collect the relevant repository facts and changed code."
+    },
+    {
+      "id": "review",
+      "capability": "review",
+      "depends_on": ["inspect"],
+      "instruction": "Review the collected evidence for correctness and regressions."
+    }
+  ]
+}

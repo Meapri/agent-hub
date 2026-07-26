@@ -98,6 +98,15 @@ def test_validator_accepts_llm_chosen_dag():
     assert all(step["reasoning_effort"] == "medium" for step in plan["steps"])
 
 
+def test_planner_prompt_marks_capability_specific_fields_as_omittable():
+    prompt = orchestrator.planner_prompt("Draft a document.")
+
+    assert '"quality_rewrite_attempts": 2' not in prompt
+    assert "Omit every capability-specific field" in prompt
+    assert "quality_rewrite_attempts is only for write" in prompt
+    assert "participants, min_successes, and decision_labels are only for compare" in prompt
+
+
 def test_validator_counts_compare_participants_as_provider_calls():
     with pytest.raises(ValueError, match="3 calls"):
         orchestrator.validate_plan(_compare_plan(), max_calls=2)
@@ -462,10 +471,10 @@ def test_scheduler_turns_provider_timeouts_into_resumable_timeout(provider_error
     attempts = result["results"]["answer"]["attempts"]
     assert attempts == [
         {
-                "provider": "claude",
-                "success": False,
-                "error": "provider_call_timeout",
-                "provider_calls": 1,
+            "provider": "claude",
+            "success": False,
+            "error": "provider_call_timeout",
+            "provider_calls": 1,
         }
     ]
     assert "official Codex timed out" not in json.dumps(result)
@@ -765,10 +774,7 @@ def test_dependency_context_discloses_redacted_fallback_provenance():
         }
     )
 
-    assert (
-        "actual_provider=gemini; failed_attempts=gpt:codex_process_error"
-        in rendered
-    )
+    assert "actual_provider=gemini; failed_attempts=gpt:codex_process_error" in rendered
     assert "actual_provider=claude; failed_attempts=gpt:operation_error" in rendered
     assert "abc123" not in rendered
     assert "/private/path" not in rendered
@@ -918,9 +924,7 @@ def test_adaptive_run_clamps_each_call_to_remaining_workflow_budget(tmp_path, mo
 def test_adaptive_run_schema_exposes_end_to_end_timeout():
     specs = {item["name"]: item for item in operations.tool_definitions()}
     timeout = specs["agent_hub_run_workflow"]["inputSchema"]["properties"]["workflow_timeout"]
-    per_call = specs["agent_hub_run_workflow"]["inputSchema"]["properties"][
-        "per_call_timeout"
-    ]
+    per_call = specs["agent_hub_run_workflow"]["inputSchema"]["properties"]["per_call_timeout"]
     repairs = specs["agent_hub_plan_workflow"]["inputSchema"]["properties"][
         "planner_repair_attempts"
     ]
@@ -1898,13 +1902,9 @@ def test_adaptive_executor_surfaces_successful_step_warnings():
         invoke=lambda *_args, **_kwargs: {
             "success": True,
             "text": "done",
-            "warnings": [
-                "automatic_reasoning_effort_omitted:claude:claude-haiku-test"
-            ],
+            "warnings": ["automatic_reasoning_effort_omitted:claude:claude-haiku-test"],
         },
         max_calls=4,
     )
 
-    assert result["warnings"] == [
-        "automatic_reasoning_effort_omitted:claude:claude-haiku-test"
-    ]
+    assert result["warnings"] == ["automatic_reasoning_effort_omitted:claude:claude-haiku-test"]

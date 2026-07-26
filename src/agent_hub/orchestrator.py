@@ -31,9 +31,7 @@ CAPABILITY_PROVIDERS: Dict[str, Sequence[str]] = {
     "compare": ("multiple",),
     "verify": ("local",),
     "release_snapshot": ("local",),
-    "release_draft": provider_registry.providers_supporting(
-        "release_draft", planner_only=True
-    ),
+    "release_draft": provider_registry.providers_supporting("release_draft", planner_only=True),
 }
 _PROVIDER_CAPABILITY = {
     "chat": "chat",
@@ -276,12 +274,7 @@ Contract:
       "fallback_providers": ["compatible alternatives, if useful"],
       "instruction": "specific task for this step",
       "reasoning_effort": "low | medium | high",
-      "investigation_depth": "shallow | standard | deep (inspect_codebase only)",
-      "quality_rewrite_attempts": 2,
-      "final": false,
-      "participants": ["only for compare: 2-3 model providers"],
-      "min_successes": 2,
-      "decision_labels": ["only for a closed decision compare: 2-20 labels"]
+      "final": false
     }}
   ]
 }}
@@ -295,8 +288,13 @@ Rules:
   evidence that a generated artifact was reviewed.
 - Choose reasoning_effort per step. Use low for mechanical work, medium for normal analysis, and high
   for ambiguous architecture, broad codebase investigation, difficult review, or final synthesis.
-- Choose investigation_depth only for inspect_codebase. Use deep when a durable repository document
-  must cover entry points, public schemas, configuration, tests, generated docs, and Git state.
+- Omit every capability-specific field unless the step has that exact capability:
+  investigation_depth is only for inspect_codebase; quality_rewrite_attempts is only for write;
+  participants, min_successes, and decision_labels are only for compare.
+- For inspect_codebase, choose investigation_depth from shallow, standard, or deep. Use deep when a
+  durable repository document must cover entry points, public schemas, configuration, tests,
+  generated docs, and Git state.
+- For write, quality_rewrite_attempts must be an integer from 0 through 2.
 - Make inspect_codebase instructions name the relevant subsystems, paths, commands, or symbols that
   must be proven. The gatherer uses those details for a broad scan followed by focused deep reads.
 - Require file:line evidence for repository claims and distinguish complete files from partial excerpts.
@@ -672,10 +670,7 @@ def execute_plan(
                     if isinstance(raw_error, Mapping)
                     else raw_error
                 )
-                if (
-                    _is_timeout_error(raw_error)
-                    and response_error != PROVIDER_CALL_DEADLINE_ERROR
-                ):
+                if _is_timeout_error(raw_error) and response_error != PROVIDER_CALL_DEADLINE_ERROR:
                     response_error = PROVIDER_CALL_TIMEOUT_ERROR
                 ok = bool(response.get("success", not response.get("error")))
                 attempts.append(
@@ -695,9 +690,7 @@ def execute_plan(
                         "text": str(response.get("text") or ""),
                         "attempts": attempts,
                         "data": response.get("data") or response,
-                        "warnings": [
-                            str(item) for item in response.get("warnings") or []
-                        ],
+                        "warnings": [str(item) for item in response.get("warnings") or []],
                     }
             except ProviderCallDeadlineExceeded:
                 attempts.append(
@@ -720,11 +713,7 @@ def execute_plan(
                 )
                 break
             except Exception as exc:  # noqa: BLE001 - fallback is part of the contract
-                error = (
-                    PROVIDER_CALL_TIMEOUT_ERROR
-                    if _is_timeout_error(exc)
-                    else str(exc)
-                )
+                error = PROVIDER_CALL_TIMEOUT_ERROR if _is_timeout_error(exc) else str(exc)
                 attempts.append(
                     {
                         "provider": provider,
@@ -885,9 +874,7 @@ def execute_plan(
     final = results[normalized["final_step"]]
     warnings = list(
         dict.fromkeys(
-            str(warning)
-            for result in results.values()
-            for warning in result.get("warnings") or []
+            str(warning) for result in results.values() for warning in result.get("warnings") or []
         )
     )
     return {

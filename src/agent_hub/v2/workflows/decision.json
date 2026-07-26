@@ -1,0 +1,22 @@
+{
+  "schema": "workflow_v2",
+  "id": "decision",
+  "version": "1",
+  "description": "Gather evidence, compare options, and return an explicit decision.",
+  "intent": "Make an evidence-backed decision.",
+  "capability": "decide",
+  "routing_mode": "shadow",
+  "steps": [
+    {
+      "id": "evidence",
+      "capability": "inspect",
+      "instruction": "Collect evidence and constraints for the decision."
+    },
+    {
+      "id": "decision",
+      "capability": "decide",
+      "depends_on": ["evidence"],
+      "instruction": "Compare the options and make the decision."
+    }
+  ]
+}

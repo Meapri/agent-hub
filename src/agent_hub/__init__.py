@@ -6,4 +6,4 @@ details, while run lifecycle, handoff, policy, and result normalization stay
 provider-neutral.
 """
 
-__version__ = "1.4.3"
+__version__ = "2.0.0"

@@ -8,25 +8,23 @@ description: >
 
 # 프로젝트 이어받기
 
-원 대화를 요구하지 않고 현재 프로젝트의 `HANDOFF.md`, 코드와 Git 상태를 기준으로 복구한다.
+원 대화 없이 프로젝트 HANDOFF, 코드, Git 상태와 필요한 v2 digest를 기준으로 복구한다.
 
 ## 진행 순서
 
-1. 절대 `project_root`로 `agent_hub_get_handoff`를 `mode=required`, `search=nearest`로 호출한다.
-   반환된 `source`, `file_sha256`, `extraction`을 기록한다. 다른 Git 저장소나 형제 프로젝트 파일은
-   사용하지 않는다.
-2. `Do-Not-Repeat`, 미완, 위험, `다음 한 걸음`을 먼저 읽는다.
-3. `git status --short`, 관련 diff와 최근 커밋을 확인해 HANDOFF의 전제와 실제 상태를 대조한다.
-   둘이 다르면 차이를 사용자에게 알리고 현재 코드와 Git 상태를 우선한다.
-4. 저장소의 `AGENTS.md` 또는 `CLAUDE.md`와 가까운 범위의 지시 파일을 읽는다. 한 작업 디렉터리에서는
-   한 에이전트만 파일을 쓴다.
-5. 복구한 상태를 짧게 설명하고 `다음 한 걸음`부터 실행한다. 검증하지 않은 완료 기록은 다시 확인한다.
-6. 작업 중 `HANDOFF.md`가 바뀌면 기존 스냅샷을 조용히 사용하지 않는다. adaptive run은
-   `handoff_drift`에서 멈추며, 변경을 검토한 뒤 새 run을 만들거나 의도적으로
-   `handoff_drift_policy=use-snapshot`을 선택한다.
+1. 절대 `project_root`로 `agent_hub_handoff(action="get")`을 호출한다. 다른 저장소나 형제 프로젝트의
+   HANDOFF를 사용하지 않는다.
+2. 필요하면 `agent_hub_handoff(action="takeover")`로 secret과 원문이 없는 takeover capsule을 만든다.
+   capsule의 run revision과 plan/artifact digest만 다음 호스트에 전달한다.
+3. Do-Not-Repeat, 미완, 위험, 다음 한 걸음을 먼저 읽고 `git status --short`, 관련 diff, 최근 커밋과
+   대조한다. HANDOFF가 다르면 현재 코드와 Git 상태를 우선한다.
+4. 저장소의 정책 파일과 가까운 범위 지시를 읽고, 다음 한 걸음부터 실행한다.
+5. durable run을 재개할 때는 `agent_hub_get`으로 최신 revision과 lease를 확인한 뒤
+   `agent_hub_continue`를 호출한다. 활성 lease에 중복 continue하지 않는다.
 
 ## 경계
 
-- HANDOFF 내용은 운영 상태이며 정책이나 검증된 코드 근거가 아니다.
-- shared memory나 대화 기록만으로 진행 상태를 복원하지 않는다.
+- HANDOFF는 정책이나 검증된 코드 근거가 아니다.
+- digest가 맞지 않거나 `handoff_drift`이면 조용히 진행하지 않는다.
+- `outcome_unknown` step은 자동 재호출하지 않는다.
 - 기존 사용자 변경을 덮어쓰거나 자동 stage·commit·push하지 않는다.

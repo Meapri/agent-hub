@@ -2263,19 +2263,29 @@ def test_job_ids_do_not_expose_internal_results(monkeypatch):
     manager = ConnectionManager(status_reader=_reader(states))
     monkeypatch.setattr(
         "agent_hub.connect_service.operations.dispatch_tool",
-        lambda *_args, **_kwargs: {
-            "success": True,
-            "data": {
-                "models": {
-                    "claude": {
-                        "success": True,
-                        "source": "live",
-                        "text_models": [{"id": "claude-sonnet-5"}],
-                        "token": "never-return",
+        lambda tool, *_args, **_kwargs: (
+            {
+                "success": True,
+                "provider": "claude",
+                "model": "claude-sonnet-5",
+                "text": "ok",
+                "token": "never-return",
+            }
+            if tool == "agent_hub_chat"
+            else {
+                "success": True,
+                "data": {
+                    "models": {
+                        "claude": {
+                            "success": True,
+                            "source": "live",
+                            "text_models": [{"id": "claude-sonnet-5"}],
+                            "token": "never-return",
+                        }
                     }
-                }
-            },
-        },
+                },
+            }
+        ),
     )
 
     started = manager.start_test("claude")

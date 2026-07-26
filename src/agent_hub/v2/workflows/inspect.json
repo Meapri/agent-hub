@@ -1,0 +1,16 @@
+{
+  "schema": "workflow_v2",
+  "id": "inspect",
+  "version": "1",
+  "description": "Build a bounded local index and return a cited fact pack.",
+  "intent": "Inspect project facts without external embeddings.",
+  "capability": "inspect",
+  "routing_mode": "shadow",
+  "steps": [
+    {
+      "id": "inspect",
+      "capability": "inspect",
+      "instruction": "Collect complete project facts with file and line provenance."
+    }
+  ]
+}

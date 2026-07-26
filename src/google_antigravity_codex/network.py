@@ -11,6 +11,27 @@ import urllib.request
 from .security import env_flag
 
 
+def trusted_proxy_handler() -> urllib.request.ProxyHandler:
+    """Honor only the localhost proxy injected by the Agent Hub worker sandbox."""
+
+    value = os.getenv("AGENT_HUB_EGRESS_PROXY", "").strip()
+    if not value:
+        return urllib.request.ProxyHandler({})
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost"}
+        or parsed.port is None
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return urllib.request.ProxyHandler({})
+    return urllib.request.ProxyHandler({"http": value, "https": value})
+
+
 def validate_public_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     allowed_schemes = {"https"}
@@ -42,7 +63,7 @@ class PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
 def public_url_opener() -> urllib.request.OpenerDirector:
     # Ignore ambient proxy variables so a configured internal proxy cannot turn a
     # public-looking URL into access to an internal destination.
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), PublicRedirectHandler())
+    return urllib.request.build_opener(trusted_proxy_handler(), PublicRedirectHandler())
 
 
 def max_download_bytes() -> int:

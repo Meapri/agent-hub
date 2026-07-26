@@ -1,26 +1,36 @@
 ---
 name: route-to
 description: >
-  현재 하위 작업을 다른 provider 모델(Claude/Grok/Gemini/GPT)이나 다단계 오케스트레이션에 위임하고 결과를
-  회수한다. Trigger when the user wants a second opinion, a specific provider, cross-model review, a
-  multi-step doc/change recipe, or says "Claude/Grok/Gemini/GPT에게 물어봐", "다른 모델로 돌려봐".
+  현재 하위 작업을 Claude, Grok, Gemini, GPT 중 지정한 provider나 지능형 오케스트레이터에 위임한다.
+  Trigger when the user asks for a specific provider, a second opinion, cross-model review, or says
+  "Claude/Grok/Gemini/GPT에게 물어봐", "다른 모델로 돌려봐".
 ---
+
+# Provider 위임
+
+모든 provider 접근은 Agent Hub v2의 동일한 task 계약을 사용한다.
 
 ## 위임 경로
 
-모든 모델 접근과 다단계 조율은 `agent-hub` MCP 하나를 사용한다.
+- 짧은 inline 요청은 `agent_hub_execute`에 capability와 `provider`를 명시한다.
+- 저장소 파일이나 기존 artifact가 필요한 작업은 `agent_hub_plan` prepare/apply를 거쳐 egress를
+  검토한 뒤 `agent_hub_start`로 실행한다.
+- provider를 고정하기 전 `agent_hub_catalog`에서 model capability와 auth/catalog/generation 상태를
+  확인한다.
+- 결과 본문은 `agent_hub_artifact`, 진행 상태는 `agent_hub_events`로 분리해 읽는다.
 
-- **단발 위임:** `agent_hub_chat`, `agent_hub_search`, `agent_hub_write`,
-  `agent_hub_generate_image` 중 작업에 맞는 도구를 호출한다.
-- **LLM 판단이 필요한 다단계 위임:** `agent_hub_plan_workflow`를 `workflow_id="adaptive"`로 호출해
-  planner LLM이 provider와 의존성 DAG를 정하게 한다. 검토한 plan은 `agent_hub_run_workflow`로 실행한다.
-- **재현성이 우선인 정형 작업:** 기존 정적 workflow를 사용한다.
-- **검증:** 결과는 `agent_hub_verify`로 확인한다.
-- provider별 동의와 OAuth 검사는 내부 adapter가 계속 강제한다.
+## 실행 원칙
 
-## Steps
-1. 단발이면 알맞은 `agent_hub_*` 도구를 사용한다. 복잡한 다단계 작업은 호스트가 순서를 정하지 말고
-   adaptive plan을 먼저 받는다.
-2. 위임 프롬프트엔 필요한 컨텍스트(파일 경로·목표·제약)만 담는다 — 과대 패킷 금지.
-3. 모델 호출은 **provider 과금/구독 소진 상태 변경**이다. 대량·반복 호출 전엔 목적을 분명히 한다.
-4. 회수한 결과를 원 작업에 반영하고, 중요한 결정·교훈은 shared memory(`mcp__memory__*`)에 기록한다.
+1. 사용자 요청에 특정 provider가 있으면 그 선택을 유지하고 fallback 여부를 constraint에 명시한다.
+2. provider를 지정하지 않은 복잡한 작업은 planner와 router가 정책 범위 안에서 정하게 한다.
+3. 저장소나 artifact를 보낼 때는 승인된 egress manifest 이상으로 컨텍스트를 추가하지 않는다.
+4. 결과의 실제 provider/model, routing mode, 표본 수, verification과 artifact digest를 보고한다.
+5. 모델 호출은 구독이나 API 사용량을 소모한다. 대량 반복이나 opt-in canary는 사용자 승인 범위에서만
+   실행한다.
+
+## 경계
+
+- connected, live catalog, verified generation을 같은 상태로 취급하지 않는다.
+- placeholder나 내부 model ID를 generation 요청에 전달하지 않는다.
+- prompt, output, credential, raw exception을 event나 HANDOFF에 복사하지 않는다.
+- LLM 자기 평가만으로 provider 품질을 학습시키지 않는다.

@@ -19,7 +19,7 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Any, Callable, Collection, Dict
+from typing import Any, Callable, Collection, Dict, Mapping
 import unicodedata
 import urllib.parse
 
@@ -36,6 +36,10 @@ from grok_codex import oauth_login as grok_oauth
 from grok_codex import security as grok_security
 from openai_codex import models as openai_models
 from openai_codex import security as openai_security
+
+from .v2.contracts import TASK_SCHEMA
+from .v2.daemon import HubDaemonClient
+from .v2.errors import HubV2Error
 
 from . import operations
 from .provider_registry import AVAILABLE_PROVIDERS
@@ -253,6 +257,30 @@ def _login_url(value: Any, *, hosts: Collection[str]) -> str:
 
 
 def _status_reader(provider: str = "all", *, probe: bool = False) -> Dict[str, Any]:
+    try:
+        response = HubDaemonClient().request(
+            "tools/call",
+            {
+                "name": "agent_hub_status",
+                "arguments": {"probe": probe},
+            },
+            timeout=15.0,
+        )
+        data = response.get("data") if isinstance(response, dict) else None
+        provider_rows = data.get("providers") if isinstance(data, dict) else None
+        if isinstance(provider_rows, dict):
+            selected = provider_rows if provider == "all" else {
+                provider: provider_rows.get(provider, {})
+            }
+            states = {
+                provider_id: dict(row.get("state") or {})
+                for provider_id, row in selected.items()
+                if isinstance(row, dict)
+            }
+            if states:
+                return {"providers": states, "runtime": "agent-hubd"}
+    except HubV2Error:
+        pass
     result = operations.dispatch_tool(
         "agent_hub_status",
         {"provider": provider, "probe": probe},
@@ -261,6 +289,18 @@ def _status_reader(provider: str = "all", *, probe: bool = False) -> Dict[str, A
     if not isinstance(data, dict) or not isinstance(data.get("providers"), dict):
         raise ConnectionError("제공자 상태를 읽지 못했습니다.", code="status_unavailable")
     return data
+
+
+def _daemon_tool(name: str, arguments: Mapping[str, Any]) -> Dict[str, Any] | None:
+    try:
+        result = HubDaemonClient().request(
+            "tools/call",
+            {"name": name, "arguments": dict(arguments)},
+            timeout=1810.0,
+        )
+    except HubV2Error:
+        return None
+    return result if isinstance(result, dict) else None
 
 
 class ConnectionManager:
@@ -273,6 +313,7 @@ class ConnectionManager:
         command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self._status_reader = status_reader
+        self._use_daemon = status_reader is _status_reader
         self._command_runner = command_runner
         self._jobs: Dict[str, ConnectionJob] = {}
         self._lock = threading.RLock()
@@ -289,6 +330,13 @@ class ConnectionManager:
             provider: 0 for provider in AVAILABLE_PROVIDERS
         }
         self._closed = False
+
+    def _daemon_call(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+    ) -> Dict[str, Any] | None:
+        return _daemon_tool(name, arguments) if self._use_daemon else None
 
     def status(self, provider: str = "all", *, probe: bool = False) -> Dict[str, Any]:
         selected = "all" if provider == "all" else _provider(provider)
@@ -768,16 +816,49 @@ class ConnectionManager:
         live_unavailable = bool(refresh and not state["ready"])
         refreshed = False
         if refresh and state["ready"]:
-            result = operations.dispatch_tool(
-                "agent_hub_list_models",
-                {"provider": provider, "probe": True},
+            daemon_result = self._daemon_call(
+                "agent_hub_catalog",
+                {"provider": provider, "refresh": True},
             )
-            data = result.get("data") if isinstance(result, dict) else None
-            live_payload = (
-                (data.get("models") or {}).get(provider)
-                if isinstance(data, dict) and isinstance(data.get("models"), dict)
+            daemon_data = (
+                daemon_result.get("data")
+                if isinstance(daemon_result, dict)
                 else None
             )
+            daemon_entry = (
+                (daemon_data.get("providers") or {}).get(provider)
+                if isinstance(daemon_data, dict)
+                and isinstance(daemon_data.get("providers"), dict)
+                else None
+            )
+            worker_result = (
+                daemon_entry.get("result")
+                if isinstance(daemon_entry, dict)
+                else None
+            )
+            worker_data = (
+                worker_result.get("data")
+                if isinstance(worker_result, dict)
+                else None
+            )
+            live_payload = (
+                (worker_data.get("models") or {}).get(provider)
+                if isinstance(worker_data, dict)
+                and isinstance(worker_data.get("models"), dict)
+                else None
+            )
+            if live_payload is None:
+                result = operations.dispatch_tool(
+                    "agent_hub_list_models",
+                    {"provider": provider, "probe": True},
+                )
+                data = result.get("data") if isinstance(result, dict) else None
+                live_payload = (
+                    (data.get("models") or {}).get(provider)
+                    if isinstance(data, dict)
+                    and isinstance(data.get("models"), dict)
+                    else None
+                )
             if _live_model_payload(provider, live_payload):
                 payload = live_payload
                 refreshed = True
@@ -1603,7 +1684,50 @@ class ConnectionManager:
                 )
                 return
         try:
-            if provider == "gemini":
+            daemon_result = self._daemon_call(
+                "agent_hub_execute",
+                {
+                    "provider": provider,
+                    "model": selected_model,
+                    "task": {
+                        "schema": TASK_SCHEMA,
+                        "intent": "Return a short connection acknowledgement.",
+                        "capability": "chat",
+                        "inline_input": GEMINI_CONNECTION_TEST_PROMPT,
+                        "constraints": {
+                            "provider_allowlist": [provider],
+                            "max_tokens": GEMINI_CONNECTION_TEST_MAX_TOKENS,
+                            "timeout_seconds": GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS,
+                        },
+                        "retention": "ephemeral",
+                    },
+                },
+            )
+            daemon_data = (
+                daemon_result.get("data")
+                if isinstance(daemon_result, dict)
+                else None
+            )
+            execution_result = (
+                daemon_data.get("result")
+                if isinstance(daemon_data, dict)
+                else None
+            )
+            generated = bool(
+                daemon_result
+                and daemon_result.get("success")
+                and isinstance(daemon_data, dict)
+                and daemon_data.get("provider") == provider
+                and isinstance(execution_result, dict)
+                and str(
+                    execution_result.get("text")
+                    or (execution_result.get("data") or {}).get("text")
+                    or ""
+                ).strip()
+            )
+            if daemon_result is not None:
+                success = generated
+            elif provider == "gemini":
                 generated_result = operations.dispatch_tool(
                     "agent_hub_chat",
                     {
@@ -1635,17 +1759,23 @@ class ConnectionManager:
                 )
                 success = generated
             else:
-                result = operations.dispatch_tool(
-                    "agent_hub_list_models",
-                    {"provider": provider, "probe": True},
+                generated_result = operations.dispatch_tool(
+                    "agent_hub_chat",
+                    {
+                        "provider": provider,
+                        "model": selected_model,
+                        "prompt": GEMINI_CONNECTION_TEST_PROMPT,
+                        "temperature": 0.0,
+                        "max_tokens": GEMINI_CONNECTION_TEST_MAX_TOKENS,
+                        "stream": False,
+                        "timeout_sec": GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS,
+                    },
                 )
-                payload = (
-                    (result.get("data") or {}).get("models", {}).get(provider, {})
+                generated = bool(
+                    generated_result.get("success")
+                    and str(generated_result.get("text") or "").strip()
                 )
-                success = bool(result.get("success")) and _live_model_payload(
-                    provider,
-                    payload,
-                )
+                success = generated
         except Exception:  # noqa: BLE001
             self._update_job(
                 job_id,
@@ -1666,8 +1796,8 @@ class ConnectionManager:
                     if auth_changed
                     else "Gemini 선택 모델의 실제 응답까지 정상입니다."
                     if success and generated
-                    else f"{PROVIDER_LABELS[provider]} 모델 연결이 정상입니다."
-                    if success
+                    else f"{PROVIDER_LABELS[provider]} 선택 모델의 실제 응답까지 정상입니다."
+                    if success and generated
                     else "Gemini 선택 모델의 실제 응답을 확인하지 못했습니다."
                     if provider == "gemini"
                     else f"{PROVIDER_LABELS[provider]} 모델 목록을 확인하지 못했습니다."

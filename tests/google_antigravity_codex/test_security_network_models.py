@@ -37,6 +37,17 @@ def test_public_url_rejects_dns_failures_and_empty_results(monkeypatch):
     with pytest.raises(ValueError, match="no addresses"):
         network.validate_public_url("https://example.test/image.png")
 
+
+def test_agent_hub_worker_proxy_accepts_only_localhost(monkeypatch):
+    monkeypatch.setenv("AGENT_HUB_EGRESS_PROXY", "http://127.0.0.1:43123")
+    assert network.trusted_proxy_handler().proxies == {
+        "http": "http://127.0.0.1:43123",
+        "https": "http://127.0.0.1:43123",
+    }
+
+    monkeypatch.setenv("AGENT_HUB_EGRESS_PROXY", "http://example.com:43123")
+    assert network.trusted_proxy_handler().proxies == {}
+
     def fail(*args, **kwargs):
         raise socket.gaierror("nope")
 

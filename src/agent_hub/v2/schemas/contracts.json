@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-hub.local/schemas/contracts-v2.json",
+  "title": "Agent Hub v2 public contracts",
+  "$defs": {
+    "task_v2": {
+      "type": "object",
+      "required": ["schema", "intent", "capability", "constraints", "retention"],
+      "properties": {
+        "schema": {"const": "task_v2"},
+        "intent": {"type": "string", "minLength": 1},
+        "capability": {"enum": ["chat", "search", "vision", "write", "image", "inspect", "review", "decide"]},
+        "inline_input": {"type": "string"},
+        "input_artifacts": {"type": "array", "items": {"type": "string"}},
+        "constraints": {"type": "object"},
+        "output_contract": {"type": "object"},
+        "retention": {"enum": ["ephemeral", "durable_private", "exportable"]}
+      },
+      "additionalProperties": false
+    },
+    "plan_v2": {
+      "type": "object",
+      "required": ["schema", "task", "steps", "routing_mode", "policy_revision", "plan_sha256"],
+      "properties": {
+        "schema": {"const": "plan_v2"},
+        "task": {"$ref": "#/$defs/task_v2"},
+        "steps": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+        "routing_mode": {"enum": ["legacy", "shadow", "advisory", "auto"]},
+        "policy_revision": {"type": "integer", "minimum": 0},
+        "egress_manifest_sha256": {"type": ["string", "null"]},
+        "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "run_v3": {
+      "type": "object",
+      "required": ["schema", "run_id", "revision", "status", "plan_sha256", "steps"],
+      "properties": {
+        "schema": {"const": "run_v3"},
+        "run_id": {"type": "string"},
+        "revision": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["prepared", "queued", "running", "waiting_approval", "paused", "completed", "failed", "cancelled", "archived", "outcome_unknown"]},
+        "plan_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "steps": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "event_v2": {
+      "type": "object",
+      "required": ["schema", "cursor", "run_id", "run_revision", "type", "details"],
+      "properties": {
+        "schema": {"const": "event_v2"},
+        "cursor": {"type": "integer", "minimum": 1},
+        "run_id": {"type": "string"},
+        "run_revision": {"type": "integer", "minimum": 0},
+        "type": {"type": "string"},
+        "details": {"type": "object"}
+      }
+    },
+    "artifact_v2": {
+      "type": "object",
+      "required": ["schema", "artifact_id", "content_sha256", "media_type", "sensitivity", "provenance"],
+      "properties": {
+        "schema": {"const": "artifact_v2"},
+        "artifact_id": {"type": "string"},
+        "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "media_type": {"type": "string"},
+        "sensitivity": {"enum": ["public", "project", "sensitive", "secret"]},
+        "provenance": {"type": "object"}
+      }
+    },
+    "provider_manifest_v2": {
+      "type": "object",
+      "required": ["schema", "provider_id", "adapter_version", "protocol_version", "capabilities", "auth_owner", "auth_mode", "allowed_domains"],
+      "properties": {
+        "schema": {"const": "agent_hub_provider_v2"},
+        "provider_id": {"type": "string"},
+        "adapter_version": {"type": "string"},
+        "protocol_version": {"const": "2.0"},
+        "capabilities": {"type": "array", "items": {"type": "string"}},
+        "auth_owner": {"type": "string"},
+        "auth_mode": {"type": "string"},
+        "allowed_domains": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "routing_decision_v1": {
+      "type": "object",
+      "required": ["schema", "decision_id", "routing_mode", "candidates", "selected_provider"],
+      "properties": {
+        "schema": {"const": "routing_decision_v1"},
+        "decision_id": {"type": "string"},
+        "routing_mode": {"enum": ["legacy", "shadow", "advisory", "auto"]},
+        "candidates": {"type": "array", "items": {"type": "object"}},
+        "selected_provider": {"type": "string"}
+      }
+    },
+    "egress_manifest_v2": {
+      "type": "object",
+      "required": ["schema", "provider", "policy_revision", "entries", "manifest_sha256"],
+      "properties": {
+        "schema": {"const": "egress_manifest_v2"},
+        "provider": {"type": "string"},
+        "model": {"type": ["string", "null"]},
+        "policy_revision": {"type": "integer", "minimum": 0},
+        "entries": {"type": "array", "items": {"type": "object"}},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

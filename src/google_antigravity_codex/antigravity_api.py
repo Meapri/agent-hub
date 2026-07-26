@@ -12,7 +12,7 @@ from typing import Any, Dict, Generator, List, Optional
 
 from agent_hub.core import limits
 
-from . import __version__, agy_auth
+from . import __version__, agy_auth, network
 
 ENDPOINT = "https://cloudcode-pa.googleapis.com"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -76,7 +76,7 @@ def _post(path: str, body: Dict[str, Any], access_token: str, *, timeout: float)
         method="POST",
         headers=_headers(access_token),
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    opener = urllib.request.build_opener(network.trusted_proxy_handler(), _NoRedirect())
     try:
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
@@ -159,7 +159,7 @@ def _stream_post(
             "Accept": "text/event-stream, application/json",
         },
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    opener = urllib.request.build_opener(network.trusted_proxy_handler(), _NoRedirect())
     try:
         response = opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as exc:

@@ -25,6 +25,7 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
         "gpt-provider",
         "handoff",
         "provider-connect",
+        "route-to",
         "takeover",
     }
     for canonical_path in shared:
@@ -36,31 +37,36 @@ def test_codex_and_claude_plugins_share_all_skill_contracts():
             assert installed == canonical
 
     adaptive = (HUBS / "shared/skills/adaptive-orchestrate/SKILL.md").read_text(encoding="utf-8")
-    assert 'workflow_id="adaptive"' in adaptive
-    assert "agent_hub_plan_workflow" in adaptive
-    assert "agent_hub_run_workflow" in adaptive
-    assert "순서를\n직접 하드코딩하지 않는다" in adaptive
+    assert 'agent_hub_plan`을\n   `mode="prepare"' in adaptive
+    assert "agent_hub_start" in adaptive
+    assert "agent_hub_continue" in adaptive
+    assert "provider 순서나\n실행 스케줄을 복제하지 않고" in adaptive
 
     document = (HUBS / "shared/skills/document-write/SKILL.md").read_text(encoding="utf-8")
-    assert "quality_gate.passed" in document
-    assert "user_facing=true" in document
+    assert 'agent_hub_execute(capability="write")' in document
+    assert "orchestrate_codex.document_quality" in document
     assert "독백체" in document
 
     handoff = (HUBS / "shared/skills/handoff/SKILL.md").read_text(encoding="utf-8")
     takeover = (HUBS / "shared/skills/takeover/SKILL.md").read_text(encoding="utf-8")
     gpt = (HUBS / "shared/skills/gpt-provider/SKILL.md").read_text(encoding="utf-8")
     connect = (HUBS / "shared/skills/provider-connect/SKILL.md").read_text(encoding="utf-8")
-    assert "agent_hub_prepare_handoff_update" in handoff
+    assert 'agent_hub_handoff(action="prepare_update")' in handoff
     assert "expected_sha256" in handoff
     assert "git add -A" not in handoff
     assert "handoff_drift" in takeover
     assert 'provider="gpt"' in gpt
     assert "`openai_codex_*`" in gpt
     assert "별도 MCP로 등록" in gpt
-    assert "next_action.command" in connect
+    assert "agent_hub_catalog" in connect
     assert "./.venv/bin/agent-hub-connect" in connect
     assert "consent 체크박스" in connect
-    assert "공동 로그인은 Agent Hub에서 삭제하지 않는다" in connect
+    assert "공유 로그인을 Hub가 삭제하지 않는다" in connect
+
+    route = (HUBS / "shared/skills/route-to/SKILL.md").read_text(encoding="utf-8")
+    assert "agent_hub_execute" in route
+    assert "agent_hub_plan" in route
+    assert "placeholder" in route
 
 
 def test_hub_plugins_register_only_unified_agent_hub_and_memory(tmp_path):
@@ -74,10 +80,11 @@ def test_hub_plugins_register_only_unified_agent_hub_and_memory(tmp_path):
 
 
 def test_public_hub_tools_do_not_expose_private_provider_leaf_names():
-    from agent_hub import operations
+    from agent_hub.v2.tools import TOOL_NAMES
 
-    names = {item["name"] for item in operations.tool_definitions()}
-    assert "agent_hub_chat" in names
+    names = set(TOOL_NAMES)
+    assert len(names) == 14
+    assert "agent_hub_execute" in names
     assert not any(name.startswith("openai_codex_") for name in names)
 
     tracked_configs = [
@@ -92,16 +99,16 @@ def test_public_hub_tools_do_not_expose_private_provider_leaf_names():
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():
     codex = _json(HUBS / "codex/.codex-plugin/plugin.json")
     claude = _json(HUBS / "claude-code/.claude-plugin/plugin.json")
-    assert codex["version"] == "1.4.3"
-    assert claude["version"] == "1.4.3"
+    assert codex["version"] == "2.0.0"
+    assert claude["version"] == "2.0.0"
     assert codex["mcpServers"] == "./.mcp.json"
-    assert "adaptive" in codex["description"].lower()
-    assert "adaptive" in claude["description"].lower()
+    assert "durable" in codex["description"].lower()
+    assert "durable" in claude["description"].lower()
     assert "GPT" in codex["interface"]["longDescription"]
-    assert "provider=all" in " ".join(codex["interface"]["defaultPrompt"])
+    assert "egress manifest" in " ".join(codex["interface"]["defaultPrompt"])
     for name in ("agent-hub-plan.md", "agent-hub-run.md"):
         command = (HUBS / "claude-code/commands" / name).read_text(encoding="utf-8")
-        assert "adaptive" in command
+        assert "agent_hub_plan" in command
         assert "project_root" in command
 
 
@@ -113,7 +120,7 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["name"] == "agent-hub"
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
-    assert claude["plugins"][0]["version"] == "1.4.3"
+    assert claude["plugins"][0]["version"] == "2.0.0"
 
 
 def test_release_version_check_uses_unified_agent_hub_fields():
@@ -126,7 +133,7 @@ def test_release_version_check_uses_unified_agent_hub_fields():
         "claude_plugin",
         "claude_marketplace",
     }
-    assert set(found.values()) == {"1.4.3"}
+    assert set(found.values()) == {"2.0.0"}
 
 
 def test_retired_standalone_bundle_fails_with_current_install_guidance(tmp_path):
@@ -154,7 +161,7 @@ def test_hub_readmes_describe_the_same_four_provider_surface():
     for hub in ("codex", "claude-code"):
         text = (HUBS / hub / "README.md").read_text(encoding="utf-8")
         assert "Claude, Grok, Gemini, GPT" in text
-        assert "`agent_hub_*` 37개" in text
+        assert "`agent_hub_*` 14개" in text
         assert "`openai_codex_*`" in text
         assert "gpt-provider/SKILL.md" in text
         assert "/Users/" not in text

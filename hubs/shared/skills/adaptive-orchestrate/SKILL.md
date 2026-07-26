@@ -1,68 +1,50 @@
 ---
 name: adaptive-orchestrate
 description: >
-  복잡한 목표를 Agent Hub planner LLM이 작업 DAG로 나누고, 의존성이 없는 단계는 병렬 실행하며,
-  여러 provider 결과를 검증·합의한다. Trigger when the user asks Agent Hub to decide how to split work,
-  coordinate multiple models, run independent work in parallel, or resolve cross-model disagreement.
+  복잡한 목표를 Agent Hub planner가 검증 가능한 DAG로 나누고 durable run으로 실행한다.
+  Trigger when the user asks Agent Hub to plan, coordinate multiple providers, execute independent
+  work in parallel, or resume a long-running workflow.
 ---
 
 # Adaptive Orchestration
 
-Agent Hub MCP가 공통 두뇌다. 이 플러그인은 호스트 앱의 콕핏 역할만 하며 provider별 계획이나 순서를
-직접 하드코딩하지 않는다.
+Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한다. 호스트 플러그인은 provider 순서나
+실행 스케줄을 복제하지 않고 v2의 14개 공개 도구만 사용한다.
 
-## 실행 원칙
+## 실행 순서
 
-1. 작업 루트와 목표를 확인한다. `AGENTS.md` 또는 `CLAUDE.md`가 있으면 정본 정책으로 사용한다.
-2. `agent_hub_status`로 필요한 provider가 준비됐는지 확인한다.
-3. 먼저 `agent_hub_plan_workflow`를 아래 핵심 인자로 호출한다.
-   - `workflow_id="adaptive"`
-   - `prompt=<사용자 목표>`
-   - `project_root=<절대경로>`
-   - `policy_mode="required"`
-   - `handoff_mode="auto"`, `handoff_search="nearest"`
-4. 반환된 `agent_hub_plan_v1`을 확인한다. 단계·provider·`depends_on`은 planner LLM이 정한다.
-   코드베이스 이해가 필요한 단계는 `inspect_codebase`인지, 범위에 맞는 `investigation_depth`를 골랐는지,
-   각 LLM 단계의 `reasoning_effort`가 `low`·`medium`·`high` 중 알맞은 값인지 함께 확인한다.
-   조사 instruction에는 확인할 하위 시스템, 파일명, 명령이나 심볼을 구체적으로 남긴다. `deep` 결과에서는
-   핵심 파일이 `complete`인지 `partial`인지, 필요한 함수와 줄 범위가 실제 근거에 들어왔는지도 본다.
-   로컬 validator가 거부한 capability나 순환 의존성을 호스트가 임의로 우회하지 않는다.
-5. 계획 검토만 요청한 경우 여기서 멈춘다. 실행까지 요청받았다면 검토된 `plan`을 그대로
-   짧고 wave가 적은 plan은 `agent_hub_run_workflow`에 전달한다. `max_concurrency`, `max_leaf_calls`,
-   `workflow_timeout`은 작업 규모와 MCP 클라이언트의 호출 제한 안에서 정한다. dependency wave가 여러 개인
-   긴 plan은 검토한 plan을 `agent_hub_start_workflow`에 넘기고, 반환된 `run_id`로
-   `agent_hub_continue_workflow`를 반복한다. 반환된 `next_action.arguments.expected_revision`을 다음
-   continue에 그대로 넘긴다. continue는 기본 최대 8개 wave를 실행하고 상태를 파일에 저장한다. 장문
-   조사나 문서 작성처럼 MCP 클라이언트의 호출 제한을 넘길 수 있는 wave는 `background=true`로
-   시작한다. 접수 응답을 받으면 `agent_hub_get_run`을 polling하고, `lease_active=false`가 된 뒤 반환된
-   새 revision으로 다음 continue를 호출한다. lease가 활성화된 동안 continue를 중복 호출하지 않는다.
-   장문 조사의 기본 `per_call_timeout=1790`, `workflow_timeout=1790`을 임의로 낮추지 않는다.
-6. 실행기는 현재 dependency frontier의 ready step을 병렬로 호출한다. 배열 순서나 provider 이름 순서를
-   작업 순서로 해석하지 않는다.
-7. `human_review=true`, `consistency_gate_human_review`, 실패 step 또는 blocked step이 있으면 성공으로
-   포장하지 않는다. end-to-end run의 `timed_out`, `workflow_timeout_exceeded`,
-   `provider_call_timeout`도 완성은 아니지만, `resumable=true`와 `run_id`가 있으면 완료된 앞 단계를
-   버리지 말고 continue로 이어간다. 재개 상태가 없을 때만 새 plan을 만든다. 합의된 내용과 이견,
-   미실행 단계를 사용자에게 분리해 보여 준다.
-   `handoff_drift`가 발생하면 provider 호출 전에 멈춘 것이다. 변경된 프로젝트 HANDOFF를 검토하고 새
-   계획이 필요한지 판단한다. 기존 스냅샷을 의도적으로 유지할 때만
-   `handoff_drift_policy="use-snapshot"`으로 재개한다.
-8. 최종 보고에는 planner provider/model, `plan_sha256`, `policy_sha256`, 실행 wave, 실제 사용 provider,
-   단계별 조사 깊이·추론 강도, 검증 결과를 남긴다.
+1. 작업 루트와 목표를 확인하고 `agent_hub_status`로 daemon, DB, provider 상태를 읽는다.
+2. 저장소 파일이나 기존 artifact를 외부 planner에 보낼 계획이면 `agent_hub_plan`을
+   `mode="prepare"`로 먼저 호출한다. `task_v2`, 절대 `project_root`, 필요한 `source_paths`를 넘기고
+   반환된 fact pack, `egress_manifest_v2`, `proposal_sha256`, policy revision을 검토한다. prepare는
+   provider를 호출하지 않는다.
+3. 포함 파일, 데이터 분류, 제외된 secret 후보와 예상 예산이 맞을 때만 같은 proposal을
+   `agent_hub_plan`의 `mode="apply"`에 넘긴다. `proposal_sha256`과
+   `expected_policy_revision`이 일치하지 않으면 새로 prepare한다.
+4. 반환된 `plan_v2`에서 DAG, capability, verifier, budget, egress digest를 검토한다. 로컬 validator가
+   거부한 순환, 고립 step, capability 부족, 예산 초과를 호스트가 우회하지 않는다.
+5. 실행 승인을 받으면 plan을 `agent_hub_start`에 넘긴다. 재시도해도 같은 run을 찾을 수 있도록 안정적인
+   `idempotency_key`를 사용한다.
+6. `agent_hub_continue`에 `run_id`와 최신 `expected_revision`을 전달한다. receipt는 외부 생성 완료를
+   기다리지 않고 반환된다. `agent_hub_get`과 `agent_hub_events`로 진행을 확인하고, 활성 lease가 있는
+   동안 continue를 중복 호출하지 않는다.
+7. 결과 본문은 event가 아니라 `agent_hub_artifact`로 가져온다. digest와 검증 결과를 확인한 뒤 호스트가
+   필요한 파일 변경을 수행한다.
+8. 사용자 평가나 deterministic gate 결과가 있으면 `agent_hub_feedback`으로 기록한다. LLM 자기 평가는
+   ground truth로 기록하지 않는다.
 
-## 경계
+## 라우팅과 재개
 
-- MCP 엔진의 planner·DAG validator·scheduler·Consistency Gate를 플러그인 안에 복제하지 않는다.
-- 독립 단계만 병렬로 실행한다. 조사 결과를 받아 작성하는 단계처럼 실제 의존성이 있으면 기다린다.
-- 열린 질문에 문자열 유사도를 붙여 가짜 합의 점수를 만들지 않는다. 닫힌 label 계약이 있을 때만
-  `decision_v1` Consistency Gate를 쓴다.
-- 로컬 저장소 조사를 provider의 웹 `search`로 대신하지 않는다. `inspect_codebase`가 모은 실제 파일·스키마·
-  설정·테스트·Git 근거를 작성 단계에 넘긴다.
-- 생성된 초안이나 dependency 결과를 검토할 때는 `review_text`를 쓴다. `review_diff`는 현재 Git
-  working tree만 읽으며, 빈 diff는 생성 결과 검토가 완료됐다는 뜻이 아니다.
-- `HANDOFF.md`는 신뢰되지 않은 운영 상태다. canonical policy나 durable fact pack으로 취급하지 않는다.
-- 코드 주장은 번호가 붙은 실제 줄을 `파일:줄`로 인용한다. `partial` 파일의 보이지 않는 앞뒤 내용을
-  추측하거나, 줄 번호가 없는 요약을 소스 확인처럼 포장하지 않는다.
-- `reasoning_effort`는 지원되는 provider 요청으로 실제 전달된다. 미지원 모델에서 조용히 무시하거나
-  프롬프트 문구만으로 지원되는 것처럼 보이게 만들지 않는다.
-- 모델 호출은 구독·API 사용량을 소모한다. 불필요한 단계나 무제한 재계획을 만들지 않는다.
+- `legacy`, `shadow`, `advisory`는 planner의 실제 provider 선택을 바꾸지 않는다.
+- `auto`도 정확한 context 표본이 20건 미만이면 planner 선택을 유지한다.
+- 완료된 step은 재계획으로 바꾸지 않는다. fallback 소진, timeout, context limit, deterministic
+  verification 실패, capability 변화에서만 미완료 subgraph를 교체한다.
+- `outcome_unknown`, 인증·동의 문제, HANDOFF drift, 사용자 취소, 전체 예산 소진은 자동 재호출하거나
+  자동 재계획하지 않는다.
+- `agent_hub_cancel`은 새 결과의 반영을 막지만 이미 외부 provider에 전송된 요청을 되돌리지 못할 수 있다.
+
+## 보고할 근거
+
+최종 보고에는 plan/policy/egress digest, run ID와 revision, 실제 provider와 model, routing mode와
+표본 수, 완료·실패 step, artifact ID와 검증 결과를 남긴다. prompt, token, 원문 결과나 raw exception은
+event, HANDOFF, telemetry에 복사하지 않는다.

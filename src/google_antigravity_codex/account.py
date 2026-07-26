@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-from . import agy_auth, oauth_login, paths, response, security
+from . import agy_auth, network, oauth_login, paths, response, security
 
 USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 TOKENINFO_URL = "https://www.googleapis.com/oauth2/v3/tokeninfo"
@@ -26,7 +26,7 @@ def _safe_get_json(url: str, *, access_token: str = "", timeout: float = 15.0) -
     if access_token:
         headers["Authorization"] = f"Bearer {access_token}"
     request = urllib.request.Request(url, headers=headers, method="GET")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(network.trusted_proxy_handler())
     try:
         with opener.open(request, timeout=timeout) as resp:
             raw = resp.read(64 * 1024)
