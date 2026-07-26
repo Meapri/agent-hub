@@ -71,8 +71,7 @@ API 키 강제: `CLAUDE_CODEX_AUTH_MODE=api_key`
 ## 개발
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+./scripts/bootstrap.sh
 .venv/bin/pytest
 ```
 

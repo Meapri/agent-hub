@@ -208,8 +208,7 @@ MCP 엔트리포인트: `scripts/google_antigravity_mcp.py`
 ## 개발 / 테스트
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+./scripts/bootstrap.sh
 .venv/bin/pytest
 .venv/bin/python scripts/check_release_version.py
 # 선택: 플러그인 번들

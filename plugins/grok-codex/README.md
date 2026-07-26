@@ -70,8 +70,7 @@ API 키 강제: `GROK_CODEX_AUTH_MODE=api_key` + `XAI_API_KEY`
 ## 개발
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
+./scripts/bootstrap.sh
 .venv/bin/pytest
 ```
 

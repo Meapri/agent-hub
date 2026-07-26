@@ -18,8 +18,7 @@ provider별 MCP는 따로 등록하지 않습니다. 공개 표면은 `agent_hub
 
 ```bash
 cd /absolute/path/to/agent-hub
-python3 -m venv .venv
-./.venv/bin/pip install -e '.[dev]'
+./scripts/bootstrap.sh
 ./.venv/bin/agent-hub setup --repo-root . --json
 ./.venv/bin/agent-hub setup --repo-root . --apply --proposal-sha256 <REVIEWED_SHA>
 ```

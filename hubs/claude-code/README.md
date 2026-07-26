@@ -19,8 +19,7 @@ socket bridge만 담당하고 Claude, Grok, Gemini, GPT 호출과 durable run은
 
 ```bash
 cd /absolute/path/to/agent-hub
-python3 -m venv .venv
-./.venv/bin/pip install -e '.[dev]'
+./scripts/bootstrap.sh
 ./.venv/bin/agent-hub setup --repo-root . --json
 ./.venv/bin/agent-hub setup --repo-root . --apply --proposal-sha256 <REVIEWED_SHA>
 ```

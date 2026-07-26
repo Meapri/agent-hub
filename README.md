@@ -68,9 +68,12 @@ flowchart LR
 ```bash
 git clone https://github.com/Meapri/agent-hub.git
 cd agent-hub
-python3 -m venv .venv
-./.venv/bin/pip install -e '.[dev]'
+./scripts/bootstrap.sh
 ```
+
+bootstrap은 Python 3.10 이상을 찾아 `.venv`를 만들고 개발 의존성을 설치합니다. macOS에
+포함된 Python 3.9는 사용하지 않습니다. 사용할 interpreter를 직접 지정하려면
+`AGENT_HUB_PYTHON=/path/to/python3.12 ./scripts/bootstrap.sh`처럼 실행하세요.
 
 ### 1. 프로젝트 정책 준비
 
