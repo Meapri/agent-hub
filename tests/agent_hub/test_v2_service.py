@@ -42,6 +42,40 @@ class _FakeWorker:
         return True
 
 
+class _RefreshableGeminiWorker(_FakeWorker):
+    refreshed = False
+    invocations = 0
+
+    def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method == "status" and self.provider == "gemini":
+            return {
+                "success": True,
+                "data": {
+                    "providers": {
+                        "gemini": {
+                            "consent": True,
+                            "configured": True,
+                            "ready": self.__class__.refreshed,
+                            "logged_in": True,
+                            "auth_ready": self.__class__.refreshed,
+                            "refreshable": not self.__class__.refreshed,
+                            "auto_refresh_on_invoke": not self.__class__.refreshed,
+                            "invocation_ready": True,
+                        }
+                    }
+                },
+            }
+        if method == "invoke" and self.provider == "gemini":
+            self.__class__.invocations += 1
+            self.__class__.refreshed = True
+        return super().request(
+            method,
+            params=params,
+            timeout=timeout,
+            request_id=request_id,
+        )
+
+
 class _PlannerWorker(_FakeWorker):
     last_prompt = ""
     last_params = {}
@@ -230,6 +264,43 @@ def test_execute_uses_compact_v2_envelope(tmp_path):
     assert result["success"] is True
     assert result["data"]["provider"] == "gpt"
     assert result["data"]["result"]["text"] == "completed by gpt"
+
+
+def test_execute_allows_gemini_to_refresh_expired_access_token_on_invoke(tmp_path):
+    _RefreshableGeminiWorker.refreshed = False
+    _RefreshableGeminiWorker.invocations = 0
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_RefreshableGeminiWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+
+    before = service.dispatch("agent_hub_status", {})
+    gemini = before["data"]["providers"]["gemini"]
+    assert gemini["ready"] is False
+    assert gemini["invocation_ready"] is True
+    assert gemini["state"]["refreshable"] is True
+
+    result = service.dispatch(
+        "agent_hub_execute",
+        {
+            "provider": "gemini",
+            "project_root": str(tmp_path),
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Answer after refreshing the session.",
+                "capability": "chat",
+                "inline_input": "fixture",
+                "constraints": {"provider_allowlist": ["gemini"]},
+            },
+        },
+    )
+
+    assert result["success"] is True
+    assert result["data"]["provider"] == "gemini"
+    assert _RefreshableGeminiWorker.invocations == 1
+    after = service.dispatch("agent_hub_status", {})
+    assert after["data"]["providers"]["gemini"]["ready"] is True
 
 
 def test_execute_rejects_stored_artifact_without_egress_approval(tmp_path):

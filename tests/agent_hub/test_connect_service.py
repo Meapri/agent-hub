@@ -23,12 +23,15 @@ def _state(
     logged_in: bool | None = None,
     refreshable: bool = False,
     relogin_required: bool = False,
+    invocation_ready: bool | None = None,
+    auto_refresh_on_invoke: bool = False,
     default_model: str = "test-model",
     model_overridden: bool = False,
     model_source: str = "provider_default",
     model_override_scope: str | None = None,
 ):
     logged_in = authenticated if logged_in is None else logged_in
+    invocation_ready = ready if invocation_ready is None else invocation_ready
     return {
         "consent": consent,
         "configured": logged_in,
@@ -40,6 +43,8 @@ def _state(
         "refreshable": refreshable,
         "relogin_required": relogin_required,
         "ready": ready,
+        "invocation_ready": invocation_ready,
+        "auto_refresh_on_invoke": auto_refresh_on_invoke,
         "auth_mode": "subscription_oauth" if logged_in else None,
         "default_model": default_model,
         "base_default_model": "test-model",
@@ -124,6 +129,31 @@ def test_status_distinguishes_expired_refreshable_and_relogin_required_accounts(
     assert result["summary"]["connected"] == 2
     assert result["summary"]["refreshable"] == 1
     assert result["summary"]["relogin_required"] == 1
+
+
+def test_status_exposes_refreshable_gemini_as_automatic_invocation_candidate():
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=False,
+                    logged_in=True,
+                    refreshable=True,
+                    invocation_ready=True,
+                    auto_refresh_on_invoke=True,
+                )
+            }
+        )
+    )
+
+    provider = manager.status("gemini")["providers"]["gemini"]
+
+    assert provider["ready"] is False
+    assert provider["refreshable"] is True
+    assert provider["invocation_ready"] is True
+    assert provider["auto_refresh_on_invoke"] is True
+    assert provider["connection_state"] == "refreshable"
 
 
 def test_auth_connection_state_remains_independent_from_consent():
@@ -1754,6 +1784,52 @@ def test_gemini_connection_test_requires_a_real_selected_model_response(
     assert probe["task"]["constraints"]["max_tokens"] == 512
     assert probe["task"]["constraints"]["timeout_seconds"] == 30
     assert probe["task"]["retention"] == "ephemeral"
+
+
+def test_gemini_connection_test_automatically_refreshes_an_expired_session(
+    monkeypatch,
+):
+    manager = ConnectionManager(
+        status_reader=_reader(
+            {
+                "gemini": _state(
+                    consent=True,
+                    authenticated=False,
+                    logged_in=True,
+                    refreshable=True,
+                    invocation_ready=True,
+                    auto_refresh_on_invoke=True,
+                    default_model="gemini-3.6-flash-high",
+                )
+            }
+        )
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def daemon_call(name, args):
+        calls.append((name, args))
+        return {
+            "success": True,
+            "data": {
+                "provider": "gemini",
+                "result": {
+                    "model": "gemini-3.6-flash-high",
+                    "text": "AGENT_HUB_CONNECTION_OK",
+                },
+            },
+        }
+
+    monkeypatch.setattr(manager, "_daemon_call", daemon_call)
+
+    started = manager.start_test("gemini")
+    deadline = time.time() + 1
+    job = manager.job(started["id"])
+    while job["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+        job = manager.job(started["id"])
+
+    assert job["state"] == "complete"
+    assert [name for name, _args in calls] == ["agent_hub_execute"]
 
 
 def test_gemini_connection_test_fails_when_generation_fails(monkeypatch):

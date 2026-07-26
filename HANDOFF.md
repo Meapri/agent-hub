@@ -12,20 +12,18 @@
 
 <!-- agent-hub:handoff:v1:start -->
 - **원래 목표**: Agent Hub v2를 실제 사용 가능한 local-first multi-provider runtime으로 발전시키고, 구현·검증·설치·Git 반영까지 완료합니다.
-- **현재 단계**: release 보상 transaction과 GPT plugin 격리 결함을 수정한 v2.1.3을 설치했습니다. 검증된 변경을 commit/push하는 단계입니다.
+- **현재 단계**: 반복되던 Gemini access token 만료가 실제 세션 단절처럼 라우팅을 막던 원인을 수정한 v2.1.4를 설치했고, 검증된 변경을 commit/push하는 단계입니다.
 - **완료**:
-  - `src/agent_hub/v2/release.py::apply_switch`의 bootout→DB restore→candidate bootstrap/health 실패를 하나의 보상 경계로 묶었습니다.
-  - candidate를 중지하지 못하면 DB를 건드리지 않으며, 이전 LaunchAgent·DB·daemon health까지 복구돼야 `release_activation_failed`로 판정합니다. 보상이 불완전하면 `release_recovery_failed`와 안전한 실패 단계만 반환합니다.
-  - 자동 보상도 실패하면 전환 직전 DB를 rollback slot 옆 emergency snapshot으로 보존하고, 검토되지 않은 다음 switch가 rollback slot이나 emergency snapshot을 덮어쓰기 전에 `release_recovery_pending`으로 차단합니다.
-  - DB restore 예외, candidate bootstrap 실패, 이전 daemon 재시작 실패, emergency snapshot 보존·후속 update의 rollback slot 불변성을 failure-injection test로 고정했습니다.
-  - GPT provider의 Codex 격리 실행에 `--disable plugins`를 추가했습니다. `--ignore-user-config`만으로는 설치된 plugin skills가 로드되어 skill context budget 오류로 generation이 실패한다는 것을 실제 재현한 뒤 수정했습니다.
-  - package·Codex plugin·Claude plugin 버전을 2.1.3으로 동기화하고 immutable runtime `/Users/naen/.agent-hub/releases/2.1.3-4eb3f9fb705e`를 staging·활성화했습니다. host MCP config와 LaunchAgent도 같은 bridge/runtime을 가리킵니다.
-  - Codex와 Claude Code plugin을 2.1.3으로 갱신했습니다.
-  - Claude `claude-opus-5`, Grok `grok-4.5`, GPT `gpt-5.6-sol`이 설치된 v2.1.3 daemon에서 실제 `AGENT_HUB_OK` generation을 반환했습니다.
-- **미완**: Gemini는 `logged_in=true`지만 `auth_ready=false`, `auth_refresh_available` 상태라 실제 generation이 `no_eligible_provider`로 차단됩니다. 연결 GUI에서 세션 갱신이 필요합니다. dependency lock/hash 기반 offline staging, incremental context index, planner validation 진단도 남아 있습니다.
-- **변경 파일**: `src/agent_hub/v2/release.py`, `src/openai_codex/client.py`, release/provider 테스트, `README.md`, v2 protocol 문서, package/plugin/version manifest를 변경했습니다.
-- **검증 실행 결과**: 전체 pytest `553 passed, 2 skipped`; 전체 Ruff check; release version sync 2.1.3; Ruler sync; README document quality; `git diff --check`를 통과했습니다. installed doctor는 `7 pass, 0 warn, 0 fail`, DB schema 7/WAL/integrity OK입니다. candidate DB-copy health와 LaunchAgent activation도 통과했습니다.
-- **현재 리스크**: review run `4ab35fd5d8d03887`은 local inspect artifact `art_29dee50792f4d033e1c459d2`까지 완료했지만 Claude review step이 안전한 `operation_failed`로 종료됐습니다. GPT planner도 `plan_validation_failed`를 반환해 LLM review는 완료 근거로 쓰지 않았고 deterministic test와 실제 canary만 근거로 사용했습니다. Gemini 인증은 현재 호출 불가입니다.
-- **Do-Not-Repeat**: connected/logged_in을 generation 성공으로 표현하지 마세요. Codex leaf에서 `--ignore-user-config`가 plugin을 비활성화한다고 가정하지 마세요. `release_recovery_failed` 뒤 emergency snapshot을 삭제하거나 다음 release로 덮어쓰지 마세요. active external step에 중복 continue를 보내지 마세요.
-- **다음 한 걸음**: `src/agent_hub/v2/provider_runtime.py::plan`이 최종 `plan_validation_failed` 전에 수집한 validation 오류를 raw plan 없이 안전한 reason taxonomy로 집계하도록 만들고, `tests/agent_hub/test_v2_provider_runtime.py`에 malformed planner 응답의 repair·최종 진단 fixture를 추가하세요.
+  - Gemini의 access token이 만료돼도 refresh token과 사용 동의가 유효하면 `provider_runtime.status`가 read-only 상태인 `ready=false`, `refreshable=true`를 유지하면서 실행 가능성만 `invocation_ready=true`, `auto_refresh_on_invoke=true`로 분리해 보고하도록 했습니다.
+  - `HubService` 라우터가 `invocation_ready`를 실행 eligibility에 사용하게 해 provider worker가 실제 요청 직전에 기존 `valid_credentials(refresh=True)` 경로로 토큰을 자동 갱신할 수 있게 했습니다. status의 `ready` 의미는 바꾸지 않았고 invoke·catalog 뒤 status cache를 무효화하거나 갱신합니다.
+  - 연결 GUI가 자동 갱신 가능한 Gemini를 세션 단절로 표현하지 않고, 실제 연결 테스트와 live model catalog 조회가 수동 갱신 버튼 없이 자동 갱신 경로를 사용하도록 바꿨습니다.
+  - 사용 동의가 없는 refreshable 계정은 `invocation_ready=false`로 유지하는 provider contract test, 만료 상태를 캐시한 뒤에도 Gemini invoke를 허용하고 갱신 후 ready 상태를 다시 읽는 service test, GUI/connection manager 회귀 테스트를 추가했습니다.
+  - package·Codex plugin·Claude plugin 버전을 2.1.4로 동기화하고 immutable runtime `/Users/naen/.agent-hub/releases/2.1.4-d3a6e3a58b81`을 staging·활성화했습니다. Codex와 Claude Code plugin도 2.1.4로 갱신했습니다.
+  - 설치된 v2.1.4 daemon에서 Gemini `gemini-3.6-flash-high`가 실제 `AGENT_HUB_GEMINI_OK` generation을 반환했습니다.
+- **미완**: refresh token 자체가 폐기되거나 계정 권한이 회수된 경우에는 보안상 자동 복구하지 않고 GUI 재로그인이 필요합니다. dependency lock/hash 기반 offline staging, incremental context index, planner validation 진단도 남아 있습니다.
+- **변경 파일**: `src/agent_hub/v2/provider_runtime.py`, `src/agent_hub/v2/service.py`, `src/agent_hub/connect_service.py`, `src/agent_hub/connect_ui/app.js`, 관련 provider/service/GUI 테스트, `README.md`, package/plugin version manifest를 변경했습니다.
+- **검증 실행 결과**: 전체 pytest `558 passed, 2 skipped`; 전체 Ruff check; release version sync 2.1.4; Ruler sync; Hub plugin sync; README `user_facing=true` verify와 document quality; JavaScript syntax; `git diff --check`를 통과했습니다. 설치된 doctor는 `6 pass, 0 warn, 0 fail`, DB schema 7/WAL/integrity OK이며 LaunchAgent는 v2.1.4 daemon으로 실행 중입니다. 실제 Gemini generation canary도 통과했습니다.
+- **현재 리스크**: 만료 access token 경로는 실제 credential을 강제로 변조하지 않고 회귀 fixture로 검증했습니다. live canary 시점에는 자동 갱신 뒤 token이 이미 유효했으므로, 다음 자연 만료 때 자동 갱신 관측을 한 번 더 확인할 가치가 있습니다.
+- **Do-Not-Repeat**: read-only status 조회에서 토큰을 갱신하지 마세요. `logged_in`, `refreshable`, `ready`, `invocation_ready`, 실제 generation 성공을 같은 상태로 표현하지 마세요. 다른 provider까지 `refreshable`만으로 일반화하지 말고 worker의 자동 갱신 계약을 먼저 증명하세요. active external step에 중복 continue를 보내지 마세요.
+- **다음 한 걸음**: `src/agent_hub/v2/provider_runtime.py::plan`이 최종 `plan_validation_failed` 전에 수집한 validation 오류를 raw plan 없이 안전한 reason taxonomy로 집계하고 `tests/agent_hub/test_v2_provider_runtime.py`에 malformed planner 응답의 repair·최종 진단 fixture를 추가하세요.
 <!-- agent-hub:handoff:v1:end -->

@@ -383,6 +383,10 @@ class ConnectionManager:
                 "refreshable": refreshable,
                 "relogin_required": relogin_required,
                 "ready": bool(state.get("ready")),
+                "invocation_ready": bool(
+                    state.get("invocation_ready", state.get("ready"))
+                ),
+                "auto_refresh_on_invoke": bool(state.get("auto_refresh_on_invoke")),
                 "auth_mode": auth_mode,
                 "plan_type": state.get("plan_type"),
                 "default_model": _public_model_id(state.get("default_model")) or "알 수 없음",
@@ -716,7 +720,9 @@ class ConnectionManager:
         with self._lock:
             self._ensure_open()
             state = self.status(provider)["providers"][provider]
-            if not state["consent"] or not state["login_ready"]:
+            if not state["consent"] or not (
+                state["login_ready"] or state["invocation_ready"]
+            ):
                 raise ConnectionError(
                     "동의와 로그인을 모두 완료한 뒤 연결을 테스트할 수 있습니다.",
                     code="provider_not_ready",
@@ -781,9 +787,10 @@ class ConnectionManager:
             auth_generation = self._auth_generations[provider]
         state = self.status(provider)["providers"][provider]
         payload = _local_model_payload(provider)
-        live_unavailable = bool(refresh and not state["ready"])
+        live_eligible = bool(state["ready"] or state["invocation_ready"])
+        live_unavailable = bool(refresh and not live_eligible)
         refreshed = False
-        if refresh and state["ready"]:
+        if refresh and live_eligible:
             daemon_result = self._daemon_call(
                 "agent_hub_catalog",
                 {"provider": provider, "refresh": True},

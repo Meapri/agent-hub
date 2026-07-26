@@ -41,7 +41,57 @@ def test_each_builtin_worker_process_initializes_and_reports_local_status(provid
     assert provider in status["data"]["providers"]
     state = status["data"]["providers"][provider]
     assert isinstance(state["ready"], bool)
+    assert isinstance(state["invocation_ready"], bool)
     assert isinstance(state["capabilities"], Mapping)
+
+
+@pytest.mark.parametrize(
+    ("consent", "expected_invocation_ready"),
+    [(True, True), (False, False)],
+)
+def test_gemini_refreshable_session_is_invocation_ready_only_after_consent(
+    monkeypatch,
+    consent,
+    expected_invocation_ready,
+):
+    monkeypatch.setattr(
+        provider_runtime.google_security,
+        "consent_status",
+        lambda: {"user_consent": consent},
+    )
+    monkeypatch.setattr(
+        provider_runtime.google_provider,
+        "status",
+        lambda **_kwargs: {
+            "configured": True,
+            "healthy": False,
+            "auth_method": "plugin_oauth_login",
+        },
+    )
+    monkeypatch.setattr(
+        provider_runtime.google_oauth,
+        "login_status",
+        lambda: {
+            "token_file_present": True,
+            "credentials_readable": True,
+            "expired": True,
+            "refresh_token_present": True,
+            "pending_login": False,
+        },
+    )
+    monkeypatch.setattr(
+        provider_runtime,
+        "_gemini_model_state",
+        lambda: {"default_model": "gemini-public-model"},
+    )
+
+    result = provider_runtime.status("gemini")
+    state = result["data"]["providers"]["gemini"]
+
+    assert state["ready"] is False
+    assert state["refreshable"] is True
+    assert state["auto_refresh_on_invoke"] is expected_invocation_ready
+    assert state["invocation_ready"] is expected_invocation_ready
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)

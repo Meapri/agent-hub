@@ -343,6 +343,14 @@ def status(provider: str, *, probe: bool = False) -> dict[str, Any]:
                 or [str(provider_state.get("error_type") or "provider_not_ready")]
             ),
         }
+    auto_refresh_on_invoke = bool(
+        provider == "gemini"
+        and state.get("consent")
+        and state.get("configured")
+        and state.get("refreshable")
+    )
+    state["auto_refresh_on_invoke"] = auto_refresh_on_invoke
+    state["invocation_ready"] = bool(state.get("ready") or auto_refresh_on_invoke)
     if state.get("settings_error"):
         state["warnings"] = [*state.get("warnings", []), state["settings_error"]]
     return _envelope(

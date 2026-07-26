@@ -242,6 +242,18 @@ class HubService:
             return "login_required"
         return "unavailable"
 
+    @staticmethod
+    def _invocation_ready(state: Mapping[str, Any]) -> bool:
+        return bool(state.get("invocation_ready", state.get("ready")))
+
+    def _cache_provider_state(self, provider: str, state: Mapping[str, Any]) -> None:
+        with self._status_cache_lock:
+            self._status_cache[provider] = (time.monotonic(), dict(state))
+
+    def _invalidate_provider_state(self, provider: str) -> None:
+        with self._status_cache_lock:
+            self._status_cache.pop(provider, None)
+
     def _readiness(
         self,
         providers: list[str],
@@ -257,7 +269,7 @@ class HubService:
                 cached = self._status_cache.get(provider)
                 if not probe and cached and now - cached[0] <= 5.0:
                     states[provider] = dict(cached[1])
-                    readiness[provider] = bool(cached[1].get("ready"))
+                    readiness[provider] = self._invocation_ready(cached[1])
                 else:
                     pending.append(provider)
 
@@ -283,9 +295,8 @@ class HubService:
                 for future in as_completed(futures):
                     provider, state = future.result()
                     states[provider] = state
-                    readiness[provider] = bool(state.get("ready"))
-                    with self._status_cache_lock:
-                        self._status_cache[provider] = (time.monotonic(), dict(state))
+                    readiness[provider] = self._invocation_ready(state)
+                    self._cache_provider_state(provider, state)
         return readiness, states
 
     def _tool_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -305,7 +316,8 @@ class HubService:
                 provider: {
                     "manifest": next(item for item in manifests if item["provider_id"] == provider),
                     "state": states[provider],
-                    "ready": readiness[provider],
+                    "ready": bool(states[provider].get("ready")),
+                    "invocation_ready": readiness[provider],
                 }
                 for provider in providers
             },
@@ -342,6 +354,7 @@ class HubService:
                     ),
                     provider_id,
                 )
+                self._cache_provider_state(provider_id, state)
                 requested_model = str(arguments.get("model") or "") or None
                 verification = self.store.generation_verification(
                     provider=provider_id,
@@ -465,6 +478,7 @@ class HubService:
                 timeout=float(task["constraints"].get("timeout_seconds") or 1790),
             )
         except HubV2Error as exc:
+            self._invalidate_provider_state(provider)
             self.store.record_provider_outcome(
                 provider=provider,
                 success=False,
@@ -478,6 +492,7 @@ class HubService:
                     reason_code=exc.code,
                 )
             raise self._safe_provider_error(exc, provider=provider) from None
+        self._invalidate_provider_state(provider)
         self.store.record_provider_outcome(provider=provider, success=True)
         resolved_model = str(result.get("model") or arguments.get("model") or "")
         if resolved_model:
@@ -1161,6 +1176,7 @@ class HubService:
                         request_id=correlation_id,
                     )
                 except HubV2Error as exc:
+                    self._invalidate_provider_state(provider)
                     exc.safe_details = {
                         **dict(exc.safe_details or {}),
                         "provider": provider,
@@ -1192,6 +1208,7 @@ class HubService:
                     if not exc.retryable:
                         raise
                     continue
+                self._invalidate_provider_state(provider)
                 self.store.record_runtime_event(
                     run_id,
                     event_type="provider_attempt_completed",

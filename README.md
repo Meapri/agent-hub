@@ -4,7 +4,7 @@ Agent Hub는 Claude, Grok, Gemini, GPT를 하나의 로컬 실행 환경에서 �
 멀티 모델 작업 플랫폼입니다. MCP 호스트에는 가벼운 bridge만 연결하고, 계획·실행·복구·정책·
 artifact 관리는 장기 실행 daemon이 맡습니다.
 
-- 현재 버전: `2.1.3`
+- 현재 버전: `2.1.4`
 - Python: 3.10 이상
 - 우선 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -120,7 +120,7 @@ staging한 뒤 그 경로로 setup하세요.
 
 # 3. 결과의 runtime_root를 host와 LaunchAgent에 연결
 ./.venv/bin/agent-hub setup --repo-root . \
-  --runtime-root ~/.agent-hub/releases/2.1.3-소스_DIGEST \
+  --runtime-root ~/.agent-hub/releases/2.1.4-소스_DIGEST \
   --json
 ```
 

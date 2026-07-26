@@ -56,6 +56,13 @@ function statusView(provider) {
     return { label: "준비됨", tone: "ready", message: "Agent Hub에서 사용할 준비가 완료되었습니다." };
   }
   if (provider.connection_state === "refreshable") {
+    if (provider.invocation_ready) {
+      return {
+        label: "자동 갱신",
+        tone: "ready",
+        message: "계정 로그인은 유지되어 있으며 다음 요청에서 세션을 자동으로 갱신합니다.",
+      };
+    }
     return {
       label: "갱신 가능",
       tone: "attention",
@@ -99,7 +106,7 @@ function statusView(provider) {
 
 function warningMessage(code) {
   const messages = {
-    auth_refresh_available: "계정 로그인은 유지되어 있습니다. 세션을 갱신해 주세요.",
+    auth_refresh_available: "계정 로그인은 유지되어 있습니다. 다음 요청에서 자동 갱신됩니다.",
     reauthentication_required: "현재 로그인은 갱신할 수 없습니다. 다시 로그인해 주세요.",
     auth_refresh_required: "세션 갱신이 필요합니다.",
     credentials_missing: "로그인 정보가 없습니다. 계정 로그인을 진행해 주세요.",
@@ -287,6 +294,7 @@ function renderDetail() {
   const authComplete = provider.logged_in;
   const tokenReady = provider.auth_ready;
   const refreshable = provider.refreshable;
+  const autoRefresh = Boolean(provider.invocation_ready && refreshable);
   const reloginRequired = provider.relogin_required;
   const authStepComplete = authComplete && !reloginRequired;
   const apiKeyMode = ["api_key", "apiKey"].includes(provider.auth_mode);
@@ -304,20 +312,24 @@ function renderDetail() {
     Object.keys(state.busy).some((key) => key.startsWith(`${provider.id}:`));
   const primary = !consentComplete
     ? "동의하고 연결"
-    : refreshable
-      ? "세션 갱신"
-      : !authComplete || reloginRequired
-        ? reloginRequired
-          ? "다시 로그인"
-          : "로그인 시작"
-      : "연결 테스트";
+    : autoRefresh
+      ? "연결 테스트"
+      : refreshable
+        ? "세션 갱신"
+        : !authComplete || reloginRequired
+          ? reloginRequired
+            ? "다시 로그인"
+            : "로그인 시작"
+          : "연결 테스트";
   const testCopy =
     provider.id === "gemini"
       ? ready
         ? "선택한 모델에 짧은 실제 요청을 보내 응답까지 확인합니다. 소량의 사용량이 발생합니다."
-        : refreshable
-          ? "세션을 갱신한 뒤 선택한 모델의 실제 응답을 확인할 수 있습니다."
-          : "동의와 로그인을 완료하면 선택한 모델의 실제 응답을 확인할 수 있습니다."
+        : autoRefresh
+          ? "요청 시 세션을 자동 갱신하고 선택한 모델의 실제 응답까지 확인합니다."
+          : refreshable
+            ? "세션을 갱신한 뒤 선택한 모델의 실제 응답을 확인할 수 있습니다."
+            : "동의와 로그인을 완료하면 선택한 모델의 실제 응답을 확인할 수 있습니다."
       : ready
         ? "모델 목록을 안전하게 조회해 연결을 확인할 수 있습니다."
         : refreshable
@@ -365,7 +377,9 @@ function renderDetail() {
                   ? `${escapeHtml(provider.session_label)}가 설정되어 있습니다. 구독 계정을 사용하려면 별도로 로그인하세요.`
                 : authComplete
                 ? refreshable
-                  ? `${escapeHtml(provider.login_owner)} 로그인은 유지되어 있으며 세션 갱신이 가능합니다.`
+                  ? autoRefresh
+                    ? `${escapeHtml(provider.login_owner)} 로그인은 유지되어 있으며 요청 시 자동으로 갱신됩니다.`
+                    : `${escapeHtml(provider.login_owner)} 로그인은 유지되어 있으며 세션 갱신이 가능합니다.`
                   : `${escapeHtml(provider.login_owner)} 로그인이 확인되었습니다.`
                 : `${escapeHtml(provider.login_owner)}의 공식 로그인 화면을 사용합니다.`
             }
@@ -394,7 +408,7 @@ function renderDetail() {
           <h3>연결 확인</h3>
           <p>${escapeHtml(testCopy)}</p>
         </div>
-        <button class="secondary-button" type="button" data-action="${refreshable ? "refresh" : "test"}"
+        <button class="secondary-button" type="button" data-action="${autoRefresh ? "test" : refreshable ? "refresh" : "test"}"
           ${
             consentComplete &&
             (refreshable || tokenReady) &&
@@ -407,13 +421,17 @@ function renderDetail() {
               : "disabled"
           }>
           ${
-            refreshable
-              ? refreshBusy
-                ? "갱신 중…"
-                : "세션 갱신"
-              : testBusy
+            autoRefresh
+              ? testBusy
                 ? "확인 중…"
-                : "연결 테스트"
+                : "자동 갱신 및 테스트"
+              : refreshable
+                ? refreshBusy
+                  ? "갱신 중…"
+                  : "세션 갱신"
+                : testBusy
+                  ? "확인 중…"
+                  : "연결 테스트"
           }
         </button>
       </section>
@@ -513,13 +531,13 @@ function renderModelSettings(provider, jobBusy) {
     ? catalog.refreshed
       ? "연결된 provider에서 최신 목록을 확인했습니다."
       : catalog.live_unavailable
-        ? provider.ready
+        ? provider.ready || provider.invocation_ready
           ? "최신 목록을 확인하지 못해 로컬 안전 목록을 표시합니다. 잠시 후 다시 시도해 주세요."
           : provider.refreshable
             ? "세션 갱신 전이라 로컬 안전 목록을 표시합니다."
             : "로그인이 완료되지 않아 로컬 안전 목록을 표시합니다."
         : "빠른 로컬 목록입니다. 연결 후 최신 목록을 새로고칠 수 있습니다."
-    : provider.ready
+    : provider.ready || provider.invocation_ready
       ? "연결된 provider에서 현재 계정의 최신 모델 목록을 불러옵니다."
       : provider.refreshable
         ? "세션을 갱신하기 전에는 로컬 안전 목록에서 선택할 수 있습니다."
@@ -677,7 +695,7 @@ async function loadModels({ provider = state.selected, refresh = false } = {}) {
       catalog.models.find((item) => item.selectable);
     state.modelSelections[provider] = current?.id || "";
     state.modelNotices[provider] = catalog.live_unavailable
-      ? state.providers[provider]?.ready
+      ? state.providers[provider]?.ready || state.providers[provider]?.invocation_ready
         ? "최신 목록을 확인하지 못해 로컬 안전 목록을 표시했습니다."
         : state.providers[provider]?.refreshable
           ? "세션 갱신 전이라 로컬 안전 목록을 표시했습니다."
@@ -1120,7 +1138,7 @@ document.addEventListener("click", async (event) => {
   if (action === "test") await startTest();
   if (action === "load-models") {
     const provider = state.providers[state.selected];
-    await loadModels({ refresh: Boolean(provider?.ready) });
+    await loadModels({ refresh: Boolean(provider?.ready || provider?.invocation_ready) });
   }
   if (action === "refresh-models") await loadModels({ refresh: true });
   if (action === "save-model") await saveModel();
@@ -1130,9 +1148,16 @@ document.addEventListener("click", async (event) => {
     const provider = state.providers[state.selected];
     if (!provider.consent) {
       openConsentDialog(
-        provider.refreshable ? "refresh" : provider.auth_ready ? "test" : "login",
+        provider.invocation_ready
+          ? "test"
+          : provider.refreshable
+            ? "refresh"
+            : provider.auth_ready
+              ? "test"
+              : "login",
       );
     }
+    else if (provider.invocation_ready) await startTest();
     else if (provider.refreshable) await startRefresh();
     else if (!provider.auth_ready) await startLogin();
     else await startTest();

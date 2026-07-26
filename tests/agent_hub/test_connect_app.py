@@ -162,10 +162,17 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         )
         assert "providerAuthFingerprint(previous)" in javascript
         assert "최신 모델 목록 불러오기" in javascript
-        assert "loadModels({ refresh: Boolean(provider?.ready) })" in javascript
+        assert (
+            "loadModels({ refresh: Boolean(provider?.ready || provider?.invocation_ready) })"
+            in javascript
+        )
+        assert "다음 요청에서 세션을 자동으로 갱신합니다." in javascript
         assert "소량의 사용량이 발생합니다." in javascript
         assert "async function startRefresh()" in javascript
-        assert 'data-action="${refreshable ? "refresh" : "test"}"' in javascript
+        assert (
+            'data-action="${autoRefresh ? "test" : refreshable ? "refresh" : "test"}"'
+            in javascript
+        )
         assert "세션 갱신" in javascript
         assert "const authStepComplete = authComplete && !reloginRequired;" in javascript
         assert "function restoreDetailFocus({ detailBusy })" in javascript
