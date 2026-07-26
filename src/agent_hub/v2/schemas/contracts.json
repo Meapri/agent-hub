@@ -81,7 +81,26 @@
         "capabilities": {"type": "array", "items": {"type": "string"}},
         "auth_owner": {"type": "string"},
         "auth_mode": {"type": "string"},
-        "allowed_domains": {"type": "array", "items": {"type": "string"}}
+        "allowed_domains": {"type": "array", "items": {"type": "string"}},
+        "context_limits": {
+          "type": "object",
+          "required": ["default_max_input_tokens", "model_overrides"],
+          "properties": {
+            "default_max_input_tokens": {"type": "integer", "minimum": 1, "maximum": 10000000},
+            "model_overrides": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "required": ["model_prefix", "max_input_tokens"],
+                "properties": {
+                  "model_prefix": {"type": "string"},
+                  "max_input_tokens": {"type": "integer", "minimum": 1, "maximum": 10000000}
+                }
+              }
+            }
+          }
+        }
       }
     },
     "routing_decision_v1": {
@@ -93,6 +112,27 @@
         "routing_mode": {"enum": ["pinned", "shadow", "advisory", "auto"]},
         "candidates": {"type": "array", "items": {"type": "object"}},
         "selected_provider": {"type": "string"}
+      }
+    },
+    "egress_review_v1": {
+      "type": "object",
+      "required": ["schema", "review_id", "proposal_sha256", "manifest_sha256", "project_root", "policy_revision", "provider", "destinations", "entries", "status", "created_at", "expires_at"],
+      "properties": {
+        "schema": {"const": "agent_hub_egress_review_v1"},
+        "review_id": {"type": "string"},
+        "proposal_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "project_root": {"type": "string"},
+        "policy_revision": {"type": "integer", "minimum": 0},
+        "provider": {"type": "string"},
+        "model": {"type": ["string", "null"]},
+        "destinations": {"type": "array", "items": {"type": "string"}},
+        "entries": {"type": "array", "items": {"type": "object"}},
+        "status": {"enum": ["pending", "approved", "rejected", "consumed", "expired"]},
+        "created_at": {"type": "number"},
+        "expires_at": {"type": "number"},
+        "decided_at": {"type": ["number", "null"]},
+        "consumed_at": {"type": ["number", "null"]}
       }
     },
     "egress_manifest_v2": {

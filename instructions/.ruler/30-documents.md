@@ -7,4 +7,4 @@
 - 한국 개발자가 다른 사람에게 설명하듯 자연스럽고 단정한 존댓말로 쓴다. 영어 원문을 문장 구조까지 옮긴 표현, 지나치게 격식적인 선언, "먼저 살펴보겠습니다" 같은 작업 중계 문장은 빼고 사용자가 실제로 알아야 할 내용을 바로 설명한다.
 - README 본문을 `~한다`, `~이다`로 계속 끝내는 독백체는 피한다. 공식 명칭과 코드 식별자는 유지하되 `콕핏`, `substrate`, `conductor`, `provider leaf` 같은 내부 용어는 쉬운 말로 바꾸거나 처음 나올 때 역할을 설명한다.
 - 표현을 그럴듯하게 만드는 일보다 빠진 기능·제약·설치 단계가 없는지 확인하는 일을 먼저 한다. 짧게 줄이더라도 중요한 사실과 실행 가능한 명령은 남긴다.
-- README나 한국어 장기 문서를 바꾼 뒤에는 `agent_hub_verify`의 `user_facing=true` 검증과 `./.venv/bin/python -m orchestrate_codex.document_quality <문서 경로>`, 관련 pytest, `./scripts/check-sync.sh`를 실행한다. 품질 검사를 통과하지 못한 결과를 완성본으로 저장하지 않는다.
+- README나 한국어 장기 문서를 바꾼 뒤에는 `./.venv/bin/python -m orchestrate_codex.verify --user-facing <문서 경로>`, `./.venv/bin/python -m orchestrate_codex.document_quality <문서 경로>`, 관련 pytest, `./scripts/check-sync.sh`를 실행한다. 품질 검사를 통과하지 못한 결과를 완성본으로 저장하지 않는다.

@@ -75,7 +75,10 @@ def test_rejects_symlink_token_export(tmp_path, monkeypatch):
 def test_status_reports_only_presence_not_token_values(tmp_path, monkeypatch):
     token_file = tmp_path / "oauth-token.json"
     enable(monkeypatch, token_file)
-    write_token(token_file, {"access": "access-secret", "refresh": "refresh-secret", "expires": 4102444800000})
+    write_token(
+        token_file,
+        {"access": "access-secret", "refresh": "refresh-secret", "expires": 4102444800000},
+    )
 
     state = agy_auth.status()
 
@@ -141,15 +144,18 @@ def test_live_status_probe_never_refreshes_plugin_token():
         "credentials_readable": True,
         "expired": False,
     }
-    with patch.object(
-        antigravity_api.agy_auth,
-        "status",
-        return_value=auth_state,
-    ) as status_call, patch.object(
-        antigravity_api,
-        "list_models",
-        return_value=[],
-    ) as list_call:
+    with (
+        patch.object(
+            antigravity_api.agy_auth,
+            "status",
+            return_value=auth_state,
+        ) as status_call,
+        patch.object(
+            antigravity_api,
+            "list_models",
+            return_value=[],
+        ) as list_call,
+    ):
         state = antigravity_api.status(probe=True)
 
     status_call.assert_called_once_with(probe=False)
@@ -170,17 +176,21 @@ def test_read_only_model_probe_does_not_refresh_after_unauthorized():
         code="antigravity_unauthorized",
         status_code=401,
     )
-    with patch.object(
-        antigravity_api.agy_auth,
-        "valid_credentials",
-        return_value=credentials,
-    ) as valid_call, patch.object(
-        antigravity_api.agy_auth,
-        "force_refresh_credentials",
-    ) as refresh_call, patch.object(
-        antigravity_api,
-        "_post",
-        side_effect=unauthorized,
+    with (
+        patch.object(
+            antigravity_api.agy_auth,
+            "valid_credentials",
+            return_value=credentials,
+        ) as valid_call,
+        patch.object(
+            antigravity_api.agy_auth,
+            "force_refresh_credentials",
+        ) as refresh_call,
+        patch.object(
+            antigravity_api,
+            "_post",
+            side_effect=unauthorized,
+        ),
     ):
         with pytest.raises(antigravity_api.AntigravityApiError):
             antigravity_api.list_models(refresh=False)
@@ -202,8 +212,9 @@ def test_direct_transport_uses_token_in_memory_and_maps_default_model():
         seen.update({"path": path, "body": body, "access_token": access_token, "timeout": timeout})
         return {"response": {"candidates": []}}
 
-    with patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=credentials), patch.object(
-        antigravity_api, "_post", side_effect=fake_post
+    with (
+        patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=credentials),
+        patch.object(antigravity_api, "_post", side_effect=fake_post),
     ):
         payload = antigravity_api.generate_content(
             model="gemini-3.5-flash",
@@ -238,6 +249,7 @@ def test_dynamic_catalog_metadata_does_not_replace_public_generation_id():
                     "gemini-3.6-flash-high": {
                         "model": "MODEL_PLACEHOLDER_M71",
                         "displayName": "Gemini 3.6 Flash (High)",
+                        "inputTokenLimit": 1_048_576,
                     }
                 }
             }
@@ -249,11 +261,14 @@ def test_dynamic_catalog_metadata_does_not_replace_public_generation_id():
             )
         return {"response": {"candidates": []}}
 
-    with patch.object(
-        antigravity_api.agy_auth,
-        "valid_credentials",
-        return_value=credentials,
-    ), patch.object(antigravity_api, "_post", side_effect=fake_post):
+    with (
+        patch.object(
+            antigravity_api.agy_auth,
+            "valid_credentials",
+            return_value=credentials,
+        ),
+        patch.object(antigravity_api, "_post", side_effect=fake_post),
+    ):
         listed = antigravity_api.list_models(refresh=False)
         payload = antigravity_api.generate_content(
             model="gemini-3.6-flash-high",
@@ -266,6 +281,7 @@ def test_dynamic_catalog_metadata_does_not_replace_public_generation_id():
         "/v1internal:generateContent",
     ]
     assert listed[0]["internal_id"] == "MODEL_PLACEHOLDER_M71"
+    assert listed[0]["max_input_tokens"] == 1_048_576
     assert calls[-1][1]["model"] == "gemini-3.6-flash-high"
     assert payload["_antigravity_diagnostics"]["used_model"] == "gemini-3.6-flash-high"
 
@@ -289,8 +305,9 @@ def test_direct_transport_capacity_fallback_to_next_model_tier():
             )
         return {"response": {"candidates": []}}
 
-    with patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=credentials), patch.object(
-        antigravity_api, "_post", side_effect=fake_post
+    with (
+        patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=credentials),
+        patch.object(antigravity_api, "_post", side_effect=fake_post),
     ):
         payload = antigravity_api.generate_content(
             model="gemini-3.5-flash-high",
@@ -323,12 +340,16 @@ def test_direct_transport_refreshes_via_oauth_after_unauthorized():
         del path, body, timeout
         calls["n"] += 1
         if access_token == "stale-token":
-            raise antigravity_api.AntigravityApiError("nope", code="antigravity_unauthorized", status_code=401)
+            raise antigravity_api.AntigravityApiError(
+                "nope", code="antigravity_unauthorized", status_code=401
+            )
         return {"response": {"candidates": []}}
 
-    with patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=stale), patch.object(
-        antigravity_api.agy_auth, "force_refresh_credentials", return_value=fresh
-    ), patch.object(antigravity_api, "_post", side_effect=fake_post):
+    with (
+        patch.object(antigravity_api.agy_auth, "valid_credentials", return_value=stale),
+        patch.object(antigravity_api.agy_auth, "force_refresh_credentials", return_value=fresh),
+        patch.object(antigravity_api, "_post", side_effect=fake_post),
+    ):
         payload = antigravity_api.generate_content(
             model="gemini-3.5-flash",
             request={"contents": [{"parts": [{"text": "hello"}]}]},
@@ -363,9 +384,7 @@ def test_direct_transport_keeps_public_model_after_project_change():
         del timeout
         if path == "/v1internal:fetchAvailableModels":
             internal = (
-                "MODEL_PROJECT_ONE"
-                if body["project"] == "project-one"
-                else "MODEL_PROJECT_TWO"
+                "MODEL_PROJECT_ONE" if body["project"] == "project-one" else "MODEL_PROJECT_TWO"
             )
             return {
                 "models": {
@@ -375,9 +394,7 @@ def test_direct_transport_keeps_public_model_after_project_change():
                     }
                 }
             }
-        generation_calls.append(
-            (access_token, body["project"], body["model"])
-        )
+        generation_calls.append((access_token, body["project"], body["model"]))
         if access_token == "stale-token":
             raise antigravity_api.AntigravityApiError(
                 "unauthorized",
@@ -474,7 +491,9 @@ def test_http_error_does_not_include_request_body_or_token():
 
     with patch.object(antigravity_api.urllib.request, "build_opener", return_value=FailingOpener()):
         with pytest.raises(antigravity_api.AntigravityApiError) as raised:
-            antigravity_api._post("/v1internal:test", {"secret": "body-secret"}, "access-secret", timeout=1)
+            antigravity_api._post(
+                "/v1internal:test", {"secret": "body-secret"}, "access-secret", timeout=1
+            )
 
     assert raised.value.code == "antigravity_unauthorized"
     assert "body-secret" not in str(raised.value)

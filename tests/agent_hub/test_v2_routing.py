@@ -182,3 +182,53 @@ def test_circuit_breaker_is_a_hard_routing_filter(tmp_path):
     assert decision["selected_provider"] != "gpt"
     gpt = next(item for item in decision["candidates"] if item["provider"] == "gpt")
     assert gpt["excluded_reason"] == "circuit_open"
+
+
+def test_context_limit_excludes_only_models_that_cannot_accept_input(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+
+    decision = route(
+        store=store,
+        task=_task(),
+        planner_provider="gpt",
+        routing_mode="shadow",
+        provider_allowlist=["gpt", "claude"],
+        readiness={"gpt": True, "claude": True},
+        models={
+            "gpt": "gpt-5.3-codex-spark",
+            "claude": "claude-sonnet-5",
+        },
+        estimated_input_tokens=125_000,
+    )
+
+    assert decision["selected_provider"] == "claude"
+    gpt = next(item for item in decision["candidates"] if item["provider"] == "gpt")
+    assert gpt["excluded_reason"] == "context_limit"
+    assert gpt["max_input_tokens"] == 121_600
+
+
+def test_pinned_context_limit_returns_actionable_context_error(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+
+    with pytest.raises(HubV2Error) as error:
+        route(
+            store=store,
+            task=_task(),
+            planner_provider="gpt",
+            routing_mode="pinned",
+            provider_allowlist=["gpt", "claude"],
+            readiness={"gpt": True, "claude": True},
+            models={
+                "gpt": "gpt-5.3-codex-spark",
+                "claude": "claude-sonnet-5",
+            },
+            estimated_input_tokens=125_000,
+        )
+
+    assert error.value.code == "provider_context_limit"
+    assert error.value.safe_details == {
+        "provider": "gpt",
+        "model": "gpt-5.3-codex-spark",
+        "estimated_input_tokens": 125_000,
+        "max_input_tokens": 121_600,
+    }

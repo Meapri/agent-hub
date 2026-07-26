@@ -7,7 +7,7 @@ macOS용 멀티 모델 실행 환경입니다.
 인계 기록을 로컬에서 함께 관리합니다. Codex나 Claude Code가 종료되어도 실행 상태가 남기
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
-- 현재 버전: `2.1.4`
+- 현재 버전: `2.2.0`
 - Python: 3.10 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -27,16 +27,20 @@ Provider마다 로그인과 API 동작은 다르지만, Agent Hub 밖에서는 �
 긴 작업은 run, step, event 단위로 SQLite에 저장됩니다. 호스트의 MCP 연결이 끊겨도
 백그라운드의 `agent-hubd`가 실행 상태를 유지하며, 완료된 단계는 다시 실행하지 않습니다.
 
-### 외부 전송 전 확인
+### 외부 전송 전 사람 확인
 
 저장소 파일이나 이전 결과물을 모델에 보낼 때는 포함할 파일, 데이터 크기, 목적 provider와
-내용 digest를 먼저 보여 줍니다. 이 변경안을 승인하기 전에는 외부 모델을 호출하지 않습니다.
+내용 digest를 먼저 만듭니다. 연결 GUI에서 사람이 이 목록을 승인한 뒤 같은 digest, policy
+revision과 일회용 review ID를 제출해야 외부 모델을 호출합니다. 승인 전에는 provider 호출이
+발생하지 않으며, 한 번 사용한 승인은 다시 사용할 수 없습니다.
 
 ### Provider별 격리
 
 Claude, Grok, Gemini, GPT는 각각 별도 worker process에서 실행됩니다. 한 provider가
 비정상 종료되어도 daemon과 다른 provider에 영향을 주지 않도록 분리했습니다. macOS에서는
-허용된 도메인과 필요한 파일 경로만 접근하도록 제한합니다.
+외부 TCP/UDP를 허용 도메인 proxy로 제한하고, worker가 홈 디렉터리의 다른 자격 정보 경로를
+읽지 못하도록 막습니다. 직접 DNS 조회와 사용자·임시 디렉터리의 Unix socket 연결도
+차단합니다.
 
 ### 결과의 출처와 판단 근거 보존
 
@@ -185,8 +189,10 @@ claude plugin install agent-hub@agent-hub --scope user
 흐름을 사용합니다.
 
 1. `agent_hub_plan`의 `prepare`가 선택한 파일을 조사하고 외부 전송 변경안을 만듭니다.
-2. 사용자가 파일 목록, 목적 provider, 크기와 digest를 확인합니다.
-3. 승인된 digest로 `apply`를 실행하면 planner가 작업 단계를 제안합니다.
+2. 연결 GUI에서 사용자가 파일 목록, 목적 provider, 크기와 digest를 검토해 승인하거나
+   거부합니다.
+3. 같은 digest, policy revision과 `approval_request_id`로 `apply`를 실행하면 planner가
+   작업 단계를 제안합니다.
 4. 로컬 validator가 의존 관계, capability, 정책과 사용 한도를 검사합니다.
 5. `agent_hub_start`가 durable run을 만들고 `agent_hub_continue`가 준비된 단계를 실행합니다.
 6. `agent_hub_get`, `agent_hub_events`, `agent_hub_artifact`로 상태와 결과를 확인합니다.
@@ -194,6 +200,9 @@ claude plugin install agent-hub@agent-hub --scope user
 외부 요청이 실제로 전달됐는지 알 수 없는 timeout이나 worker crash가 발생하면 자동으로 같은
 요청을 다시 보내지 않습니다. 이런 경우에는 `outcome_unknown`으로 멈춰 중복 생성 가능성을
 사용자가 판단할 수 있게 합니다.
+Provider가 명확한 retryable 실패를 반환한 step은 `agent_hub_continue`의
+`retry_failed_steps`에 step ID를 명시해 다시 실행할 수 있습니다. 안전 여부가 불명확한
+`outcome_unknown`이나 내부 오류는 이 경로로 재시도할 수 없습니다.
 
 ## 공개 MCP 도구 14개
 
@@ -202,9 +211,9 @@ claude plugin install agent-hub@agent-hub --scope user
 | `agent_hub_status` | Daemon, DB, provider와 설치 상태를 확인합니다. |
 | `agent_hub_catalog` | Provider, model, capability와 검증 상태를 조회합니다. |
 | `agent_hub_execute` | 짧은 단일 작업을 실행합니다. |
-| `agent_hub_plan` | 로컬 조사와 외부 전송 변경안을 준비하고, 승인 후 계획을 만듭니다. |
+| `agent_hub_plan` | 로컬 조사와 외부 전송 변경안을 준비하고, digest 재확인 후 계획을 만듭니다. |
 | `agent_hub_start` | 승인된 계획으로 durable run을 시작합니다. |
-| `agent_hub_continue` | 예상 revision을 확인하고 다음 실행 단계를 진행합니다. |
+| `agent_hub_continue` | 예상 revision을 확인하고 다음 실행 단계를 진행하거나 안전한 failed step을 명시적으로 재시도합니다. |
 | `agent_hub_get` | Run과 step의 현재 상태를 읽습니다. |
 | `agent_hub_events` | 민감한 본문을 제외한 event를 cursor 방식으로 조회합니다. |
 | `agent_hub_cancel` | Run과 실행 중인 worker를 취소합니다. |
@@ -252,7 +261,8 @@ Provider와 model 허용 목록, 외부 전송 규칙, 최대 실행 시간, pro
 
 ## 보안과 데이터 경계
 
-- 저장소 내용을 외부로 보내기 전 `egress_manifest_v2`와 digest 승인을 요구합니다.
+- 저장소 내용을 외부로 보내기 전 `egress_manifest_v2`를 연결 GUI에 표시하고, 사람이 승인한
+  일회용 review ID와 digest·policy revision 재확인을 요구합니다.
 - Secret으로 보이는 줄은 fact pack과 로컬 색인에 넣기 전에 제외합니다.
 - 긴 작업의 입력과 결과 artifact는 AES-GCM으로 암호화합니다.
 - 암호화 key는 macOS Keychain에 저장합니다. SQLite DB 전체가 암호화되는 것은 아닙니다.
@@ -261,8 +271,10 @@ Provider와 model 허용 목록, 외부 전송 규칙, 최대 실행 시간, pro
 - Third-party provider는 package와 manifest digest, 권한을 검토하기 전에는 설치하지 않습니다.
 - Agent Hub core에는 임의 shell 명령 실행 기능이 없습니다.
 
-Agent Hub의 격리 대상은 provider process와 외부 통신입니다. 같은 macOS 사용자 권한을 이미
-획득한 악성 process까지 막는 다중 사용자 sandbox는 아닙니다.
+Agent Hub의 격리 대상은 provider process, 홈 디렉터리의 민감 경로와 외부 통신입니다.
+worker 실행에 필요한 system runtime 파일과 일부 macOS system socket은 사용할 수 있지만,
+직접 DNS 조회와 사용자 홈·임시 디렉터리의 Unix socket 연결은 차단합니다. 같은 macOS 사용자
+권한을 이미 획득한 악성 process까지 막는 다중 사용자 sandbox는 아닙니다.
 
 ## Artifact와 HANDOFF
 

@@ -32,6 +32,24 @@ def test_tool_definitions_include_chat():
     assert "grok_codex_doctor" in names
 
 
+def test_live_models_preserve_provider_context_limit(monkeypatch):
+    monkeypatch.setattr(models.api, "auth_headers", lambda: {})
+    monkeypatch.setattr(
+        models.api,
+        "http_json",
+        lambda *_args, **_kwargs: {"data": [{"id": "grok-live", "context_window": 500_000}]},
+    )
+
+    assert models.api.list_models_live() == [
+        {
+            "id": "grok-live",
+            "display": "grok-live",
+            "source": "live",
+            "max_input_tokens": 500_000,
+        }
+    ]
+
+
 def test_live_model_failure_does_not_expose_exception_message(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
@@ -322,9 +340,7 @@ def test_oauth_poll_rejects_untrusted_token_endpoint():
 
 
 def test_oauth_http_error_does_not_expose_response_body():
-    response_body = BytesIO(
-        b'{"error":"server_error","detail":"sentinel-refresh-token"}'
-    )
+    response_body = BytesIO(b'{"error":"server_error","detail":"sentinel-refresh-token"}')
     error = urllib.error.HTTPError(
         oauth_login.XAI_OAUTH_DEVICE_CODE_URL,
         400,
@@ -627,10 +643,7 @@ def test_oauth_pending_clear_requires_matching_flow(monkeypatch, tmp_path):
 
     assert oauth_login.clear_pending_login(expected_flow_id="other-flow") is False
     assert oauth_login.pending_path().is_file()
-    assert (
-        oauth_login.clear_pending_login(expected_flow_id=started["flow_id"])
-        is True
-    )
+    assert oauth_login.clear_pending_login(expected_flow_id=started["flow_id"]) is True
 
 
 @pytest.mark.parametrize(

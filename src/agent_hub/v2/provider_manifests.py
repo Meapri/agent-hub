@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from agent_hub import __version__
 from agent_hub.provider_registry import MANIFESTS
@@ -28,6 +28,51 @@ _DOMAINS = {
         "oauth2.googleapis.com",
     ],
     "gpt": ["chatgpt.com"],
+}
+_CONTEXT_LIMITS = {
+    # Anthropic Models API/docs: current long-context models expose 1M;
+    # unlisted and older models fall back to the conservative 200k window.
+    "claude": {
+        "default_max_input_tokens": 200_000,
+        "model_overrides": [
+            {"model_prefix": model_prefix, "max_input_tokens": 1_000_000}
+            for model_prefix in (
+                "claude-opus-5",
+                "claude-fable-5",
+                "claude-sonnet-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-sonnet-4-6",
+            )
+        ],
+    },
+    # xAI publishes 500k for Grok 4.5 and 1M for Grok 4.20.
+    "grok": {
+        "default_max_input_tokens": 256_000,
+        "model_overrides": [
+            {"model_prefix": "grok-4.20", "max_input_tokens": 1_000_000},
+            {"model_prefix": "grok-4.5", "max_input_tokens": 500_000},
+        ],
+    },
+    # Antigravity can expose non-Gemini backends. Unknown IDs therefore use
+    # the shared conservative default instead of inheriting Gemini's 1M limit.
+    "gemini": {
+        "default_max_input_tokens": 131_072,
+        "model_overrides": [
+            {"model_prefix": "gemini-", "max_input_tokens": 1_048_576},
+        ],
+    },
+    # Codex reserves 5% of its catalog context for harness/output overhead.
+    "gpt": {
+        "default_max_input_tokens": 121_600,
+        "model_overrides": [
+            {"model_prefix": "gpt-5.6-", "max_input_tokens": 258_400},
+            {"model_prefix": "gpt-5.5", "max_input_tokens": 258_400},
+            {"model_prefix": "gpt-5.4", "max_input_tokens": 258_400},
+            {"model_prefix": "gpt-5.3-codex-spark", "max_input_tokens": 121_600},
+        ],
+    },
 }
 
 
@@ -67,6 +112,7 @@ def builtin_provider_manifests() -> tuple[dict[str, Any], ...]:
                     "supports_cancel": manifest.id in {"grok", "gemini"},
                     "supports_streaming": manifest.id in {"gemini"},
                     "supports_idempotency": False,
+                    "context_limits": _CONTEXT_LIMITS[manifest.id],
                     "settings_schema": {
                         "type": "object",
                         "properties": {
@@ -86,3 +132,48 @@ def manifest_for(provider_id: str) -> dict[str, Any]:
         if manifest["provider_id"] == provider_id:
             return manifest
     raise KeyError(provider_id)
+
+
+def model_input_limit(
+    provider_id: str,
+    model: str | None = None,
+    *,
+    observed: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve one model's safe input limit from its provider manifest."""
+
+    manifest = manifest_for(provider_id)
+    limits = manifest["context_limits"]
+    selected_model = str(model or "")
+    if (
+        isinstance(observed, Mapping)
+        and observed.get("provider") == provider_id
+        and observed.get("model") == selected_model
+        and isinstance(observed.get("max_input_tokens"), int)
+        and not isinstance(observed.get("max_input_tokens"), bool)
+        and 1 <= int(observed["max_input_tokens"]) <= 10_000_000
+    ):
+        return {
+            "provider": provider_id,
+            "model": selected_model or None,
+            "max_input_tokens": int(observed["max_input_tokens"]),
+            "source": str(observed.get("source") or "live_catalog"),
+            "matched_prefix": None,
+            "catalog_revision": str(observed.get("catalog_revision") or "") or None,
+        }
+    for override in limits["model_overrides"]:
+        if selected_model.startswith(override["model_prefix"]):
+            return {
+                "provider": provider_id,
+                "model": selected_model or None,
+                "max_input_tokens": int(override["max_input_tokens"]),
+                "source": "model_override",
+                "matched_prefix": override["model_prefix"],
+            }
+    return {
+        "provider": provider_id,
+        "model": selected_model or None,
+        "max_input_tokens": int(limits["default_max_input_tokens"]),
+        "source": "provider_default",
+        "matched_prefix": None,
+    }

@@ -14,7 +14,7 @@ from agent_hub.v2.release import (
     plan_rollback,
     plan_update,
 )
-from agent_hub.v2.store import HubStore
+from agent_hub.v2.store import STORE_SCHEMA_VERSION, HubStore
 
 
 def _executable(root: Path):
@@ -115,7 +115,10 @@ def test_schema_rollback_requires_coordinated_daemon_restart(tmp_path, monkeypat
         rollback_path=rollback,
     )
     with sqlite3.connect(state_db) as connection:
-        connection.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(STORE_SCHEMA_VERSION + 1),),
+        )
 
     proposal = plan_rollback(
         launch_agent_path=launch,
@@ -188,7 +191,7 @@ def test_database_restore_removes_incompatible_wal_sidecars(tmp_path):
 
     restored = _restore_database_snapshot(source, destination)
 
-    assert restored["schema_version"] == 7
+    assert restored["schema_version"] == STORE_SCHEMA_VERSION
     assert destination.exists()
     assert not wal.exists()
     assert not shm.exists()
@@ -263,7 +266,10 @@ def test_schema_restore_refuses_to_run_when_daemon_cannot_stop(tmp_path, monkeyp
         rollback_path=rollback,
     )
     with sqlite3.connect(state_db) as connection:
-        connection.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(STORE_SCHEMA_VERSION + 1),),
+        )
     proposal = plan_rollback(launch_agent_path=launch, rollback_path=rollback)
 
     with pytest.raises(HubV2Error) as error:
@@ -278,12 +284,9 @@ def test_schema_restore_refuses_to_run_when_daemon_cannot_stop(tmp_path, monkeyp
     assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(
         tmp_path / "new/bin/agent-hubd"
     )
-    assert (
-        sqlite3.connect(state_db)
-        .execute("SELECT value FROM meta WHERE key = 'schema_version'")
-        .fetchone()[0]
-        == "8"
-    )
+    assert sqlite3.connect(state_db).execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0] == str(STORE_SCHEMA_VERSION + 1)
 
 
 def test_restore_exception_recovers_previous_database_and_daemon(tmp_path, monkeypatch):
@@ -317,7 +320,10 @@ def test_restore_exception_recovers_previous_database_and_daemon(tmp_path, monke
         rollback_path=rollback,
     )
     with sqlite3.connect(state_db) as connection:
-        connection.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(STORE_SCHEMA_VERSION + 1),),
+        )
     proposal = plan_rollback(launch_agent_path=launch, rollback_path=rollback)
     real_restore = _restore_database_snapshot
 
@@ -349,12 +355,9 @@ def test_restore_exception_recovers_previous_database_and_daemon(tmp_path, monke
         "recovery_stage": "complete",
     }
     assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(new)
-    assert (
-        sqlite3.connect(state_db)
-        .execute("SELECT value FROM meta WHERE key = 'schema_version'")
-        .fetchone()[0]
-        == "8"
-    )
+    assert sqlite3.connect(state_db).execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0] == str(STORE_SCHEMA_VERSION + 1)
     assert not Path(str(rollback) + ".emergency.state.sqlite3").exists()
 
 
@@ -389,7 +392,10 @@ def test_candidate_bootstrap_failure_recovers_previous_install(tmp_path, monkeyp
         rollback_path=rollback,
     )
     with sqlite3.connect(state_db) as connection:
-        connection.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(STORE_SCHEMA_VERSION + 1),),
+        )
     proposal = plan_rollback(launch_agent_path=launch, rollback_path=rollback)
 
     with pytest.raises(HubV2Error) as error:
@@ -406,12 +412,64 @@ def test_candidate_bootstrap_failure_recovers_previous_install(tmp_path, monkeyp
         "recovery_stage": "complete",
     }
     assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(new)
-    assert (
-        sqlite3.connect(state_db)
-        .execute("SELECT value FROM meta WHERE key = 'schema_version'")
-        .fetchone()[0]
-        == "8"
+    assert sqlite3.connect(state_db).execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0] == str(STORE_SCHEMA_VERSION + 1)
+
+
+def test_failed_update_preserves_previous_rollback_slot(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "agent_hub.v2.release._candidate_health",
+        lambda _after, *, source_state_db: {"success": True},
     )
+    monkeypatch.setattr("agent_hub.v2.release._wait_installed_stopped", lambda _payload: True)
+    monkeypatch.setattr("agent_hub.v2.release._wait_installed_health", lambda _payload: True)
+    returncodes = iter((0, 1, 0, 0))
+    monkeypatch.setattr(
+        "agent_hub.v2.release.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=next(returncodes)),
+    )
+    first = _executable(tmp_path / "first")
+    second = _executable(tmp_path / "second")
+    _executable(tmp_path / "third")
+    launch = tmp_path / "LaunchAgents/agent.plist"
+    rollback = tmp_path / "rollback/agent.plist"
+    rollback_metadata = Path(str(rollback) + ".metadata.json")
+    rollback_db = Path(str(rollback) + ".state.sqlite3")
+    state_db = tmp_path / "state/state.sqlite3"
+    HubStore(state_db)
+    _plist(launch, first, state_db)
+    first_update = plan_update(
+        tmp_path / "second",
+        launch_agent_path=launch,
+        rollback_path=rollback,
+    )
+    apply_switch(
+        first_update,
+        proposal_sha256=first_update["proposal_sha256"],
+        activate=False,
+        rollback_path=rollback,
+    )
+    previous_slot = {path: path.read_bytes() for path in (rollback, rollback_metadata, rollback_db)}
+    failed_update = plan_update(
+        tmp_path / "third",
+        launch_agent_path=launch,
+        rollback_path=rollback,
+    )
+
+    with pytest.raises(HubV2Error) as error:
+        apply_switch(
+            failed_update,
+            proposal_sha256=failed_update["proposal_sha256"],
+            activate=True,
+            rollback_path=rollback,
+        )
+
+    assert error.value.code == "release_activation_failed"
+    assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(second)
+    assert {
+        path: path.read_bytes() for path in (rollback, rollback_metadata, rollback_db)
+    } == previous_slot
 
 
 def test_failed_recovery_is_reported_without_claiming_rollback(tmp_path, monkeypatch):
@@ -444,7 +502,10 @@ def test_failed_recovery_is_reported_without_claiming_rollback(tmp_path, monkeyp
         rollback_path=rollback,
     )
     with sqlite3.connect(state_db) as connection:
-        connection.execute("UPDATE meta SET value = '8' WHERE key = 'schema_version'")
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(STORE_SCHEMA_VERSION + 1),),
+        )
     proposal = plan_rollback(launch_agent_path=launch, rollback_path=rollback)
     real_restore = _restore_database_snapshot
 
@@ -482,19 +543,13 @@ def test_failed_recovery_is_reported_without_claiming_rollback(tmp_path, monkeyp
         "command": "agent-hub doctor",
     }
     assert plistlib.loads(launch.read_bytes())["ProgramArguments"][0] == str(new)
-    assert (
-        sqlite3.connect(state_db)
-        .execute("SELECT value FROM meta WHERE key = 'schema_version'")
-        .fetchone()[0]
-        == "8"
-    )
+    assert sqlite3.connect(state_db).execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0] == str(STORE_SCHEMA_VERSION + 1)
     emergency = Path(str(rollback) + ".emergency.state.sqlite3")
-    assert (
-        sqlite3.connect(emergency)
-        .execute("SELECT value FROM meta WHERE key = 'schema_version'")
-        .fetchone()[0]
-        == "8"
-    )
+    assert sqlite3.connect(emergency).execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()[0] == str(STORE_SCHEMA_VERSION + 1)
 
     rollback_files = {
         path: path.read_bytes()

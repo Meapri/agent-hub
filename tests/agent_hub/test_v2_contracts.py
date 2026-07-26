@@ -15,7 +15,7 @@ from agent_hub.v2.contracts import (
     validate_task,
 )
 from agent_hub.v2.errors import HubV2Error, safe_unexpected_error
-from agent_hub.v2.provider_manifests import builtin_provider_manifests
+from agent_hub.v2.provider_manifests import builtin_provider_manifests, model_input_limit
 
 
 def _task():
@@ -207,6 +207,53 @@ def test_builtin_provider_manifests_are_v2_conformant():
         "search"
         not in next(item for item in manifests if item["provider_id"] == "gpt")["capabilities"]
     )
+    assert all(item["context_limits"]["default_max_input_tokens"] > 0 for item in manifests)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "expected"),
+    [
+        ("claude", "claude-opus-5", 1_000_000),
+        ("claude", "claude-haiku-4-5-20251001", 200_000),
+        ("grok", "grok-4.5", 500_000),
+        ("grok", "grok-4.20-0309-reasoning", 1_000_000),
+        ("gemini", "gemini-3.6-flash-high", 1_048_576),
+        ("gemini", "gpt-oss-120b", 131_072),
+        ("gpt", "gpt-5.6-sol", 258_400),
+        ("gpt", "gpt-5.3-codex-spark", 121_600),
+    ],
+)
+def test_builtin_model_input_limits_use_longest_matching_override(
+    provider,
+    model,
+    expected,
+):
+    assert model_input_limit(provider, model)["max_input_tokens"] == expected
+
+
+def test_provider_manifest_rejects_duplicate_context_limit_prefixes():
+    with pytest.raises(HubV2Error) as error:
+        validate_provider_manifest(
+            {
+                "schema": PROVIDER_MANIFEST_SCHEMA,
+                "provider_id": "fixture",
+                "adapter_version": "1",
+                "protocol_version": "2.0",
+                "capabilities": ["chat"],
+                "auth_owner": "fixture",
+                "auth_mode": "none",
+                "allowed_domains": ["example.com"],
+                "context_limits": {
+                    "default_max_input_tokens": 10,
+                    "model_overrides": [
+                        {"model_prefix": "fixture-", "max_input_tokens": 20},
+                        {"model_prefix": "fixture-", "max_input_tokens": 30},
+                    ],
+                },
+            }
+        )
+
+    assert error.value.code == "invalid_provider_manifest"
 
 
 @pytest.mark.parametrize("model", ["MODEL_PLACEHOLDER_M71", "model_internal", "foo-placeholder"])
@@ -234,5 +281,6 @@ def test_packaged_contract_fixture_contains_all_public_v2_schemas():
         "artifact_v2",
         "provider_manifest_v2",
         "routing_decision_v1",
+        "egress_review_v1",
         "egress_manifest_v2",
     }

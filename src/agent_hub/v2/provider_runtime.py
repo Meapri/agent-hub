@@ -42,6 +42,13 @@ from .errors import HubV2Error
 
 PROVIDERS = ("claude", "grok", "gemini", "gpt")
 PLANNER_REPAIR_LIMIT = limits.MAX_PLANNER_REPAIRS
+RUNTIME_PLANNER_CAPABILITIES = (
+    "chat",
+    "inspect_codebase",
+    "search",
+    "write",
+    "review_text",
+)
 _BASIC_CHAT_KEYS = {
     "prompt",
     "system",
@@ -598,7 +605,12 @@ def plan(
 ) -> dict[str, Any]:
     """Generate and locally validate the provider-independent planner DAG."""
 
-    initial = orchestrator.planner_prompt(prompt, facts="", max_steps=max_steps)
+    initial = orchestrator.planner_prompt(
+        prompt,
+        facts="",
+        max_steps=max_steps,
+        allowed_capabilities=RUNTIME_PLANNER_CAPABILITIES,
+    )
     previous = ""
     validation_error = ""
     attempts: list[dict[str, Any]] = []
@@ -632,6 +644,7 @@ def plan(
                 parsed,
                 max_steps=max_steps,
                 max_calls=max_leaf_calls,
+                allowed_capabilities=RUNTIME_PLANNER_CAPABILITIES,
             )
         except ValueError as exc:
             validation_error = str(exc)[:200]

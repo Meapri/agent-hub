@@ -36,6 +36,9 @@ const state = {
   modelErrors: {},
   modelNotices: {},
   modelGenerations: {},
+  egressReviews: [],
+  egressError: "",
+  egressBusy: {},
   detailFocusAction: null,
   jobAnnouncement: "",
 };
@@ -225,6 +228,7 @@ async function loadStatus({ quiet = false } = {}) {
       state.selected = providerOrder.find((id) => state.providers[id]) || "claude";
     }
     render();
+    await loadEgressReviews();
     return true;
   } catch (error) {
     if (state.statusGeneration !== generation) return false;
@@ -247,8 +251,84 @@ async function loadStatus({ quiet = false } = {}) {
 
 function render() {
   renderSummary();
+  renderEgressReviews();
   renderProviderList();
   renderDetail();
+}
+
+async function loadEgressReviews() {
+  try {
+    const payload = await request("/api/egress-reviews");
+    state.egressReviews = Array.isArray(payload.reviews) ? payload.reviews : [];
+    state.egressError = "";
+  } catch (error) {
+    state.egressError = error.message;
+  }
+  renderEgressReviews();
+}
+
+function renderEgressReviews() {
+  const panel = $("#egress-reviews");
+  const list = $("#egress-review-list");
+  if (!panel || !list) return;
+  const reviews = state.egressReviews;
+  panel.hidden = reviews.length === 0 && !state.egressError;
+  $("#egress-count").textContent = reviews.length ? `${reviews.length}건` : "";
+  if (state.egressError) {
+    list.innerHTML = `<p class="form-error" role="alert">${escapeHtml(state.egressError)}</p>`;
+    return;
+  }
+  list.innerHTML = reviews
+    .map((review) => {
+      const pending = review.status === "pending";
+      const busy = Boolean(state.egressBusy[review.review_id]);
+      const entries = (review.entries || [])
+        .map((entry) => {
+          const label = entry.path_alias || entry.artifact_id || "저장된 결과물";
+          return `<li><code>${escapeHtml(label)}</code><span>${Number(entry.chars || 0).toLocaleString()}자 · ${escapeHtml(entry.classification || "project")}</span></li>`;
+        })
+        .join("");
+      return `
+        <article class="egress-card">
+          <div class="egress-card-copy">
+            <strong>${escapeHtml(review.provider)}${review.model ? ` · ${escapeHtml(review.model)}` : ""}</strong>
+            <span>전송 대상: ${escapeHtml((review.destinations || []).join(", "))}</span>
+            <ul>${entries}</ul>
+          </div>
+          <div class="egress-actions">
+            ${
+              pending
+                ? `<button class="secondary-button" type="button"
+                    data-egress-action="reject" data-review-id="${escapeHtml(review.review_id)}"
+                    ${busy ? "disabled" : ""}>거부</button>
+                  <button class="primary-button" type="button"
+                    data-egress-action="approve" data-review-id="${escapeHtml(review.review_id)}"
+                    ${busy ? "disabled" : ""}>${busy ? "저장 중…" : "전송 승인"}</button>`
+                : `<span class="egress-approved">승인됨 · 작업 재개 대기</span>`
+            }
+          </div>
+        </article>`;
+    })
+    .join("");
+}
+
+async function decideEgressReview(reviewId, decision) {
+  if (!reviewId || state.egressBusy[reviewId]) return;
+  state.egressBusy[reviewId] = true;
+  renderEgressReviews();
+  try {
+    await request(`/api/egress-reviews/${encodeURIComponent(reviewId)}/${decision}`, {
+      method: "POST",
+      body: {},
+    });
+    showToast(decision === "approve" ? "외부 전송을 한 번 승인했습니다." : "외부 전송을 거부했습니다.");
+    await loadEgressReviews();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    delete state.egressBusy[reviewId];
+    renderEgressReviews();
+  }
 }
 
 function renderSummary() {
@@ -1115,6 +1195,14 @@ function showToast(message) {
 }
 
 document.addEventListener("click", async (event) => {
+  const egressButton = event.target.closest("[data-egress-action]");
+  if (egressButton) {
+    await decideEgressReview(
+      egressButton.dataset.reviewId,
+      egressButton.dataset.egressAction,
+    );
+    return;
+  }
   const providerButton = event.target.closest("[data-provider]");
   if (providerButton) {
     state.selected = providerButton.dataset.provider;

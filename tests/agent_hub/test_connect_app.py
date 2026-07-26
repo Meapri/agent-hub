@@ -18,6 +18,7 @@ class FakeManager:
         self.refreshed = []
         self.model_updates = []
         self.model_resets = []
+        self.egress_decisions = []
         self.closed = False
 
     def status(self):
@@ -37,6 +38,34 @@ class FakeManager:
 
     def job(self, job_id):
         return {"id": job_id, "state": "complete"}
+
+    def egress_reviews(self):
+        return {
+            "success": True,
+            "schema": "agent_hub_egress_review_list_v1",
+            "reviews": [
+                {
+                    "review_id": "egr_fixture",
+                    "provider": "gpt",
+                    "model": "gpt-fixture",
+                    "destinations": ["gpt"],
+                    "entries": [
+                        {
+                            "path_alias": "README.md",
+                            "chars": 100,
+                            "classification": "project",
+                        }
+                    ],
+                    "status": "pending",
+                }
+            ],
+            "pending_count": 1,
+            "approved_count": 0,
+        }
+
+    def decide_egress_review(self, review_id, *, decision):
+        self.egress_decisions.append((review_id, decision))
+        return {"success": True, "review": {"review_id": review_id, "status": "approved"}}
 
     def start_refresh(self, provider):
         self.refreshed.append(provider)
@@ -156,6 +185,8 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         with opener.open(f"{server.origin}/app.js") as response:
             javascript = response.read().decode()
         assert "function clearModelCatalog(provider)" in javascript
+        assert "function renderEgressReviews()" in javascript
+        assert "data-egress-action" in javascript
         assert (
             'if (["login", "refresh"].includes(job.kind)) clearModelCatalog(provider);'
             in javascript
@@ -170,33 +201,26 @@ def test_initial_nonce_bootstraps_tab_session_and_serves_assets():
         assert "소량의 사용량이 발생합니다." in javascript
         assert "async function startRefresh()" in javascript
         assert (
-            'data-action="${autoRefresh ? "test" : refreshable ? "refresh" : "test"}"'
-            in javascript
+            'data-action="${autoRefresh ? "test" : refreshable ? "refresh" : "test"}"' in javascript
         )
         assert "세션 갱신" in javascript
         assert "const authStepComplete = authComplete && !reloginRequired;" in javascript
         assert "function restoreDetailFocus({ detailBusy })" in javascript
         assert "function announceJob(job)" in javascript
-        assert "$(\"#job-announcer\").textContent = text;" in javascript
-        assert (
-            "provider.local_credentials_present || provider.pending_login_present"
-            in javascript
-        )
+        assert '$("#job-announcer").textContent = text;' in javascript
+        assert "provider.local_credentials_present || provider.pending_login_present" in javascript
         assert "if (state.forgetInFlight) return;" in javascript
         assert "state.forgetInFlight = provider;" in javascript
         assert 'setBusy(provider, "forget", true);' in javascript
         assert "clearProviderJob(provider);" in javascript
         assert '$("#forget-dialog").addEventListener("cancel"' in javascript
         assert "event.preventDefault();" in javascript
-        assert (
-            javascript.index(
-                "clearProviderJob(provider);",
-                javascript.index("async function forgetLocal"),
-            )
-            < javascript.index(
-                "} catch (error) {",
-                javascript.index("async function forgetLocal"),
-            )
+        assert javascript.index(
+            "clearProviderJob(provider);",
+            javascript.index("async function forgetLocal"),
+        ) < javascript.index(
+            "} catch (error) {",
+            javascript.index("async function forgetLocal"),
         )
 
         with opener.open(_session_request(f"{server.origin}/api/status")) as response:
@@ -334,6 +358,47 @@ def test_mutation_requires_same_origin_and_visible_intent_header():
         thread.join(timeout=1)
 
 
+def test_egress_review_requires_authenticated_visible_gui_action():
+    server, manager, thread = _running_server()
+    opener = _opener()
+    try:
+        opener.open(f"{server.origin}/?session=test-session").read()
+        with opener.open(_session_request(f"{server.origin}/api/egress-reviews")) as response:
+            listed = json.load(response)
+        assert listed["reviews"][0]["review_id"] == "egr_fixture"
+
+        blocked = urllib.request.Request(
+            f"{server.origin}/api/egress-reviews/egr_fixture/approve",
+            data=b"{}",
+            method="POST",
+            headers={"X-Agent-Hub-Session": "test-session"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            opener.open(blocked)
+        assert error.value.code == 403
+        assert manager.egress_decisions == []
+
+        approved = urllib.request.Request(
+            f"{server.origin}/api/egress-reviews/egr_fixture/approve",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": server.origin,
+                "X-Agent-Hub-Intent": "provider-management",
+                "X-Agent-Hub-Session": "test-session",
+            },
+        )
+        with opener.open(approved) as response:
+            payload = json.load(response)
+        assert payload["review"]["status"] == "approved"
+        assert manager.egress_decisions == [("egr_fixture", "approve")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
 def test_forget_local_failure_returns_conflict():
     class FailingManager(FakeManager):
         def remove_local_credentials(self, provider, *, confirmation):
@@ -349,9 +414,7 @@ def test_forget_local_failure_returns_conflict():
         opener.open(f"{server.origin}/?session=test-session").read()
         request = urllib.request.Request(
             f"{server.origin}/api/providers/gemini/forget-local",
-            data=json.dumps(
-                {"confirmation": "forget-local:gemini"}
-            ).encode(),
+            data=json.dumps({"confirmation": "forget-local:gemini"}).encode(),
             method="POST",
             headers={
                 "Content-Type": "application/json",
@@ -420,9 +483,7 @@ def test_model_catalog_and_mutations_use_authenticated_local_api():
     try:
         opener.open(f"{server.origin}/?session=test-session").read()
         with opener.open(
-            _session_request(
-                f"{server.origin}/api/providers/claude/models?refresh=1"
-            )
+            _session_request(f"{server.origin}/api/providers/claude/models?refresh=1")
         ) as response:
             catalog = json.load(response)
         assert catalog["models"][0]["id"] == "test-model"
@@ -461,9 +522,5 @@ def test_model_catalog_and_mutations_use_authenticated_local_api():
         server.server_close()
         thread.join(timeout=1)
 
-    assert manager.model_updates == [
-        ("claude", "test-model", "test-revision")
-    ]
-    assert manager.model_resets == [
-        ("claude", "reset-model:claude")
-    ]
+    assert manager.model_updates == [("claude", "test-model", "test-revision")]
+    assert manager.model_resets == [("claude", "reset-model:claude")]

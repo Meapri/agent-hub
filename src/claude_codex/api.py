@@ -19,9 +19,9 @@ def base_url() -> str:
     return os.getenv("ANTHROPIC_BASE_URL", DEFAULT_BASE).rstrip("/")
 
 
-
-
-def build_headers(*, auth_ctx: Optional[Dict[str, Any]] = None, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+def build_headers(
+    *, auth_ctx: Optional[Dict[str, Any]] = None, extra: Optional[Dict[str, str]] = None
+) -> Dict[str, str]:
     auth_ctx = auth_ctx or auth.resolve_auth()
     headers: Dict[str, str] = {
         "anthropic-version": ANTHROPIC_VERSION,
@@ -47,7 +47,15 @@ def list_models_live(timeout: float = 30.0) -> List[Dict[str, Any]]:
             continue
         mid = str(item.get("id") or "").strip()
         if mid:
-            out.append({"id": mid, "display": mid, "source": "live"})
+            model = {"id": mid, "display": mid, "source": "live"}
+            for source, target in (
+                ("max_input_tokens", "max_input_tokens"),
+                ("max_tokens", "max_output_tokens"),
+            ):
+                value = item.get(source)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    model[target] = value
+            out.append(model)
     return out
 
 
@@ -60,7 +68,9 @@ def messages_create(
     request_body = dict(body)
     extra_headers: Dict[str, str] = {}
     if auth_ctx.get("mode") == "subscription_oauth":
-        request_body, extra_headers = subscription_fingerprint.apply_subscription_fingerprint(request_body)
+        request_body, extra_headers = subscription_fingerprint.apply_subscription_fingerprint(
+            request_body
+        )
     url = f"{base_url()}/v1/messages"
     if auth_ctx.get("mode") == "subscription_oauth":
         # Claude Code sends ?beta=true on OAuth traffic.

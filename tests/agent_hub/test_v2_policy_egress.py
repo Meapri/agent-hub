@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_hub.v2.egress import prepare_egress, verify_egress_approval
+from agent_hub.v2.egress import (
+    prepare_egress,
+    redact_secret_lines,
+    verify_egress_approval,
+)
 from agent_hub.v2.errors import HubV2Error
 from agent_hub.v2.experimental import (
     ExperimentalRuntime,
@@ -150,6 +154,89 @@ def test_secret_redaction_catches_unquoted_assignment_values(tmp_path):
     content = proposal["fact_pack"]["items"][0]["content"]
     assert "unquoted_secret_value" not in content
     assert content == "[REDACTED SECRET CANDIDATE]\nsafe=yes\n"
+
+
+@pytest.mark.parametrize(
+    "secret_line",
+    [
+        "password=fixture-password-value",
+        "SECRET_KEY='fixture-secret-key-value'",
+        "aws_secret_access_key=fixture-aws-secret-value",
+        "token=github_pat_fixturefixturefixturefixture",
+        "slack=xoxb-fixture-fixture-fixture",
+        "stripe=sk_live_fixturefixturefixture",
+        "aws_access_key=AKIAFIXTUREFIXTURE12",
+        "jwt=eyJmaXh0dXJlMTIz.NGVtb2ZpeHR1cmU0NTY.c2lnbmF0dXJlNzg5",
+    ],
+)
+def test_secret_redaction_catches_common_credential_shapes(tmp_path, secret_line):
+    (tmp_path / "secrets.env").write_text(f"safe=yes\n{secret_line}\n")
+
+    proposal = prepare_egress(
+        project_root=str(tmp_path),
+        provider="gpt",
+        model=None,
+        source_paths=["secrets.env"],
+        policy_revision=0,
+        estimated_max_tokens=100,
+    )
+
+    content = proposal["fact_pack"]["items"][0]["content"]
+    assert content == "safe=yes\n[REDACTED SECRET CANDIDATE]\n"
+    assert proposal["manifest"]["entries"][0]["secret_candidates_redacted"] == 1
+
+
+def test_secret_redaction_removes_entire_private_key_block():
+    private_key = (
+        "before\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "ZmFrZS1wcml2YXRlLWtleS1ib2R5\n"
+        "bW9yZS1mYWtlLWtleS1ib2R5\n"
+        "-----END PRIVATE KEY-----\n"
+        "after\n"
+    )
+    content, redacted_count = redact_secret_lines(private_key)
+    assert "ZmFr" not in content
+    assert content == (
+        "before\n"
+        "[REDACTED SECRET CANDIDATE]\n"
+        "[REDACTED SECRET CANDIDATE]\n"
+        "[REDACTED SECRET CANDIDATE]\n"
+        "[REDACTED SECRET CANDIDATE]\n"
+        "after\n"
+    )
+    assert redacted_count == 4
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".env",
+        ".env.local",
+        ".ssh/id_ed25519",
+        ".aws/credentials",
+        ".netrc",
+        "deploy/private.pem",
+        "config/credentials.json",
+    ],
+)
+def test_egress_rejects_credential_sensitive_paths_before_reading(tmp_path, path):
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("safe-looking fixture")
+
+    with pytest.raises(HubV2Error) as raised:
+        prepare_egress(
+            project_root=str(tmp_path),
+            provider="gpt",
+            model=None,
+            source_paths=[path],
+            policy_revision=0,
+            estimated_max_tokens=100,
+        )
+
+    assert raised.value.code == "sensitive_source_denied"
+    assert raised.value.safe_details == {"path": path}
 
 
 def test_egress_apply_rejects_manifest_or_fact_pack_tampering(tmp_path):

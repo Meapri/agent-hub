@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import document_quality
 
@@ -45,8 +47,15 @@ _LEAF_PROVIDERS = (
     "openai_codex",
 )
 _LEAF_CMD_SUFFIXES = (
-    "mcp", "doctor", "consent", "login", "logout",
-    "consent_status", "login_status", "provider_status", "list_models",
+    "mcp",
+    "doctor",
+    "consent",
+    "login",
+    "logout",
+    "consent_status",
+    "login_status",
+    "provider_status",
+    "list_models",
 )
 _KNOWN_LEAF_COMMANDS = {f"{p}_{s}" for p in _LEAF_PROVIDERS for s in _LEAF_CMD_SUFFIXES}
 
@@ -111,10 +120,7 @@ def _repository_path_warnings(body: str, fact_pack: Optional[Dict[str, Any]]) ->
     existing = set(str(item) for item in fact_pack.get("repository_files") or [])
     if not existing:
         return []
-    claimed = {
-        match.group(1).removeprefix("./")
-        for match in _REPOSITORY_PATH_RE.finditer(body)
-    }
+    claimed = {match.group(1).removeprefix("./") for match in _REPOSITORY_PATH_RE.finditer(body)}
     claimed.update(_tree_paths(body))
     warnings: List[str] = []
     lines = body.splitlines()
@@ -159,9 +165,7 @@ def verify_text(
             if re.search(pat, body, re.I):
                 warnings.append(f"recency_language:{pat}")
         if re.search(r"[가-힣]", body):
-            warnings.extend(
-                document_quality.review_natural_korean(body, user_facing=user_facing)
-            )
+            warnings.extend(document_quality.review_natural_korean(body, user_facing=user_facing))
     if doc_class == "durable":
         if re.search(r"\b(git log|diff --stat|HEAD~)\b", body, re.I):
             warnings.append("git_internals_in_durable_doc")
@@ -233,7 +237,7 @@ def _completeness_warnings(body: str) -> List[str]:
     headings = [m.start() for m in re.finditer(r"(?m)^#{1,6}\s", text)]
     if headings:
         nl = text.find("\n", headings[-1])
-        after = text[nl + 1:].strip() if nl != -1 else ""
+        after = text[nl + 1 :].strip() if nl != -1 else ""
         if not after or (len(after) < 25 and after[-1] not in terminal):
             out.append("truncated_trailing_section")
     # Ends mid-sentence: last non-empty line isn't closed by punctuation / table / list / fence.
@@ -242,3 +246,37 @@ def _completeness_warnings(body: str) -> List[str]:
         if last[-1] not in terminal:
             out.append("truncated_midsentence")
     return out
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify durable documents with the local Agent Hub heuristics."
+    )
+    parser.add_argument("paths", nargs="+", type=Path)
+    parser.add_argument(
+        "--doc-class",
+        choices=("durable", "transform", "change"),
+        default="durable",
+    )
+    parser.add_argument("--user-facing", action="store_true")
+    args = parser.parse_args(argv)
+    failed = False
+    for path in args.paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            print(f"{path}: read failed")
+            failed = True
+            continue
+        result = verify_text(
+            text,
+            doc_class=args.doc_class,
+            user_facing=args.user_facing,
+        )
+        print(f"{path}: {result['text']}")
+        failed = failed or not result["ok"]
+    return int(failed)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -19,6 +19,9 @@ ARTIFACT_SCHEMA = "artifact_v2"
 PROVIDER_MANIFEST_SCHEMA = "agent_hub_provider_v2"
 ROUTING_DECISION_SCHEMA = "routing_decision_v1"
 EGRESS_MANIFEST_SCHEMA = "egress_manifest_v2"
+MAX_INLINE_INPUT_CHARS = 2_000_000
+DEFAULT_PROVIDER_MAX_INPUT_TOKENS = 131_072
+MAX_PROVIDER_INPUT_TOKENS = 10_000_000
 
 CAPABILITIES = frozenset(
     {
@@ -239,7 +242,7 @@ def validate_task(raw: Any) -> dict[str, Any]:
         inline_input = require_string(
             inline_input,
             field="inline_input",
-            maximum=2_000_000,
+            maximum=MAX_INLINE_INPUT_CHARS,
             allow_empty=True,
         )
     input_artifacts = _string_list(
@@ -461,6 +464,7 @@ def validate_provider_manifest(raw: Any) -> dict[str, Any]:
             "supports_cancel",
             "supports_streaming",
             "supports_idempotency",
+            "context_limits",
             "settings_schema",
         },
         field="provider_manifest",
@@ -517,6 +521,79 @@ def validate_provider_manifest(raw: Any) -> dict[str, Any]:
                 "allowed_domains must contain host names only.",
                 scope="provider",
             )
+    context_limits = require_object(
+        value.get(
+            "context_limits",
+            {
+                "default_max_input_tokens": DEFAULT_PROVIDER_MAX_INPUT_TOKENS,
+                "model_overrides": [],
+            },
+        ),
+        field="context_limits",
+    )
+    _reject_unknown_fields(
+        context_limits,
+        allowed={"default_max_input_tokens", "model_overrides"},
+        field="context_limits",
+        code="invalid_provider_manifest",
+        scope="provider",
+    )
+    default_max_input_tokens = require_non_negative_int(
+        context_limits.get(
+            "default_max_input_tokens",
+            DEFAULT_PROVIDER_MAX_INPUT_TOKENS,
+        ),
+        field="context_limits.default_max_input_tokens",
+    )
+    if not 1 <= default_max_input_tokens <= MAX_PROVIDER_INPUT_TOKENS:
+        raise HubV2Error(
+            "invalid_provider_manifest",
+            "default_max_input_tokens is outside the supported range.",
+            scope="provider",
+        )
+    raw_overrides = context_limits.get("model_overrides", [])
+    if not isinstance(raw_overrides, list) or len(raw_overrides) > 64:
+        raise HubV2Error(
+            "invalid_provider_manifest",
+            "model_overrides must be an array with at most 64 items.",
+            scope="provider",
+        )
+    model_overrides: list[dict[str, Any]] = []
+    seen_prefixes: set[str] = set()
+    for index, raw_override in enumerate(raw_overrides):
+        override = require_object(
+            raw_override,
+            field=f"context_limits.model_overrides[{index}]",
+        )
+        _reject_unknown_fields(
+            override,
+            allowed={"model_prefix", "max_input_tokens"},
+            field=f"context_limits.model_overrides[{index}]",
+            code="invalid_provider_manifest",
+            scope="provider",
+        )
+        model_prefix = require_string(
+            override.get("model_prefix"),
+            field=f"context_limits.model_overrides[{index}].model_prefix",
+            maximum=128,
+        )
+        max_input_tokens = require_non_negative_int(
+            override.get("max_input_tokens"),
+            field=f"context_limits.model_overrides[{index}].max_input_tokens",
+        )
+        if model_prefix in seen_prefixes or not 1 <= max_input_tokens <= MAX_PROVIDER_INPUT_TOKENS:
+            raise HubV2Error(
+                "invalid_provider_manifest",
+                "model_overrides contain a duplicate prefix or invalid token limit.",
+                scope="provider",
+            )
+        seen_prefixes.add(model_prefix)
+        model_overrides.append(
+            {
+                "model_prefix": model_prefix,
+                "max_input_tokens": max_input_tokens,
+            }
+        )
     return {
         "schema": PROVIDER_MANIFEST_SCHEMA,
         "provider_id": provider_id,
@@ -542,6 +619,13 @@ def validate_provider_manifest(raw: Any) -> dict[str, Any]:
         "supports_cancel": bool(value.get("supports_cancel", False)),
         "supports_streaming": bool(value.get("supports_streaming", False)),
         "supports_idempotency": bool(value.get("supports_idempotency", False)),
+        "context_limits": {
+            "default_max_input_tokens": default_max_input_tokens,
+            "model_overrides": sorted(
+                model_overrides,
+                key=lambda item: (-len(item["model_prefix"]), item["model_prefix"]),
+            ),
+        },
         "settings_schema": require_object(
             value.get("settings_schema", {}),
             field="settings_schema",

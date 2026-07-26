@@ -99,6 +99,48 @@ def test_status_is_redacted_and_summarized():
     assert "email" not in str(result)
 
 
+def test_egress_review_gui_uses_internal_daemon_channel_only():
+    calls = []
+
+    class FakeDaemonClient:
+        def request(self, method, params=None, *, timeout=5.0):
+            calls.append((method, params, timeout))
+            if method == "egress/reviews":
+                return {
+                    "success": True,
+                    "data": {
+                        "schema": "agent_hub_egress_review_list_v1",
+                        "reviews": [{"review_id": "egr_fixture", "status": "pending"}],
+                        "pending_count": 1,
+                        "approved_count": 0,
+                    },
+                }
+            return {
+                "success": True,
+                "data": {"review_id": "egr_fixture", "status": "approved"},
+            }
+
+    manager = ConnectionManager(
+        status_reader=_reader({"gpt": _state()}),
+        daemon_client_factory=FakeDaemonClient,
+    )
+    manager._use_daemon = True  # noqa: SLF001 - internal GUI channel boundary
+
+    reviews = manager.egress_reviews()
+    approved = manager.decide_egress_review("egr_fixture", decision="approve")
+
+    assert reviews["reviews"][0]["review_id"] == "egr_fixture"
+    assert approved["review"]["status"] == "approved"
+    assert calls == [
+        ("egress/reviews", None, 5.0),
+        (
+            "egress/decide",
+            {"review_id": "egr_fixture", "decision": "approve"},
+            5.0,
+        ),
+    ]
+
+
 def test_status_distinguishes_expired_refreshable_and_relogin_required_accounts():
     refreshable = _state(
         consent=True,

@@ -74,16 +74,15 @@ class ConnectHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             self._action(self.server.manager.status)
             return
+        if parsed.path == "/api/egress-reviews":
+            self._action(self.server.manager.egress_reviews)
+            return
         if parsed.path.startswith("/api/jobs/"):
             job_id = urllib.parse.unquote(parsed.path.removeprefix("/api/jobs/"))
             self._action(lambda: self.server.manager.job(job_id))
             return
         parts = [urllib.parse.unquote(item) for item in parsed.path.split("/") if item]
-        if (
-            len(parts) == 4
-            and parts[:2] == ["api", "providers"]
-            and parts[3] == "models"
-        ):
+        if len(parts) == 4 and parts[:2] == ["api", "providers"] and parts[3] == "models":
             refresh = urllib.parse.parse_qs(parsed.query).get("refresh", ["0"])[0]
             self._action(
                 lambda: self.server.manager.models(
@@ -112,6 +111,18 @@ class ConnectHandler(BaseHTTPRequestHandler):
         if parts == ["api", "shutdown"]:
             self._json(HTTPStatus.OK, {"success": True})
             threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "egress-reviews"]
+            and parts[3] in {"approve", "reject"}
+        ):
+            self._action(
+                lambda: self.server.manager.decide_egress_review(
+                    parts[2],
+                    decision=parts[3],
+                )
+            )
             return
         if len(parts) != 4 or parts[:2] != ["api", "providers"]:
             self._json_error(HTTPStatus.NOT_FOUND, "요청 경로를 찾을 수 없습니다.", "not_found")
@@ -197,10 +208,7 @@ class ConnectHandler(BaseHTTPRequestHandler):
 
     def _authenticated(self) -> bool:
         supplied = self.headers.get("X-Agent-Hub-Session", "")
-        return bool(
-            supplied
-            and secrets.compare_digest(supplied, self.server.session_token)
-        )
+        return bool(supplied and secrets.compare_digest(supplied, self.server.session_token))
 
     def _same_origin(self) -> bool:
         return (

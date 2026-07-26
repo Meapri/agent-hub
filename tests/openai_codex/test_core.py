@@ -210,9 +210,7 @@ def test_auth_status_does_not_treat_not_logged_in_cli_output_as_login(monkeypatc
     monkeypatch.setattr(
         client,
         "app_server_request",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("state database unavailable")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("state database unavailable")),
     )
     monkeypatch.setattr(client, "codex_binary", lambda: "/test/codex")
     monkeypatch.setattr(
@@ -245,6 +243,8 @@ def test_model_list_uses_official_catalog_and_no_curated_synthetic(monkeypatch):
                     "isDefault": True,
                     "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
                     "inputModalities": ["text", "image"],
+                    "contextWindow": 272_000,
+                    "effectiveContextWindowPercent": 95,
                 }
             ],
             "nextCursor": None,
@@ -254,6 +254,8 @@ def test_model_list_uses_official_catalog_and_no_curated_synthetic(monkeypatch):
     assert result["default_model"] == "gpt-current"
     assert [item["id"] for item in result["models"]] == ["gpt-current"]
     assert result["models"][0]["source"] == "codex-app-server"
+    assert result["models"][0]["context_window_tokens"] == 272_000
+    assert result["models"][0]["max_input_tokens"] == 258_400
 
 
 def test_model_list_follows_bounded_catalog_pagination(monkeypatch):
@@ -305,9 +307,11 @@ def test_model_list_can_include_hidden_catalog_entries(monkeypatch):
 
 
 def test_leaf_chat_consent_cannot_be_bypassed(monkeypatch):
-    monkeypatch.setattr(mcp_server.security, "require_consent", lambda: (_ for _ in ()).throw(
-        RuntimeError("explicit consent required")
-    ))
+    monkeypatch.setattr(
+        mcp_server.security,
+        "require_consent",
+        lambda: (_ for _ in ()).throw(RuntimeError("explicit consent required")),
+    )
     result = mcp_server.dispatch_tool("openai_codex_chat", {"prompt": "hello"})
     assert result["success"] is False
     assert "consent" in result["text"].lower()
@@ -317,9 +321,7 @@ def test_leaf_failure_does_not_expose_exception_message(monkeypatch):
     monkeypatch.setattr(
         mcp_server.chat,
         "run_chat",
-        lambda _arguments: (_ for _ in ()).throw(
-            RuntimeError("secret-token /private/path")
-        ),
+        lambda _arguments: (_ for _ in ()).throw(RuntimeError("secret-token /private/path")),
     )
 
     result = mcp_server.dispatch_tool("openai_codex_chat", {"prompt": "hello"})

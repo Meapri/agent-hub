@@ -55,6 +55,63 @@ def test_daemon_socket_ping_and_tool_list(tmp_path):
         assert not socket_path.exists()
 
 
+def test_daemon_exposes_egress_review_only_on_internal_gui_channel(tmp_path):
+    with tempfile.TemporaryDirectory(prefix="ahv2-", dir="/tmp") as socket_dir:
+        socket_path = Path(socket_dir) / "hub.sock"
+        try:
+            daemon = HubDaemon(
+                socket_path=socket_path,
+                store=HubStore(tmp_path / "state" / "state.sqlite3"),
+            )
+        except PermissionError:
+            pytest.skip("the current sandbox blocks AF_UNIX bind")
+        (tmp_path / "fact.txt").write_text("safe fact\n")
+        prepared = daemon.service.dispatch(
+            "agent_hub_plan",
+            {
+                "mode": "prepare",
+                "project_root": str(tmp_path),
+                "provider": "gpt",
+                "source_paths": ["fact.txt"],
+                "task": {
+                    "schema": TASK_SCHEMA,
+                    "intent": "Review the source.",
+                    "capability": "write",
+                    "inline_input": "",
+                },
+            },
+        )
+        review_id = prepared["data"]["approval_request"]["review_id"]
+        daemon.serve_in_thread()
+        client = HubDaemonClient(socket_path)
+        try:
+            for _ in range(20):
+                try:
+                    client.request("ping")
+                    break
+                except HubV2Error:
+                    time.sleep(0.01)
+            listed = client.request("egress/reviews")
+            approved = client.request(
+                "egress/decide",
+                {"review_id": review_id, "decision": "approve"},
+            )
+            public = client.request(
+                "tools/call",
+                {
+                    "name": "agent_hub_approve_egress",
+                    "arguments": {"review_id": review_id},
+                },
+            )
+        finally:
+            daemon.close()
+
+    assert listed["data"]["reviews"][0]["review_id"] == review_id
+    assert approved["data"]["status"] == "approved"
+    assert public["success"] is False
+    assert public["error"]["code"] == "unknown_tool"
+
+
 def test_bridge_lists_tools_without_daemon(tmp_path):
     client = HubDaemonClient(tmp_path / "missing.sock")
 

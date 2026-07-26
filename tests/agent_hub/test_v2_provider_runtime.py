@@ -8,10 +8,12 @@ import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 
 import pytest
 
+from agent_hub import orchestrator
 from agent_hub.v2.contracts import TASK_SCHEMA
 from agent_hub.core.limits import MAX_PROVIDER_TIMEOUT_SECONDS
 from agent_hub.v2.errors import HubV2Error
@@ -23,6 +25,72 @@ from agent_hub.v2.egress_proxy import (
 from agent_hub.v2.provider_client import ProviderWorkerClient, _sandbox_profile
 from agent_hub.v2.provider_worker import _invoke_arguments, handle_request
 from agent_hub.v2 import provider_runtime
+
+
+def test_v2_planner_manifest_excludes_legacy_only_capabilities(monkeypatch):
+    captured = {}
+
+    def chat(_provider, arguments):
+        captured["prompt"] = arguments["prompt"]
+        return {
+            "success": True,
+            "text": json.dumps(
+                {
+                    "schema": "agent_hub_plan_v1",
+                    "goal": "Plan.",
+                    "rationale": "fixture",
+                    "steps": [
+                        {
+                            "id": "answer",
+                            "capability": "chat",
+                            "provider": "gpt",
+                            "depends_on": [],
+                            "fallback_providers": [],
+                            "instruction": "Answer.",
+                            "reasoning_effort": "medium",
+                            "final": True,
+                        }
+                    ],
+                }
+            ),
+            "model": "gpt-fixture",
+        }
+
+    monkeypatch.setattr(provider_runtime, "chat", chat)
+
+    result = provider_runtime.plan(
+        "gpt",
+        prompt="Plan.",
+        model="gpt-fixture",
+        max_steps=4,
+        max_leaf_calls=4,
+        max_tokens=1024,
+        timeout_seconds=30,
+    )
+
+    assert result["success"] is True
+    assert '"compare"' not in captured["prompt"]
+    assert '"verify"' not in captured["prompt"]
+    assert '"release_draft"' not in captured["prompt"]
+    with pytest.raises(ValueError, match="unsupported capability"):
+        orchestrator.validate_plan(
+            {
+                "schema": "agent_hub_plan_v1",
+                "goal": "Plan.",
+                "steps": [
+                    {
+                        "id": "compare",
+                        "capability": "compare",
+                        "provider": "multiple",
+                        "depends_on": [],
+                        "participants": ["gpt", "claude"],
+                        "instruction": "Compare.",
+                        "final": True,
+                    }
+                ],
+            },
+            allowed_capabilities=provider_runtime.RUNTIME_PLANNER_CAPABILITIES,
+        )
 
 
 def test_worker_initialize_returns_valid_manifest():
@@ -383,11 +451,15 @@ def test_sandbox_profile_limits_writes_to_runtime_and_provider_state(tmp_path):
     )
 
     assert "(deny file-write* (require-not (require-any" in profile
+    assert "(deny file-read* (require-all (subpath" in profile
     assert str(tmp_path / "runtime") in profile
     assert str(tmp_path / "home" / ".config" / "openai-codex") in profile
     assert str(tmp_path / "codex") in profile
     assert "localhost:43123" in profile
     assert "localhost:*" not in profile
+    assert "/private/var/run/mDNSResponder" in profile
+    assert "com.apple.dnssd.service" in profile
+    assert "agent-hub-local-socket-denied" in profile
 
     claude = _sandbox_profile(
         provider="claude",
@@ -396,6 +468,44 @@ def test_sandbox_profile_limits_writes_to_runtime_and_provider_state(tmp_path):
         proxy_port=43124,
     )
     assert str((tmp_path / "home" / ".claude").resolve()) in claude
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox integration")
+def test_sandbox_profile_blocks_other_home_credentials_but_allows_provider_state(
+    tmp_path,
+):
+    sandbox = Path("/usr/bin/sandbox-exec")
+    if not sandbox.exists():
+        pytest.skip("sandbox-exec unavailable")
+    home = tmp_path / "home"
+    provider_state = home / ".codex" / "state.json"
+    other_credentials = home / ".ssh" / "id_fixture"
+    provider_state.parent.mkdir(parents=True)
+    other_credentials.parent.mkdir(parents=True)
+    provider_state.write_text("provider state")
+    other_credentials.write_text("other credentials")
+    profile = _sandbox_profile(
+        provider="gpt",
+        runtime_directory=str(tmp_path / "runtime"),
+        environment={"HOME": str(home)},
+        proxy_port=43211,
+    )
+
+    permitted = subprocess.run(
+        [str(sandbox), "-p", profile, "/bin/cat", str(provider_state)],
+        check=False,
+        capture_output=True,
+        timeout=10.0,
+    )
+    blocked = subprocess.run(
+        [str(sandbox), "-p", profile, "/bin/cat", str(other_credentials)],
+        check=False,
+        capture_output=True,
+        timeout=10.0,
+    )
+
+    assert permitted.returncode == 0
+    assert blocked.returncode != 0
 
 
 def test_gpt_sandbox_allows_default_codex_home_when_env_is_unset(tmp_path):
@@ -462,6 +572,60 @@ def test_sandbox_profile_allows_only_the_request_proxy_port(tmp_path):
 
     assert permitted.returncode == 0
     assert blocked.returncode != 0
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS sandbox integration")
+def test_sandbox_profile_blocks_dns_and_user_local_sockets_without_breaking_worker(
+    tmp_path,
+):
+    sandbox = Path("/usr/bin/sandbox-exec")
+    if not sandbox.exists():
+        pytest.skip("sandbox-exec unavailable")
+    home = tmp_path / "home"
+    runtime = tmp_path / "runtime"
+    home.mkdir()
+    runtime.mkdir()
+    with tempfile.TemporaryDirectory(prefix="ahsb-", dir="/tmp") as socket_directory:
+        socket_path = Path(socket_directory) / "blocked.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(socket_path))
+        server.listen()
+        profile = _sandbox_profile(
+            provider="gpt",
+            runtime_directory=str(runtime),
+            environment={"HOME": str(home)},
+            proxy_port=43212,
+        )
+        commands = {
+            "startup": "print('ok')",
+            "dns": "import socket; socket.getaddrinfo('example.com', 443)",
+            "unix": (
+                "import socket; "
+                "client=socket.socket(socket.AF_UNIX); "
+                f"client.connect({str(socket_path)!r})"
+            ),
+        }
+        try:
+            results = {
+                name: subprocess.run(
+                    [str(sandbox), "-p", profile, sys.executable, "-c", script],
+                    check=False,
+                    capture_output=True,
+                    timeout=10.0,
+                )
+                for name, script in commands.items()
+            }
+        finally:
+            server.close()
+
+    assert results["startup"].returncode == 0
+    assert results["dns"].returncode != 0
+    assert results["unix"].returncode != 0
+    status = ProviderWorkerClient("gpt", enforce_egress=True).request(
+        "status",
+        timeout=20.0,
+    )
+    assert status["success"] is True
 
 
 def test_client_maps_timeout_without_stderr_or_prompt():

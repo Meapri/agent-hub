@@ -110,9 +110,7 @@ def test_chat_maps_reasoning_effort_to_adaptive_thinking(monkeypatch, tmp_path):
         return chat_fake_response(body)
 
     with patch.object(chat.api, "http_json", side_effect=fake_request):
-        chat.run_chat(
-            {"prompt": "inspect", "model": "claude-opus-4-8", "reasoning_effort": "high"}
-        )
+        chat.run_chat({"prompt": "inspect", "model": "claude-opus-4-8", "reasoning_effort": "high"})
 
     assert seen["output_config"] == {"effort": "high"}
     assert seen["thinking"] == {"type": "adaptive"}
@@ -148,9 +146,7 @@ def test_chat_rejects_reasoning_effort_for_unsupported_model(monkeypatch, tmp_pa
     monkeypatch.setenv("CLAUDE_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("CLAUDE_CODEX_USER_CONSENT", "1")
     with pytest.raises(ValueError, match="not supported"):
-        chat.run_chat(
-            {"prompt": "inspect", "model": "claude-haiku-3", "reasoning_effort": "high"}
-        )
+        chat.run_chat({"prompt": "inspect", "model": "claude-haiku-3", "reasoning_effort": "high"})
 
 
 def test_chat_marks_unexecuted_tool_use_incomplete(monkeypatch, tmp_path):
@@ -196,6 +192,33 @@ def test_curated_models_include_opus_5(monkeypatch, tmp_path):
     result = models.list_models()
 
     assert any(item["id"] == "claude-opus-5" for item in result["models"])
+
+
+def test_live_models_preserve_provider_token_limits(monkeypatch):
+    monkeypatch.setattr(models.api, "build_headers", lambda: {})
+    monkeypatch.setattr(
+        models.api,
+        "http_json",
+        lambda *_args, **_kwargs: {
+            "data": [
+                {
+                    "id": "claude-live",
+                    "max_input_tokens": 1_000_000,
+                    "max_tokens": 128_000,
+                }
+            ]
+        },
+    )
+
+    assert models.api.list_models_live() == [
+        {
+            "id": "claude-live",
+            "display": "claude-live",
+            "source": "live",
+            "max_input_tokens": 1_000_000,
+            "max_output_tokens": 128_000,
+        }
+    ]
 
 
 def test_live_model_failure_does_not_expose_exception_message(monkeypatch, tmp_path):

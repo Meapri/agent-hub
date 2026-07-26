@@ -88,12 +88,15 @@ def test_explicit_workspace_root_allows_visible_tool_path_but_not_escape(tmp_pat
     outside.write_text("no", encoding="utf-8")
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_ALLOWED_ROOTS", "")
 
-    assert security.resolve_allowed_path(
-        source,
-        purpose="source",
-        directory=False,
-        explicit_root=workspace,
-    ) == source
+    assert (
+        security.resolve_allowed_path(
+            source,
+            purpose="source",
+            directory=False,
+            explicit_root=workspace,
+        )
+        == source
+    )
     with pytest.raises(ValueError, match="outside allowed roots"):
         security.resolve_allowed_path(
             outside,
@@ -128,21 +131,30 @@ def test_master_consent_enables_agy_backends(monkeypatch):
 def test_models_prefers_agy_provider_then_cli_then_static(monkeypatch):
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_PROVIDER", "agy-oauth")
     monkeypatch.setenv("GOOGLE_ANTIGRAVITY_ENABLE_AGY_SESSION", "1")
-    with patch.object(
-        models.provider,
-        "list_models",
-        return_value=[
-            {"id": "text-model", "display": "Text", "methods": ["generateContent"]},
-            {"id": "image-model", "display": "Image", "methods": ["generateContent"]},
-        ],
-    ), patch.object(
-        models.provider,
-        "status",
-        return_value={"provider": "agy-oauth", "backend": "agy-oauth-code-assist"},
+    with (
+        patch.object(
+            models.provider,
+            "list_models",
+            return_value=[
+                {
+                    "id": "text-model",
+                    "display": "Text",
+                    "methods": ["generateContent"],
+                    "max_input_tokens": 1_048_576,
+                },
+                {"id": "image-model", "display": "Image", "methods": ["generateContent"]},
+            ],
+        ),
+        patch.object(
+            models.provider,
+            "status",
+            return_value={"provider": "agy-oauth", "backend": "agy-oauth-code-assist"},
+        ),
     ):
         provider_result = models.list_models()
     assert provider_result["source"] == "agy-oauth"
     assert [item["id"] for item in provider_result["text_models"]] == ["text-model"]
+    assert provider_result["text_models"][0]["max_input_tokens"] == 1_048_576
     assert [item["id"] for item in provider_result["image_models"]] == ["image-model"]
 
     monkeypatch.delenv("GOOGLE_ANTIGRAVITY_PROVIDER", raising=False)

@@ -57,11 +57,15 @@ read, copied, returned, or persisted by Agent Hub. See
 
 ## google-antigravity-codex (`src/google_antigravity_codex`)
 
-Provides an official `agy` CLI transport plus an optional compatibility transport
-for an `agy`-owned Antigravity token export. It does not include or derive an OAuth
-client, inspect browser state or macOS Keychain, scrape the official CLI binary, or
-vendor proxy runtime code. Token values are never returned through MCP. Architecture
-ideas were informed by the MIT-licensed
+Provides a direct Google Antigravity OAuth/Code Assist transport. Its installed-app
+OAuth client identifiers and paired client values were adapted from the Antigravity
+IDE bundle (`out-build/vs/platform/cloudCode/common/oauthClient.js`); user-provided
+environment or `oauth-client.json` configuration takes precedence. Installed-app
+clients are public application identifiers rather than a confidential-user secret,
+but Google may change or revoke them, which would require a new user-supplied client.
+The adapter does not inspect browser state or macOS Keychain, scrape a running CLI
+binary, or vendor proxy runtime code. Token values are never returned through MCP.
+Architecture ideas were informed by the MIT-licensed
 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and the
 authentication boundary demonstrated by
 [Meapri/Antigravity-Proxy](https://github.com/Meapri/Antigravity-Proxy).

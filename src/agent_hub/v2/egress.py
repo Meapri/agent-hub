@@ -24,18 +24,38 @@ MAX_TOTAL_CHARS = 1_000_000
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"sk_(?:live|test)_[A-Za-z0-9]{16,}", re.IGNORECASE),
     re.compile(r"AIza[0-9A-Za-z_-]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}", re.IGNORECASE),
     re.compile(r"xai-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}", re.IGNORECASE),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
     re.compile(r"Bearer\s+[A-Za-z0-9._-]{16,}", re.IGNORECASE),
-    re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
     re.compile(
         r"""(?ix)
-        ["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)["']?
+        ["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|
+        aws[_-]?secret[_-]?access[_-]?key|password|passwd|secret[_-]?key|
+        database[_-]?url)["']?
         \s*[:=]\s*(?:["'][^"'\r\n]{8,}["']|[^\s#;,]{8,})
         """
     ),
 )
+_PRIVATE_KEY_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_PRIVATE_KEY_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+_SENSITIVE_PATH_PARTS = frozenset({".git", ".ssh", ".aws", ".gnupg"})
+_SENSITIVE_FILENAMES = frozenset(
+    {
+        ".netrc",
+        "credentials.json",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    }
+)
+_SENSITIVE_SUFFIXES = frozenset({".key", ".pem", ".p12", ".pfx"})
 
 
 def _source_path(root: Path, relative: str) -> tuple[Path, str]:
@@ -45,6 +65,20 @@ def _source_path(root: Path, relative: str) -> tuple[Path, str]:
             "invalid_source_path",
             "Egress source paths must be project-relative.",
             scope="egress",
+        )
+    lowered_parts = tuple(part.lower() for part in raw.parts)
+    lowered_name = raw.name.lower()
+    if (
+        any(part in _SENSITIVE_PATH_PARTS for part in lowered_parts)
+        or lowered_name.startswith(".env")
+        or lowered_name in _SENSITIVE_FILENAMES
+        or raw.suffix.lower() in _SENSITIVE_SUFFIXES
+    ):
+        raise HubV2Error(
+            "sensitive_source_denied",
+            "A credential-sensitive path cannot be included in provider egress.",
+            scope="egress",
+            safe_details={"path": raw.as_posix()},
         )
     target = root / raw
     try:
@@ -86,13 +120,25 @@ def redact_secret_lines(text: str) -> tuple[str, int]:
     """Redact whole lines containing credential-like values while preserving line numbers."""
     redacted: list[str] = []
     matches = 0
+    private_key_block = False
     for line in text.splitlines(keepends=True):
-        if any(pattern.search(line) for pattern in _SECRET_PATTERNS):
+        begins_private_key = _PRIVATE_KEY_BEGIN.search(line) is not None
+        ends_private_key = _PRIVATE_KEY_END.search(line) is not None
+        secret_candidate = (
+            private_key_block
+            or begins_private_key
+            or any(pattern.search(line) for pattern in _SECRET_PATTERNS)
+        )
+        if secret_candidate:
             ending = "\n" if line.endswith("\n") else ""
             redacted.append("[REDACTED SECRET CANDIDATE]" + ending)
             matches += 1
         else:
             redacted.append(line)
+        if begins_private_key:
+            private_key_block = True
+        if private_key_block and ends_private_key:
+            private_key_block = False
     return "".join(redacted), matches
 
 

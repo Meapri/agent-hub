@@ -6,7 +6,7 @@ from typing import Any, Mapping, Sequence
 
 from .contracts import ROUTING_MODES, validate_task
 from .errors import HubV2Error
-from .provider_manifests import builtin_provider_manifests
+from .provider_manifests import builtin_provider_manifests, model_input_limit
 from .store import HubStore
 
 QUALITY_WEIGHT = 0.60
@@ -106,6 +106,8 @@ def route(
     readiness: Mapping[str, bool],
     circuit_open: Mapping[str, bool] | None = None,
     models: Mapping[str, str] | None = None,
+    model_limits: Mapping[str, Mapping[str, Any]] | None = None,
+    estimated_input_tokens: int | None = None,
     run_id: str | None = None,
     step_id: str | None = None,
     policy_revision: int = 0,
@@ -123,6 +125,12 @@ def route(
     candidates: list[dict[str, Any]] = []
     for provider, manifest in manifests.items():
         excluded_reason = None
+        model = str((models or {}).get(provider) or "")
+        input_limit = model_input_limit(
+            provider,
+            model,
+            observed=(model_limits or {}).get(provider),
+        )
         if provider not in allowlist:
             excluded_reason = "not_allowed"
         elif capability not in manifest["capabilities"]:
@@ -131,9 +139,14 @@ def route(
             excluded_reason = "not_ready"
         elif (circuit_open or {}).get(provider, False):
             excluded_reason = "circuit_open"
+        elif (
+            estimated_input_tokens is not None
+            and estimated_input_tokens > input_limit["max_input_tokens"]
+        ):
+            excluded_reason = "context_limit"
         context = routing_context(
             normalized,
-            model=(models or {}).get(provider),
+            model=model,
         )
         stats = store.routing_statistics(context=context, provider=provider)
         score = (
@@ -145,8 +158,11 @@ def route(
         candidates.append(
             {
                 "provider": provider,
+                "model": model or None,
                 "eligible": excluded_reason is None,
                 "excluded_reason": excluded_reason,
+                "max_input_tokens": input_limit["max_input_tokens"],
+                "context_limit_source": input_limit["source"],
                 "sample_count": stats["sample_count"],
                 "score": round(score, 6),
                 "components": {
@@ -168,6 +184,23 @@ def route(
         )
     eligible = [item for item in candidates if item["eligible"]]
     if not eligible:
+        context_blocked = [
+            item for item in candidates if item["excluded_reason"] == "context_limit"
+        ]
+        if context_blocked:
+            raise HubV2Error(
+                "provider_context_limit",
+                "No ready provider can accept the assembled input context.",
+                scope="context",
+                retryable=False,
+                safe_details={
+                    "estimated_input_tokens": estimated_input_tokens,
+                    "largest_candidate_max_input_tokens": max(
+                        int(item["max_input_tokens"]) for item in context_blocked
+                    ),
+                    "blocked_provider_count": len(context_blocked),
+                },
+            )
         raise HubV2Error(
             "no_eligible_provider",
             "No ready provider satisfies the task policy.",
@@ -181,6 +214,23 @@ def route(
     )
     if planner_candidate is None:
         if routing_mode == "pinned":
+            pinned_candidate = next(
+                (item for item in candidates if item["provider"] == planner_provider),
+                None,
+            )
+            if pinned_candidate and pinned_candidate["excluded_reason"] == "context_limit":
+                raise HubV2Error(
+                    "provider_context_limit",
+                    "The pinned provider cannot accept the assembled input context.",
+                    scope="context",
+                    retryable=False,
+                    safe_details={
+                        "provider": planner_provider,
+                        "model": pinned_candidate["model"],
+                        "estimated_input_tokens": estimated_input_tokens,
+                        "max_input_tokens": pinned_candidate["max_input_tokens"],
+                    },
+                )
             raise HubV2Error(
                 "pinned_provider_unavailable",
                 "The pinned provider is not eligible for this task.",

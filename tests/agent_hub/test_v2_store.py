@@ -8,7 +8,7 @@ import pytest
 
 from agent_hub.v2.contracts import PLAN_SCHEMA, TASK_SCHEMA, validate_plan
 from agent_hub.v2.errors import HubV2Error
-from agent_hub.v2.store import HubStore
+from agent_hub.v2.store import STORE_SCHEMA_VERSION, HubStore
 
 
 def _plan():
@@ -234,8 +234,10 @@ def test_store_schema_is_backed_up_and_drops_retired_import_table(tmp_path):
 
     migrated = HubStore(path)
 
-    assert migrated.health()["schema_version"] == 7
-    assert list((tmp_path / "backups").glob("pre-migration-v3-to-v7-*.sqlite3"))
+    assert migrated.health()["schema_version"] == STORE_SCHEMA_VERSION
+    assert list(
+        (tmp_path / "backups").glob(f"pre-migration-v3-to-v{STORE_SCHEMA_VERSION}-*.sqlite3")
+    )
     connection = sqlite3.connect(path)
     try:
         retired = connection.execute(

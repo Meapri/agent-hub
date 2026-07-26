@@ -18,9 +18,11 @@ Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한
    `mode="prepare"`로 먼저 호출한다. `task_v2`, 절대 `project_root`, 필요한 `source_paths`를 넘기고
    반환된 fact pack, `egress_manifest_v2`, `proposal_sha256`, policy revision을 검토한다. prepare는
    provider를 호출하지 않는다.
-3. 포함 파일, 데이터 분류, 제외된 secret 후보와 예상 예산이 맞을 때만 같은 proposal을
-   `agent_hub_plan`의 `mode="apply"`에 넘긴다. `proposal_sha256`과
-   `expected_policy_revision`이 일치하지 않으면 새로 prepare한다.
+3. 저장소 파일이나 기존 artifact가 있으면 `next_action`의 로컬 연결 GUI를 열어 사용자가 전송
+   대상과 파일 목록을 승인하거나 거부하게 한다. 승인 뒤 같은 proposal과
+   `approval_request.review_id`를 `approval_request_id`로 `agent_hub_plan(mode="apply")`에 넘긴다.
+   `proposal_sha256`과 `expected_policy_revision`이 일치하지 않거나 review가 만료되면 새로
+   prepare한다. MCP 호출자가 review를 대신 승인하려고 하지 않는다.
 4. 반환된 `plan_v2`에서 DAG, capability, verifier, budget, egress digest를 검토한다. 로컬 validator가
    거부한 순환, 고립 step, capability 부족, 예산 초과를 호스트가 우회하지 않는다.
 5. 실행 승인을 받으면 plan을 `agent_hub_start`에 넘긴다. 재시도해도 같은 run을 찾을 수 있도록 안정적인

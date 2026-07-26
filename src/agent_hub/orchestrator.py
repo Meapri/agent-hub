@@ -240,19 +240,52 @@ class ProviderCallBudget:
             reservation.close()
 
 
-def capability_manifest() -> Dict[str, Any]:
+def capability_manifest(
+    *,
+    allowed_capabilities: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    allowed = set(allowed_capabilities or CAPABILITY_PROVIDERS)
     return {
         name: {
             "providers": list(providers),
             "parallel_safe": name not in {"verify"},
         }
         for name, providers in CAPABILITY_PROVIDERS.items()
+        if name in allowed
     }
 
 
-def planner_prompt(goal: str, *, facts: str = "", max_steps: int = MAX_PLAN_STEPS) -> str:
-    manifest = json.dumps(capability_manifest(), ensure_ascii=False, sort_keys=True)
+def planner_prompt(
+    goal: str,
+    *,
+    facts: str = "",
+    max_steps: int = MAX_PLAN_STEPS,
+    allowed_capabilities: Sequence[str] | None = None,
+) -> str:
+    allowed = set(allowed_capabilities or CAPABILITY_PROVIDERS)
+    manifest = json.dumps(
+        capability_manifest(allowed_capabilities=tuple(allowed)),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     fact_block = facts.strip()[:8_000] or "[no repository fact pack supplied]"
+    review_diff_rule = (
+        "- review_diff reads only the repository working-tree diff; it never reviews dependency "
+        "text.\n"
+        if "review_diff" in allowed
+        else ""
+    )
+    compare_rules = (
+        "- Use compare only when multiple independent judgments materially help.\n"
+        "- A compare normally requires at least two successful participants.\n"
+        if "compare" in allowed
+        else ""
+    )
+    verify_rule = (
+        "- verify is a deterministic local text check, not an LLM judge.\n"
+        if "verify" in allowed
+        else ""
+    )
     return f"""Design an execution DAG for Agent Hub. You decide the useful decomposition,
 provider for each step, dependencies, fallbacks, and which single step produces the final answer.
 Return exactly one JSON object with no markdown or commentary.
@@ -283,14 +316,13 @@ Rules:
 - Create at most {max_steps} steps, usually 2-6. Do not add ceremonial steps.
 - Do not invent capabilities, providers, tools, files, or facts.
 - Use inspect_codebase for local repository understanding. Use search only for external/web facts.
-- Use review_text to review a generated draft or another dependency output. review_diff reads only
-  the repository working-tree diff; it never reviews dependency text and an empty Git diff is not
-  evidence that a generated artifact was reviewed.
+- Use review_text to review a generated draft or another dependency output.
+{review_diff_rule.rstrip()}
 - Choose reasoning_effort per step. Use low for mechanical work, medium for normal analysis, and high
   for ambiguous architecture, broad codebase investigation, difficult review, or final synthesis.
 - Omit every capability-specific field unless the step has that exact capability:
   investigation_depth is only for inspect_codebase; quality_rewrite_attempts is only for write;
-  participants, min_successes, and decision_labels are only for compare.
+  participants, min_successes, and decision_labels are only for compare when compare is allowed.
 - For inspect_codebase, choose investigation_depth from shallow, standard, or deep. Use deep when a
   durable repository document must cover entry points, public schemas, configuration, tests,
   generated docs, and Git state.
@@ -301,11 +333,8 @@ Rules:
 - Express true data dependencies only. Independent steps must have the same dependency frontier so
   the scheduler can run them concurrently. Do not encode an arbitrary provider order.
 - Every non-final step must feed, directly or transitively, the one final step.
-- Use compare only when multiple independent judgments materially help. Use decision_labels only
-  when the answer has a real caller-definable closed label set; never fake a semantic score for open text.
-- A compare normally requires at least two successful participants. Lower min_successes only when
-  the caller can safely use one independent response.
-- verify is a deterministic local text check, not an LLM judge.
+{compare_rules.rstrip()}
+{verify_rule.rstrip()}
 
 User goal:
 {goal.strip()}
@@ -351,6 +380,7 @@ def validate_plan(
     *,
     max_steps: int = MAX_PLAN_STEPS,
     max_calls: int = 24,
+    allowed_capabilities: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     """Validate an LLM plan as untrusted input and return a normalized copy."""
 
@@ -368,6 +398,7 @@ def validate_plan(
     if len(raw_steps) > limit:
         raise ValueError(f"plan has too many steps: {len(raw_steps)} > {limit}")
 
+    allowed = set(allowed_capabilities or CAPABILITY_PROVIDERS)
     normalized_steps: List[Dict[str, Any]] = []
     ids: List[str] = []
     for index, raw in enumerate(raw_steps):
@@ -384,7 +415,7 @@ def validate_plan(
             raise ValueError(f"duplicate step id: {step_id}")
         capability = str(raw.get("capability") or "").strip()
         provider = str(raw.get("provider") or "").strip()
-        if capability not in CAPABILITY_PROVIDERS:
+        if capability not in CAPABILITY_PROVIDERS or capability not in allowed:
             raise ValueError(f"unsupported capability: {capability}")
         if not _provider_supported(capability, provider):
             raise ValueError(f"provider {provider!r} does not support capability {capability!r}")

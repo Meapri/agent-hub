@@ -25,11 +25,7 @@ def _safe_socket_parent(path: Path) -> Path:
     parent = path.expanduser().parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = parent.lstat()
-    if (
-        stat.S_ISLNK(info.st_mode)
-        or not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-    ):
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise HubV2Error(
             "unsafe_socket_path",
             "The daemon socket directory must be a user-owned directory.",
@@ -152,6 +148,40 @@ class HubDaemon:
                     str(params.get("name") or ""),
                     params.get("arguments") or {},
                 )
+        elif method == "egress/reviews":
+            try:
+                result = {
+                    "success": True,
+                    "operation": method,
+                    "error": None,
+                    "data": self.service.pending_egress_reviews(),
+                }
+            except HubV2Error as exc:
+                result = public_failure(exc, operation=method)
+        elif method == "egress/decide":
+            params = request.get("params")
+            if not isinstance(params, Mapping):
+                result = public_failure(
+                    HubV2Error(
+                        "invalid_request",
+                        "The egress decision must be an object.",
+                        scope="egress",
+                    ),
+                    operation=method,
+                )
+            else:
+                try:
+                    result = {
+                        "success": True,
+                        "operation": method,
+                        "error": None,
+                        "data": self.service.decide_egress_review(
+                            str(params.get("review_id") or ""),
+                            decision=str(params.get("decision") or ""),
+                        ),
+                    }
+                except HubV2Error as exc:
+                    result = public_failure(exc, operation=method)
         else:
             result = public_failure(
                 HubV2Error(

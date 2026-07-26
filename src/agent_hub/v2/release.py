@@ -193,6 +193,23 @@ def _rollback_paths(rollback_path: str | Path) -> tuple[Path, Path, Path]:
     return rollback, metadata, database
 
 
+def _file_set_snapshot(paths: tuple[Path, ...]) -> dict[Path, bytes | None]:
+    return {path: (_safe_file(path) if path.exists() else None) for path in paths}
+
+
+def _restore_file_set(snapshot: Mapping[Path, bytes | None]) -> None:
+    for path, content in snapshot.items():
+        if content is None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        _atomic_write(path, content)
+        if path.name.endswith(".sqlite3"):
+            os.chmod(path, 0o600)
+
+
 def _proposal_digest(proposal: Mapping[str, Any]) -> str:
     public = {
         key: value
@@ -738,22 +755,32 @@ def apply_switch(
     )
     health = _candidate_health(after, source_state_db=health_source)
     rollback_snapshot: dict[str, Any] | None = None
+    previous_rollback_slot = (
+        _file_set_snapshot((rollback, rollback_metadata, rollback_database))
+        if proposal.get("mode") == "update"
+        else None
+    )
     if proposal.get("mode") == "update":
-        rollback_snapshot = _database_snapshot(state_db, rollback_database)
-        metadata = {
-            "schema": "agent_hub_release_rollback_metadata_v1",
-            "state_db_path": str(state_db),
-            "rollback_db_path": str(rollback_database),
-            "present": rollback_snapshot["present"],
-            "schema_version": rollback_snapshot["schema_version"],
-            "sha256": rollback_snapshot["sha256"],
-            "created_at": time.time(),
-        }
-        _atomic_write(
-            rollback_metadata,
-            json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-        )
-        _atomic_write(rollback, before)
+        try:
+            rollback_snapshot = _database_snapshot(state_db, rollback_database)
+            metadata = {
+                "schema": "agent_hub_release_rollback_metadata_v1",
+                "state_db_path": str(state_db),
+                "rollback_db_path": str(rollback_database),
+                "present": rollback_snapshot["present"],
+                "schema_version": rollback_snapshot["schema_version"],
+                "sha256": rollback_snapshot["sha256"],
+                "created_at": time.time(),
+            }
+            _atomic_write(
+                rollback_metadata,
+                json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            )
+            _atomic_write(rollback, before)
+        except Exception:
+            if previous_rollback_slot is not None:
+                _restore_file_set(previous_rollback_slot)
+            raise
     activation = {"attempted": False, "success": False}
     emergency_snapshot = _database_snapshot(state_db, emergency_db)
     preserve_emergency = False
@@ -780,16 +807,12 @@ def apply_switch(
                 active, activation_returncode = _start_launch_agent(launch_path, after)
                 if not active:
                     failure_stage = (
-                        "candidate_bootstrap"
-                        if activation_returncode != 0
-                        else "candidate_health"
+                        "candidate_bootstrap" if activation_returncode != 0 else "candidate_health"
                     )
             except Exception:  # noqa: BLE001 - all activation failures must compensate
                 active = False
                 failure_stage = (
-                    "candidate_bootstrap"
-                    if candidate_may_be_running
-                    else "database_restore"
+                    "candidate_bootstrap" if candidate_may_be_running else "database_restore"
                 )
             activation = {
                 "attempted": True,
@@ -833,6 +856,10 @@ def apply_switch(
                         "recovery_stage": recovery_stage,
                     },
                 )
+    except Exception:
+        if previous_rollback_slot is not None:
+            _restore_file_set(previous_rollback_slot)
+        raise
     finally:
         if not preserve_emergency:
             _remove_database_files(emergency_db)

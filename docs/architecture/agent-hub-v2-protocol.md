@@ -20,6 +20,9 @@
 외부 요청 직전 step은 `running`과 request digest를 같은 transaction에 기록합니다. daemon이
 응답 commit 전에 종료되면 retry-safe local step만 `queued`로 회수합니다. 외부 step은
 `outcome_unknown`으로 고정하며 사용자가 결과를 조정하기 전에는 claim할 수 없습니다.
+provider가 명확한 retryable 오류를 반환해 `failed`가 된 step만 최신 run revision과
+`retry_failed_steps` 목록으로 명시적으로 `queued`에 되돌릴 수 있습니다. 재시도는 step 상태,
+retry-safe checkpoint와 lease 부재를 하나의 transaction에서 다시 확인합니다.
 
 DB schema migration은 기존 DB integrity check, SQLite backup, migration, 사후 integrity check 순서로
 수행합니다. 실패하면 pre-migration backup으로 복구합니다. release candidate는 현재 DB의 복사본으로
@@ -30,16 +33,22 @@ health check까지 성공해야 `release_activation_failed`를 반환하며, 보
 `release_recovery_failed`와 실패 단계만 안전하게 노출합니다. 보상이 불완전한 경우 emergency DB
 snapshot은 rollback slot 옆에 남기고, 후속 release switch는 해당 snapshot이 검토될 때까지
 `release_recovery_pending`으로 차단합니다.
+update가 실패하면 전환 직전에 존재하던 rollback plist·metadata·DB snapshot도 함께 복구해,
+실패한 candidate가 이전 rollback 이력을 덮어쓰지 못하게 합니다.
 
 ## Egress and provider isolation
 
 repository source는 `agent_hub_plan(mode="prepare")`에서 `fact_pack_v2`와
 `egress_manifest_v2`를 만든 뒤 동일한 proposal·manifest·policy revision digest로만 planner에
 전달합니다. manifest는 source entry와 실제 egress destination provider를 함께 고정합니다.
+source entry가 있으면 daemon은 15분짜리 `egress_review_v1`을 만들고 연결 GUI에 표시합니다.
+session header와 same-origin intent 검사를 통과한 GUI action만 approve/reject할 수 있습니다.
+`apply`는 proposal·manifest·policy revision에 묶인 `approval_request_id`를 원자적으로 한 번
+소비한 뒤에만 planner를 호출합니다. MCP 공개 도구에는 review 승인 mutation을 노출하지 않습니다.
 기존 artifact도 같은 manifest에 artifact ID, 원문 digest, redaction 후 전송 digest를 기록하고
 실행 직전에 다시 대조합니다. inline prompt를 현재 run에서 봉인해 만든 artifact만 해당 요청의
 암묵적 동의를 이어받습니다.
-외부 step으로 이어지는 inspect는 승인된 source 전체를 실제 line range와 source digest로 수집하며,
+외부 step으로 이어지는 inspect는 digest로 고정된 source 전체를 실제 line range와 source digest로 수집하며,
 source drift, 누락, planner의 source/destination 확장은 실행 전에 거부합니다.
 
 provider worker는 macOS sandbox에서 request별 localhost proxy port 이외의 outbound TCP를 열 수
@@ -47,6 +56,11 @@ provider worker는 macOS sandbox에서 request별 localhost proxy port 이외의
 변수와 해당 provider prefix만 허용하고, cwd와 TMPDIR는 request별 임시 디렉터리를 사용합니다.
 filesystem write는 임시 디렉터리와 provider config/cache로 제한하며 cancel/timeout은 process group에
 전달합니다.
+filesystem read는 사용자 홈 전체가 아니라 실행 코드와 해당 provider의 config/cache 경로로
+제한합니다. 다른 provider credential 디렉터리와 `~/.ssh` 같은 홈 하위 경로는 읽을 수 없습니다.
+Python과 macOS runtime 파일은 worker 기동을 위해 읽을 수 있습니다. 직접 DNS lookup과
+사용자 홈·request runtime·`/tmp` 아래 Unix socket은 거부하고, provider HTTP(S)는 request별
+localhost proxy port만 허용합니다. macOS runtime에 필요한 system socket은 이 경계 밖입니다.
 
 setup proposal은 daemon·bridge binary digest와 전체 public proposal을 canonical JSON으로
 고정합니다. host config 또는 LaunchAgent 적용·활성화가 실패하면 digest가 일치하는 변경만 역순으로
@@ -58,6 +72,9 @@ step에 fallback을 선언하면 primary와 그 fallback만 실행 후보가 됩
 호출 성공은 품질 점수가 아니며, 사용자 feedback이나 명시적 deterministic verifier만 quality signal로
 기록합니다. 병렬 run의 time budget은 DAG critical path로 계산하고, completed step은 실제
 `input_artifact_ids`와 `output_artifact_ids`를 함께 보존합니다.
+catalog가 model별 `max_input_tokens`를 제공하면 daemon은 catalog revision과 5분 TTL로 이를
+캐시해 manifest fallback보다 우선합니다. routing은 task budget과 유효한 model limit 중 작은 값을
+넘는 candidate를 worker 호출 전에 제외합니다.
 긴 provider 호출은 content-free `provider_attempt_started`, `provider_attempt_failed`,
 `provider_attempt_completed` event로 관찰할 수 있습니다. event에는 prompt와 결과 본문을
 기록하지 않습니다.

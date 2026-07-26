@@ -99,11 +99,62 @@ def _sandbox_profile(
         f"(subpath {json.dumps(str(path.resolve(strict=False)))})"
         for path in dict.fromkeys(writable)
     )
+    readable_directories = [
+        *writable,
+        Path(sys.prefix),
+        Path(sys.executable).resolve(strict=False).parents[3],
+        Path(__file__).resolve().parents[3],
+    ]
+    readable_filters = " ".join(
+        f"(subpath {json.dumps(str(path.resolve(strict=False)))})"
+        for path in dict.fromkeys(readable_directories)
+    )
+    readable_filters += " " + " ".join(
+        f"(literal {json.dumps(str(path))})"
+        for path in dict.fromkeys(
+            (
+                Path(sys.executable),
+                Path(sys.executable).resolve(strict=False),
+            )
+        )
+    )
+    readable_ancestors: list[Path] = []
+    for path in (
+        *readable_directories,
+        Path(sys.executable),
+        Path(sys.executable).resolve(strict=False),
+    ):
+        candidate = path.expanduser().absolute()
+        if candidate != home and home not in candidate.parents:
+            continue
+        for parent in candidate.parents:
+            if parent == home:
+                break
+            readable_ancestors.append(parent)
+    readable_filters += " " + " ".join(
+        f"(literal {json.dumps(str(path))})" for path in dict.fromkeys(readable_ancestors)
+    )
+    readable_filters += " " + " ".join(
+        f"(literal {json.dumps(str(path.resolve(strict=False)))})"
+        for path in (home, home / ".config", home / ".cache")
+    )
     return (
         "(version 1) (allow default) "
+        f"(deny file-read* (require-all "
+        f"(subpath {json.dumps(str(home.resolve(strict=False)))}) "
+        f"(require-not (require-any {readable_filters})))) "
         f"(deny file-write* (require-not (require-any {writable_filters}))) "
         '(deny network-outbound (remote tcp "*:*") (remote udp "*:*") '
         '(with message "agent-hub-egress-denied")) '
+        '(deny network-outbound (literal "/private/var/run/mDNSResponder") '
+        '(with message "agent-hub-dns-denied")) '
+        '(deny mach-lookup (global-name "com.apple.dnssd.service") '
+        '(with message "agent-hub-dns-denied")) '
+        f"(deny network-outbound (subpath "
+        f"{json.dumps(str(home.resolve(strict=False)))}) "
+        f"(subpath {json.dumps(str(Path(runtime_directory).resolve(strict=False)))}) "
+        '(subpath "/private/tmp") (subpath "/private/var/tmp") '
+        '(with message "agent-hub-local-socket-denied")) '
         f'(allow network-outbound (remote tcp "localhost:{proxy_port}"))'
     )
 

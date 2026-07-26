@@ -44,8 +44,7 @@ def test_verify_rejects_placeholders_and_unknown_repository_paths(tmp_path):
 
     assert result["ok"] is False
     assert any(
-        warning.startswith("placeholder_in_final_document:")
-        for warning in result["warnings"]
+        warning.startswith("placeholder_in_final_document:") for warning in result["warnings"]
     )
     assert "repository_path_not_found:missing/module.py" in result["warnings"]
 
@@ -64,3 +63,15 @@ def test_verify_accepts_private_provider_tool_names():
     )
 
     assert result["ok"] is True
+
+
+def test_verify_module_cli_checks_user_facing_documents(tmp_path, capsys):
+    document = tmp_path / "README.md"
+    document.write_text("# Fixture\n\n설명입니다.\n", encoding="utf-8")
+
+    assert verify.main(["--user-facing", str(document)]) == 0
+    assert "verify ok" in capsys.readouterr().out
+
+    document.write_text("# Fixture\n\n[TODO: 내용을 추가하세요]\n", encoding="utf-8")
+    assert verify.main(["--user-facing", str(document)]) == 1
+    assert "placeholder_in_final_document" in capsys.readouterr().out

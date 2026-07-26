@@ -47,8 +47,15 @@ CAPACITY_FALLBACK_CHAIN: Dict[str, List[str]] = {
     "gemini-3.5-flash-extra-low": ["gemini-pro-agent"],
 }
 
+
 class AntigravityApiError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "antigravity_api_error", status_code: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "antigravity_api_error",
+        status_code: Optional[int] = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
@@ -81,20 +88,28 @@ def _post(path: str, body: Dict[str, Any], access_token: str, *, timeout: float)
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
-        code = "antigravity_unauthorized" if exc.code in {401, 403} else f"antigravity_http_{exc.code}"
+        code = (
+            "antigravity_unauthorized" if exc.code in {401, 403} else f"antigravity_http_{exc.code}"
+        )
         raise AntigravityApiError(
             f"Antigravity Code Assist returned HTTP {exc.code}; response body omitted.",
             code=code,
             status_code=exc.code,
         ) from exc
     except urllib.error.URLError as exc:
-        raise AntigravityApiError("Antigravity Code Assist request failed.", code="antigravity_network_error") from exc
+        raise AntigravityApiError(
+            "Antigravity Code Assist request failed.", code="antigravity_network_error"
+        ) from exc
     if len(raw) > MAX_RESPONSE_BYTES:
-        raise AntigravityApiError("Antigravity response exceeded the size limit.", code="antigravity_response_too_large")
+        raise AntigravityApiError(
+            "Antigravity response exceeded the size limit.", code="antigravity_response_too_large"
+        )
     try:
         payload = json.loads(raw.decode("utf-8")) if raw else {}
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise AntigravityApiError("Antigravity returned invalid JSON.", code="antigravity_response_invalid") from exc
+        raise AntigravityApiError(
+            "Antigravity returned invalid JSON.", code="antigravity_response_invalid"
+        ) from exc
     return payload if isinstance(payload, dict) else {}
 
 
@@ -107,7 +122,13 @@ def resolve_project_id(credentials: agy_auth.AgyCredentials) -> str:
         return credentials.project_id
     payload = _post(
         "/v1internal:loadCodeAssist",
-        {"metadata": {"ideType": "IDE_UNSPECIFIED", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI"}},
+        {
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            }
+        },
         credentials.access_token,
         timeout=30.0,
     )
@@ -163,7 +184,9 @@ def _stream_post(
     try:
         response = opener.open(request, timeout=timeout)
     except urllib.error.HTTPError as exc:
-        code = "antigravity_unauthorized" if exc.code in {401, 403} else f"antigravity_http_{exc.code}"
+        code = (
+            "antigravity_unauthorized" if exc.code in {401, 403} else f"antigravity_http_{exc.code}"
+        )
         raise AntigravityApiError(
             f"Antigravity Code Assist stream returned HTTP {exc.code}; response body omitted.",
             code=code,
@@ -222,7 +245,9 @@ def generate_content(
 ) -> Dict[str, Any]:
     credentials, project = _credentials_and_project()
     if not project:
-        raise AntigravityApiError("Could not resolve the Antigravity project id.", code="antigravity_project_missing")
+        raise AntigravityApiError(
+            "Could not resolve the Antigravity project id.", code="antigravity_project_missing"
+        )
     resolved, fallback_models = _resolved_model_chain(model)
     attempts = max(0, min(int(max_retries), 5)) + 1
     request_count = 0
@@ -301,10 +326,15 @@ def generate_content_stream(
 
     On non-2xx or empty stream, raises so callers can fall back to generate_content.
     """
-    del max_retries, retry_sleep_cap_seconds  # stream path uses a single attempt + capacity fallback
+    del (
+        max_retries,
+        retry_sleep_cap_seconds,
+    )  # stream path uses a single attempt + capacity fallback
     credentials, project = _credentials_and_project()
     if not project:
-        raise AntigravityApiError("Could not resolve the Antigravity project id.", code="antigravity_project_missing")
+        raise AntigravityApiError(
+            "Could not resolve the Antigravity project id.", code="antigravity_project_missing"
+        )
     resolved, fallback_models = _resolved_model_chain(model)
     last_error: Optional[AntigravityApiError] = None
     auth_refreshed = False
@@ -396,13 +426,17 @@ def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
             credentials.access_token,
             timeout=60.0,
         )
-    raw = payload.get("models") or payload.get("modelConfigs") or payload.get("availableModels") or {}
+    raw = (
+        payload.get("models") or payload.get("modelConfigs") or payload.get("availableModels") or {}
+    )
     image_ids = {
         str(item).removeprefix("models/")
         for item in (payload.get("imageGenerationModelIds") or [])
         if str(item).strip()
     }
-    items = raw.items() if isinstance(raw, dict) else enumerate(raw if isinstance(raw, list) else [])
+    items = (
+        raw.items() if isinstance(raw, dict) else enumerate(raw if isinstance(raw, list) else [])
+    )
     models: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for key, value in items:
@@ -410,7 +444,11 @@ def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
         # Prefer the catalog key (public id, e.g. gemini-3.1-flash-image) over
         # internal enums like MODEL_PLACEHOLDER_M21.
         public_id = str(key if not isinstance(key, int) else "").removeprefix("models/").strip()
-        internal_id = str(data.get("model") or data.get("id") or data.get("name") or "").removeprefix("models/").strip()
+        internal_id = (
+            str(data.get("model") or data.get("id") or data.get("name") or "")
+            .removeprefix("models/")
+            .strip()
+        )
         model_id = public_id or internal_id
         if not model_id or model_id in seen:
             continue
@@ -430,6 +468,16 @@ def list_models(*, refresh: bool = True) -> List[Dict[str, Any]]:
             "display": display,
             "methods": methods,
         }
+        for source in (
+            "inputTokenLimit",
+            "maxInputTokens",
+            "max_input_tokens",
+            "contextWindow",
+        ):
+            value = data.get(source)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                entry["max_input_tokens"] = value
+                break
         if internal_id and internal_id != model_id:
             entry["internal_id"] = internal_id
         models.append(entry)
@@ -452,7 +500,8 @@ def status(*, probe: bool = False) -> Dict[str, Any]:
     # renewal to the explicit auth-refresh operation.
     auth_state = agy_auth.status(probe=False)
     state: Dict[str, Any] = {
-        "configured": auth_state.get("enabled") is True and auth_state.get("token_file_present") is True,
+        "configured": auth_state.get("enabled") is True
+        and auth_state.get("token_file_present") is True,
         "provider": "agy-oauth",
         "backend": "agy-oauth-code-assist",
         "auth_method": "agy_token_export",
@@ -464,7 +513,13 @@ def status(*, probe: bool = False) -> Dict[str, Any]:
     try:
         visible = list_models(refresh=False)
     except (agy_auth.AgyAuthError, AntigravityApiError) as exc:
-        state.update({"healthy": False, "error_type": getattr(exc, "code", type(exc).__name__), "error": str(exc)})
+        state.update(
+            {
+                "healthy": False,
+                "error_type": getattr(exc, "code", type(exc).__name__),
+                "error": str(exc),
+            }
+        )
     else:
         state.update({"healthy": True, "model_count": len(visible)})
     return state

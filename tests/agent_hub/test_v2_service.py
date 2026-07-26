@@ -6,8 +6,14 @@ import sqlite3
 import threading
 import time
 
+import pytest
+
 from agent_hub.v2.contracts import PLAN_SCHEMA, TASK_SCHEMA, validate_plan
 from agent_hub.v2.crypto import ArtifactCipher, StaticKeyProvider
+from agent_hub.v2.dependency_context import (
+    assemble_dependency_context,
+    enforce_provider_context_budget,
+)
 from agent_hub.v2.errors import HubV2Error
 from agent_hub.v2.service import HubService
 from agent_hub.v2.store import HubStore
@@ -115,12 +121,24 @@ class _PlannerWorker(_FakeWorker):
 
 
 class _FallbackWorker(_FakeWorker):
-    invoked: list[str] = []
+    invoked: list[tuple[str, str | None]] = []
 
     def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method == "status":
+            return {
+                "success": True,
+                "data": {
+                    "providers": {
+                        self.provider: {
+                            "ready": True,
+                            "default_model": f"{self.provider}-default",
+                        }
+                    }
+                },
+            }
         if method != "invoke":
             return super().request(method, params=params, timeout=timeout)
-        self.__class__.invoked.append(self.provider)
+        self.__class__.invoked.append((self.provider, params.get("model")))
         if self.provider == "gpt":
             raise HubV2Error(
                 "provider_quota_exhausted",
@@ -157,6 +175,53 @@ class _ArtifactPlannerWorker(_FakeWorker):
         }
 
 
+class _DuplicateInspectPlannerWorker(_FakeWorker):
+    last_invoke_task = {}
+
+    def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method == "invoke":
+            self.__class__.last_invoke_task = dict(params["task"])
+            return super().request(
+                method,
+                params=params,
+                timeout=timeout,
+                request_id=request_id,
+            )
+        if method != "plan":
+            return super().request(
+                method,
+                params=params,
+                timeout=timeout,
+                request_id=request_id,
+            )
+        return {
+            "success": True,
+            "data": {
+                "plan": {
+                    "steps": [
+                        {
+                            "id": "inspect_left",
+                            "capability": "inspect_codebase",
+                            "instruction": "Inspect the approved source.",
+                        },
+                        {
+                            "id": "inspect_right",
+                            "capability": "inspect_codebase",
+                            "instruction": "Inspect the approved source again.",
+                        },
+                        {
+                            "id": "write",
+                            "capability": "write",
+                            "depends_on": ["inspect_left", "inspect_right"],
+                            "instruction": "Write from the inspected facts.",
+                            "provider": "gpt",
+                        },
+                    ]
+                }
+            },
+        }
+
+
 class _CheckpointWorker(_FakeWorker):
     slow_started = threading.Event()
     release_slow = threading.Event()
@@ -173,6 +238,83 @@ class _CrashingWorker(_FakeWorker):
     def request(self, method, params=None, timeout=30.0, request_id=None):
         if method == "invoke":
             raise RuntimeError("private fixture failure")
+        return super().request(
+            method,
+            params=params,
+            timeout=timeout,
+            request_id=request_id,
+        )
+
+
+class _PartialCrashWorker(_FakeWorker):
+    def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method == "invoke" and params["task"]["intent"] == "Crash unexpectedly.":
+            raise RuntimeError("private fixture failure")
+        return super().request(
+            method,
+            params=params,
+            timeout=timeout,
+            request_id=request_id,
+        )
+
+
+class _RetryOnceWorker(_FakeWorker):
+    invocations = 0
+
+    def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method == "invoke":
+            self.__class__.invocations += 1
+            if self.__class__.invocations == 1:
+                raise HubV2Error(
+                    "provider_quota_exhausted",
+                    "The fixture is temporarily unavailable.",
+                    scope="provider",
+                    retryable=True,
+                )
+        return super().request(
+            method,
+            params=params,
+            timeout=timeout,
+            request_id=request_id,
+        )
+
+
+class _CatalogLimitWorker(_FakeWorker):
+    invocations = 0
+
+    def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method == "status":
+            return {
+                "success": True,
+                "data": {
+                    "providers": {
+                        self.provider: {
+                            "ready": True,
+                            "default_model": f"{self.provider}-live",
+                        }
+                    }
+                },
+            }
+        if method == "catalog":
+            return {
+                "success": True,
+                "data": {
+                    "models": {
+                        self.provider: {
+                            "success": True,
+                            "source": "live",
+                            "models": [
+                                {
+                                    "id": f"{self.provider}-live",
+                                    "max_input_tokens": 10,
+                                }
+                            ],
+                        }
+                    }
+                },
+            }
+        if method == "invoke":
+            self.__class__.invocations += 1
         return super().request(
             method,
             params=params,
@@ -202,6 +344,13 @@ def _input_artifact(service: HubService, content: str) -> str:
         content_sha256=encrypted["content_sha256"],
     )
     return artifact["artifact_id"]
+
+
+def _approve_review(service: HubService, proposal: dict) -> str:
+    review_id = proposal["approval_request"]["review_id"]
+    approved = service.store.decide_egress_review(review_id, decision="approve")
+    assert approved["status"] == "approved"
+    return review_id
 
 
 def _plan():
@@ -242,6 +391,118 @@ def test_artifact_cipher_authenticates_digest_and_aad():
         )
         == b"private"
     )
+    tampered = bytearray(encrypted["payload"])
+    tampered[-1] ^= 1
+    with pytest.raises(HubV2Error) as payload_error:
+        cipher.decrypt(
+            bytes(tampered),
+            aad=b"fixture",
+            expected_sha256=encrypted["content_sha256"],
+        )
+    assert payload_error.value.code == "artifact_decryption_failed"
+    with pytest.raises(HubV2Error) as aad_error:
+        cipher.decrypt(
+            encrypted["payload"],
+            aad=b"other",
+            expected_sha256=encrypted["content_sha256"],
+        )
+    assert aad_error.value.code == "artifact_decryption_failed"
+    with pytest.raises(HubV2Error) as digest_error:
+        cipher.decrypt(
+            encrypted["payload"],
+            aad=b"fixture",
+            expected_sha256="0" * 64,
+        )
+    assert digest_error.value.code == "artifact_digest_conflict"
+
+
+def test_dependency_context_merges_semantically_identical_fact_packs():
+    first = json.dumps(
+        {
+            "schema": "fact_pack_v2",
+            "project_identity": "project",
+            "collected_at": 1.0,
+            "items": [
+                {
+                    "path": "module.py",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "complete": True,
+                    "content_sha256": "a" * 64,
+                    "collected_at": 1.0,
+                    "content": "VALUE = 1",
+                }
+            ],
+            "coverage": {
+                "requested_paths": ["module.py"],
+                "covered_paths": ["module.py"],
+                "missing_paths": [],
+                "complete": True,
+            },
+            "retrieval": "approved_complete_sources",
+        }
+    )
+    second = first.replace('"collected_at": 1.0', '"collected_at": 2.0')
+
+    text, stats = assemble_dependency_context([first, second])
+    merged = json.loads(text)
+
+    assert merged["schema"] == "fact_pack_v2"
+    assert merged["source_fact_pack_count"] == 2
+    assert len(merged["items"]) == 1
+    assert "collected_at" not in merged["items"][0]
+    assert stats["source_artifact_count"] == 2
+    assert stats["context_segment_count"] == 1
+    assert stats["fact_pack_duplicate_item_count"] == 1
+
+
+def test_provider_context_budget_fails_before_invocation():
+    with pytest.raises(HubV2Error) as error:
+        enforce_provider_context_budget(
+            "x" * 100,
+            max_tokens=10,
+            context_stats={"source_artifact_count": 2},
+        )
+
+    assert error.value.code == "provider_context_limit"
+    assert error.value.retryable is False
+    assert error.value.safe_details["estimated_input_tokens"] == 25
+    assert error.value.safe_details["token_budget"] == 10
+    assert error.value.safe_details["source_artifact_count"] == 2
+
+
+def test_execute_rejects_model_context_overflow_before_provider_invoke(tmp_path):
+    _DuplicateInspectPlannerWorker.last_invoke_task = {}
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_DuplicateInspectPlannerWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+
+    result = service.dispatch(
+        "agent_hub_execute",
+        {
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "model": "gpt-5.3-codex-spark",
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Review the bounded context.",
+                "capability": "review",
+                "inline_input": "x" * 488_000,
+                "constraints": {
+                    "provider_allowlist": ["gpt"],
+                    "max_tokens": 131_072,
+                },
+            },
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "provider_context_limit"
+    assert result["error"]["safe_details"]["estimated_input_tokens"] == 122_000
+    assert result["error"]["safe_details"]["largest_candidate_max_input_tokens"] == 121_600
+    assert _DuplicateInspectPlannerWorker.last_invoke_task == {}
 
 
 def test_execute_uses_compact_v2_envelope(tmp_path):
@@ -366,6 +627,7 @@ def test_plan_approval_covers_stored_artifact_egress(tmp_path):
             "proposal": proposal,
             "proposal_sha256": proposal["proposal_sha256"],
             "expected_policy_revision": 0,
+            "approval_request_id": _approve_review(service, proposal),
         },
     )
 
@@ -525,6 +787,65 @@ def test_plan_prepare_reads_sources_without_provider_call(tmp_path):
     ]
 
 
+def test_plan_apply_requires_one_time_local_gui_approval_before_provider_call(tmp_path):
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_PlannerWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    (tmp_path / "fact.txt").write_text("safe fact\n")
+    task = {
+        "schema": TASK_SCHEMA,
+        "intent": "Plan from the reviewed source.",
+        "capability": "write",
+        "inline_input": "",
+    }
+    prepared = service.dispatch(
+        "agent_hub_plan",
+        {
+            "mode": "prepare",
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "source_paths": ["fact.txt"],
+            "task": task,
+        },
+    )["data"]
+    _PlannerWorker.last_prompt = ""
+    arguments = {
+        "mode": "apply",
+        "project_root": str(tmp_path),
+        "provider": "gpt",
+        "task": task,
+        "proposal": prepared,
+        "proposal_sha256": prepared["proposal_sha256"],
+        "expected_policy_revision": 0,
+    }
+
+    unapproved = service.dispatch("agent_hub_plan", arguments)
+
+    assert unapproved["success"] is False
+    assert unapproved["error"]["code"] == "egress_human_approval_required"
+    assert unapproved["error"]["next_action"] == {
+        "type": "local_gui",
+        "command": "agent-hub-connect",
+    }
+    assert _PlannerWorker.last_prompt == ""
+
+    review_id = _approve_review(service, prepared)
+    approved = service.dispatch(
+        "agent_hub_plan",
+        {**arguments, "approval_request_id": review_id},
+    )
+    repeated = service.dispatch(
+        "agent_hub_plan",
+        {**arguments, "approval_request_id": review_id},
+    )
+
+    assert approved["success"] is True
+    assert repeated["success"] is False
+    assert repeated["error"]["code"] == "egress_review_already_consumed"
+
+
 def test_plan_apply_sends_bounded_manifest_without_source_contents(tmp_path):
     service = HubService(
         HubStore(tmp_path / "state.sqlite3"),
@@ -561,6 +882,7 @@ def test_plan_apply_sends_bounded_manifest_without_source_contents(tmp_path):
             "proposal": proposal,
             "proposal_sha256": proposal["proposal_sha256"],
             "expected_policy_revision": 0,
+            "approval_request_id": _approve_review(service, proposal),
         },
     )
 
@@ -621,6 +943,7 @@ def test_plan_apply_rejects_provider_outside_approved_destinations(tmp_path):
             "proposal": prepared,
             "proposal_sha256": prepared["proposal_sha256"],
             "expected_policy_revision": 0,
+            "approval_request_id": _approve_review(service, prepared),
         },
     )
 
@@ -736,6 +1059,7 @@ def test_approved_plan_executes_complete_scoped_inspection(tmp_path):
             "proposal": prepared,
             "proposal_sha256": prepared["proposal_sha256"],
             "expected_policy_revision": 0,
+            "approval_request_id": _approve_review(service, prepared),
         },
     )["data"]["plan"]
     started = service.dispatch(
@@ -779,6 +1103,151 @@ def test_approved_plan_executes_complete_scoped_inspection(tmp_path):
     review = current["steps"][2]
     assert write["input_artifact_ids"] == inspect["output_artifact_ids"]
     assert review["input_artifact_ids"] == write["output_artifact_ids"]
+
+
+def test_duplicate_inspection_artifacts_are_compacted_before_provider_call(tmp_path):
+    _DuplicateInspectPlannerWorker.last_invoke_task = {}
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_DuplicateInspectPlannerWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    (tmp_path / "fact.txt").write_text("safe fact\n" * 10_000)
+    task = {
+        "schema": TASK_SCHEMA,
+        "intent": "Inspect twice and write once.",
+        "capability": "write",
+        "inline_input": "",
+        "constraints": {
+            "provider_allowlist": ["gpt"],
+            "max_tokens": 30_000,
+        },
+    }
+    prepared = service.dispatch(
+        "agent_hub_plan",
+        {
+            "mode": "prepare",
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "source_paths": ["fact.txt"],
+            "task": task,
+        },
+    )["data"]
+    plan = service.dispatch(
+        "agent_hub_plan",
+        {
+            "mode": "apply",
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "task": task,
+            "proposal": prepared,
+            "proposal_sha256": prepared["proposal_sha256"],
+            "expected_policy_revision": 0,
+            "approval_request_id": _approve_review(service, prepared),
+        },
+    )["data"]["plan"]
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"dedupe.{secrets.token_hex(4)}",
+        },
+    )
+    service.dispatch(
+        "agent_hub_continue",
+        {
+            "run_id": started["data"]["run_id"],
+            "expected_revision": 0,
+            "max_waves": 8,
+        },
+    )
+    for _ in range(200):
+        current = service.store.get_run(started["data"]["run_id"])
+        if current["status"] != "running":
+            break
+        time.sleep(0.01)
+
+    assert current["status"] == "completed"
+    write = next(step for step in current["steps"] if step["step_id"] == "write")
+    assert len(write["input_artifact_ids"]) == 2
+    assert write["checkpoint"]["context_source_artifacts"] == 2
+    assert write["checkpoint"]["context_fact_pack_duplicate_items"] == 1
+    assert write["checkpoint"]["context_estimated_input_tokens"] <= 30_000
+    merged = json.loads(_DuplicateInspectPlannerWorker.last_invoke_task["inline_input"])
+    assert merged["source_fact_pack_count"] == 2
+    assert len(merged["items"]) == 1
+    assert merged["items"][0]["path"] == "fact.txt"
+
+
+def test_dependency_context_budget_stops_run_before_provider_invoke(tmp_path):
+    _DuplicateInspectPlannerWorker.last_invoke_task = {}
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_DuplicateInspectPlannerWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    (tmp_path / "fact.txt").write_text("safe fact\n" * 1_000)
+    task = {
+        "schema": TASK_SCHEMA,
+        "intent": "Inspect twice, but do not exceed the provider context budget.",
+        "capability": "write",
+        "inline_input": "",
+        "constraints": {
+            "provider_allowlist": ["gpt"],
+            "max_tokens": 100,
+        },
+    }
+    prepared = service.dispatch(
+        "agent_hub_plan",
+        {
+            "mode": "prepare",
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "source_paths": ["fact.txt"],
+            "task": task,
+        },
+    )["data"]
+    plan = service.dispatch(
+        "agent_hub_plan",
+        {
+            "mode": "apply",
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "task": task,
+            "proposal": prepared,
+            "proposal_sha256": prepared["proposal_sha256"],
+            "expected_policy_revision": 0,
+            "approval_request_id": _approve_review(service, prepared),
+        },
+    )["data"]["plan"]
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"context-limit.{secrets.token_hex(4)}",
+        },
+    )
+    service.dispatch(
+        "agent_hub_continue",
+        {
+            "run_id": started["data"]["run_id"],
+            "expected_revision": 0,
+            "max_waves": 8,
+        },
+    )
+    for _ in range(200):
+        current = service.store.get_run(started["data"]["run_id"])
+        if current["status"] != "running":
+            break
+        time.sleep(0.01)
+
+    assert current["status"] == "paused"
+    write = next(step for step in current["steps"] if step["step_id"] == "write")
+    assert write["status"] == "failed"
+    assert write["checkpoint"]["error_code"] == "provider_context_limit"
+    assert _DuplicateInspectPlannerWorker.last_invoke_task == {}
 
 
 def test_start_idempotency_does_not_create_orphan_input_artifact(tmp_path):
@@ -985,6 +1454,201 @@ def test_unexpected_worker_exception_releases_run_claim_safely(tmp_path):
     assert "private fixture failure" not in str(events)
 
 
+def test_unexpected_parallel_step_exception_preserves_completed_sibling(tmp_path):
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_PartialCrashWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    plan = validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Run independent steps.",
+                "capability": "chat",
+                "inline_input": "",
+                "constraints": {"provider_allowlist": ["gpt"]},
+            },
+            "steps": [
+                {
+                    "id": "crash",
+                    "capability": "chat",
+                    "instruction": "Crash unexpectedly.",
+                    "routing_requirements": {"planner_provider": "gpt"},
+                },
+                {
+                    "id": "succeed",
+                    "capability": "chat",
+                    "instruction": "Complete normally.",
+                    "routing_requirements": {"planner_provider": "gpt"},
+                },
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"parallel-crash.{secrets.token_hex(4)}",
+        },
+    )
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": started["data"]["run_id"], "expected_revision": 0},
+    )
+    for _ in range(100):
+        current = service.store.get_run(started["data"]["run_id"])
+        if current["status"] != "running":
+            break
+        time.sleep(0.01)
+
+    assert current["status"] == "paused"
+    steps = {step["step_id"]: step for step in current["steps"]}
+    assert steps["crash"]["status"] == "failed"
+    assert steps["crash"]["checkpoint"]["error_code"] == "run_internal_error"
+    assert steps["succeed"]["status"] == "completed"
+    assert len(steps["succeed"]["output_artifact_ids"]) == 1
+    assert current["lease_active"] is False
+    assert "private fixture failure" not in str(service.store.events(started["data"]["run_id"]))
+
+
+def test_explicit_retry_requeues_safe_failed_step_and_completes(tmp_path):
+    _RetryOnceWorker.invocations = 0
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_RetryOnceWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": _plan(),
+            "project_root": str(tmp_path),
+            "idempotency_key": f"retry.{secrets.token_hex(4)}",
+        },
+    )
+    run_id = started["data"]["run_id"]
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": run_id, "expected_revision": 0},
+    )
+    for _ in range(100):
+        failed = service.store.get_run(run_id)
+        if failed["status"] == "paused":
+            break
+        time.sleep(0.01)
+
+    failed_step = failed["steps"][0]
+    assert failed_step["status"] == "failed"
+    assert failed_step["checkpoint"]["error_code"] == "fallback_exhausted"
+    assert failed_step["checkpoint"]["retry_safe"] is True
+
+    receipt = service.dispatch(
+        "agent_hub_continue",
+        {
+            "run_id": run_id,
+            "expected_revision": failed["revision"],
+            "retry_failed_steps": ["answer"],
+        },
+    )
+    assert receipt["success"] is True
+    for _ in range(100):
+        completed = service.store.get_run(run_id)
+        if completed["status"] == "completed":
+            break
+        time.sleep(0.01)
+
+    assert completed["status"] == "completed"
+    assert completed["steps"][0]["attempt"] == 2
+    assert _RetryOnceWorker.invocations == 2
+
+
+def test_explicit_retry_rejects_ambiguous_or_internal_failure(tmp_path):
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_CrashingWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": _plan(),
+            "project_root": str(tmp_path),
+            "idempotency_key": f"unsafe-retry.{secrets.token_hex(4)}",
+        },
+    )
+    run_id = started["data"]["run_id"]
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": run_id, "expected_revision": 0},
+    )
+    for _ in range(100):
+        failed = service.store.get_run(run_id)
+        if failed["status"] == "paused":
+            break
+        time.sleep(0.01)
+
+    result = service.dispatch(
+        "agent_hub_continue",
+        {
+            "run_id": run_id,
+            "expected_revision": failed["revision"],
+            "retry_failed_steps": ["answer"],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "step_not_retryable"
+
+
+def test_live_catalog_context_limit_is_revisioned_cached_and_used_for_routing(tmp_path):
+    _CatalogLimitWorker.invocations = 0
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_CatalogLimitWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+
+    catalog = service.dispatch(
+        "agent_hub_catalog",
+        {"provider": "gpt", "refresh": True},
+    )
+
+    provider_catalog = catalog["data"]["providers"]["gpt"]
+    assert provider_catalog["catalog_revision"]
+    assert provider_catalog["context_limit_model_count"] == 1
+    assert provider_catalog["context_limit_ttl_seconds"] == 300
+    result = service.dispatch(
+        "agent_hub_execute",
+        {
+            "project_root": str(tmp_path),
+            "provider": "gpt",
+            "model": "gpt-live",
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Use the live limit.",
+                "capability": "chat",
+                "inline_input": "x" * 44,
+                "constraints": {
+                    "provider_allowlist": ["gpt"],
+                    "max_tokens": 100,
+                },
+            },
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "provider_context_limit"
+    assert _CatalogLimitWorker.invocations == 0
+    with service._catalog_limit_cache_lock:
+        service._catalog_limit_cache[("gpt", "gpt-live")]["expires_at"] = 0.0
+    assert service._cached_model_limit("gpt", "gpt-live") is None
+
+
 def test_declared_fallbacks_limit_execution_order(tmp_path):
     _FallbackWorker.invoked = []
     service = HubService(
@@ -1012,6 +1676,7 @@ def test_declared_fallbacks_limit_execution_order(tmp_path):
                     "routing_requirements": {
                         "planner_provider": "gpt",
                         "fallbacks": ["gemini"],
+                        "model": "gpt-primary-model",
                     },
                 }
             ],
@@ -1039,7 +1704,10 @@ def test_declared_fallbacks_limit_execution_order(tmp_path):
 
     assert current["status"] == "completed"
     assert current["steps"][0]["provider"] == "gemini"
-    assert _FallbackWorker.invoked == ["gpt", "gemini"]
+    assert _FallbackWorker.invoked == [
+        ("gpt", "gpt-primary-model"),
+        ("gemini", "gemini-default"),
+    ]
     events = service.store.events(started["data"]["run_id"])["events"]
     attempts = [
         (event["type"], event["details"].get("provider"))

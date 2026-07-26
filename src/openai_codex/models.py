@@ -51,17 +51,31 @@ def list_models(arguments: Dict[str, Any] | None = None) -> Dict[str, Any]:
         for option in item.get("supportedReasoningEfforts") or []:
             if isinstance(option, dict) and option.get("reasoningEffort"):
                 efforts.append(str(option["reasoningEffort"]))
-        models.append(
-            {
-                "id": model_id,
-                "display": str(item.get("displayName") or model_id),
-                "description": str(item.get("description") or ""),
-                "reasoning_efforts": efforts,
-                "input_modalities": list(item.get("inputModalities") or []),
-                "is_default": bool(item.get("isDefault")),
-                "source": "codex-app-server",
-            }
-        )
+        model = {
+            "id": model_id,
+            "display": str(item.get("displayName") or model_id),
+            "description": str(item.get("description") or ""),
+            "reasoning_efforts": efforts,
+            "input_modalities": list(item.get("inputModalities") or []),
+            "is_default": bool(item.get("isDefault")),
+            "source": "codex-app-server",
+        }
+        context_window = item.get("contextWindow")
+        effective_percent = item.get("effectiveContextWindowPercent", 100)
+        if (
+            isinstance(context_window, int)
+            and not isinstance(context_window, bool)
+            and context_window > 0
+        ):
+            model["context_window_tokens"] = context_window
+            if (
+                not isinstance(effective_percent, int)
+                or isinstance(effective_percent, bool)
+                or not 1 <= effective_percent <= 100
+            ):
+                effective_percent = 100
+            model["max_input_tokens"] = context_window * effective_percent // 100
+        models.append(model)
     warnings = ["model_catalog_truncated"] if cursor else []
     return {
         "text": f"{len(models)} GPT models from the signed-in Codex catalog.",

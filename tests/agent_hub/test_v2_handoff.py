@@ -92,6 +92,40 @@ def test_v2_handoff_service_prepares_and_applies_managed_block(tmp_path):
     assert handoff.START_MARKER in target.read_text(encoding="utf-8")
 
 
+def test_v2_handoff_managed_revision_conflict_is_safe_and_actionable(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    target = repo / "HANDOFF.md"
+    target.write_text("# Project handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+
+    result = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "prepare_update",
+            "project_root": str(repo),
+            "arguments": {
+                "body": _body("Conflict"),
+                "base_managed_sha256": "0" * 64,
+            },
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "handoff_revision_conflict"
+    assert result["error"]["scope"] == "handoff"
+    assert result["error"]["retryable"] is True
+    assert result["error"]["safe_details"] == {
+        "revision_kind": "managed_block",
+        "expected_sha256": "0" * 64,
+        "current_sha256": None,
+    }
+    assert result["error"]["next_action"] == {
+        "type": "call_tool",
+        "tool": "agent_hub_handoff",
+        "action": "prepare_update",
+    }
+
+
 def test_v2_takeover_capsule_contains_only_run_and_digest_identity(tmp_path):
     repo = _git_repo(tmp_path / "repo")
     service = _service(tmp_path)

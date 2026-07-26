@@ -18,8 +18,6 @@ def base_url() -> str:
     return os.getenv("XAI_BASE_URL", DEFAULT_BASE).rstrip("/")
 
 
-
-
 def auth_headers(*, session_id: str = "") -> Dict[str, str]:
     ctx = auth.resolve_auth()
     if ctx.get("mode") == "subscription_oauth":
@@ -47,7 +45,17 @@ def list_models_live(timeout: float = 30.0) -> List[Dict[str, Any]]:
             continue
         mid = str(item.get("id") or "").strip()
         if mid:
-            out.append({"id": mid, "display": mid, "source": "live"})
+            model = {"id": mid, "display": mid, "source": "live"}
+            for source in (
+                "max_input_tokens",
+                "context_window",
+                "context_length",
+            ):
+                value = item.get(source)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    model["max_input_tokens"] = value
+                    break
+            out.append(model)
     return out
 
 

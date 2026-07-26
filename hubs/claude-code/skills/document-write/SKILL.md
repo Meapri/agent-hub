@@ -16,8 +16,10 @@ description: >
    확인한다.
 2. 저장소 전체를 설명하는 문서는 `agent_hub_plan(mode="prepare")`로 fact pack과 egress manifest를
    만든다. 조사할 하위 시스템, 파일, 명령, 심볼을 `source_paths`와 task constraint에 구체적으로 적는다.
-3. 제안된 파일·분류·예산을 검토한 뒤에만 `agent_hub_plan(mode="apply")`로 planner를 호출한다. 계획에는
-   조사, 작성, 검토, deterministic verifier의 의존 관계가 드러나야 한다.
+3. 제안된 파일·분류·예산을 연결 GUI에서 사용자가 승인한 뒤에만 반환된
+   `approval_request.review_id`를 `approval_request_id`로 전달해
+   `agent_hub_plan(mode="apply")`를 호출한다. 계획에는 조사, 작성, 검토, deterministic verifier의
+   의존 관계가 드러나야 한다.
 4. 승인된 계획은 `agent_hub_start`와 revision-fenced `agent_hub_continue`로 실행한다. 중간 텍스트는
    문서로 저장하지 않고 완료된 `agent_hub_artifact`의 digest와 provenance를 먼저 확인한다.
 5. 저장소 자료를 추가로 보내지 않는 작은 inline 초안은 `agent_hub_execute(capability="write")`로

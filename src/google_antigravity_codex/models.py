@@ -49,6 +49,13 @@ def _provider_models() -> Dict[str, Any]:
             "display": str(item.get("display") or model_id),
             "source": source,
         }
+        max_input_tokens = item.get("max_input_tokens")
+        if (
+            isinstance(max_input_tokens, int)
+            and not isinstance(max_input_tokens, bool)
+            and max_input_tokens > 0
+        ):
+            normalized["max_input_tokens"] = max_input_tokens
         if is_image:
             image_models.append(normalized)
         else:

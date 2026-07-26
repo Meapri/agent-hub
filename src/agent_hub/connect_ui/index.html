@@ -36,7 +36,18 @@
     <main class="page-shell">
       <section class="page-intro">
         <h1>모델 연결 관리</h1>
-        <p>사용할 제공자를 연결하고, 동의 범위와 로그인 상태를 한곳에서 관리하세요.</p>
+        <p>사용할 제공자와 저장소 외부 전송 승인을 한곳에서 관리하세요.</p>
+      </section>
+
+      <section class="egress-reviews" id="egress-reviews" aria-labelledby="egress-title" hidden>
+        <div class="egress-header">
+          <div>
+            <h2 id="egress-title">외부 전송 검토</h2>
+            <p>에이전트가 준비한 파일 목록과 전송 대상을 확인해야 작업이 계속됩니다.</p>
+          </div>
+          <span class="egress-count" id="egress-count"></span>
+        </div>
+        <div id="egress-review-list"></div>
       </section>
 
       <section class="summary-rail" aria-label="연결 요약">

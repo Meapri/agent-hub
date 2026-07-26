@@ -101,8 +101,8 @@ def test_public_hub_tools_do_not_expose_private_provider_leaf_names():
 def test_plugin_manifests_and_claude_commands_describe_adaptive_engine():
     codex = _json(HUBS / "codex/.codex-plugin/plugin.json")
     claude = _json(HUBS / "claude-code/.claude-plugin/plugin.json")
-    assert codex["version"] == "2.1.4"
-    assert claude["version"] == "2.1.4"
+    assert codex["version"] == "2.2.0"
+    assert claude["version"] == "2.2.0"
     assert codex["mcpServers"] == "./.mcp.json"
     assert "durable" in codex["description"].lower()
     assert "durable" in claude["description"].lower()
@@ -122,7 +122,7 @@ def test_local_marketplaces_install_the_matching_app_plugin():
     assert claude["name"] == "agent-hub"
     assert claude["plugins"][0]["source"] == "./hubs/claude-code"
     assert codex["plugins"][0]["name"] == claude["plugins"][0]["name"] == "agent-hub"
-    assert claude["plugins"][0]["version"] == "2.1.4"
+    assert claude["plugins"][0]["version"] == "2.2.0"
 
 
 def test_release_version_check_uses_unified_agent_hub_fields():
@@ -135,7 +135,7 @@ def test_release_version_check_uses_unified_agent_hub_fields():
         "claude_plugin",
         "claude_marketplace",
     }
-    assert set(found.values()) == {"2.1.4"}
+    assert set(found.values()) == {"2.2.0"}
 
 
 def test_package_exposes_only_canonical_agent_hub_entrypoints():

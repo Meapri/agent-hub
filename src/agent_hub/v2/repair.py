@@ -6,12 +6,13 @@ from hashlib import sha256
 import os
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
 from typing import Any, Mapping
 
 from .contracts import canonical_json
 from .errors import HubV2Error
-from .store import HubStore
+from .store import STORE_SCHEMA_VERSION, HubStore
 
 
 def _file_sha(path: Path) -> str:
@@ -41,6 +42,34 @@ def _integrity(path: Path) -> str:
         connection.close()
 
 
+def _schema_version(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        return int(row[0]) if row is not None else None
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        connection.close()
+
+
+def _daemon_socket_active(state_db: Path) -> bool:
+    socket_path = state_db.parent / "run" / "agent-hub.sock"
+    if not socket_path.exists():
+        return False
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(0.2)
+    try:
+        client.connect(str(socket_path))
+    except OSError:
+        return False
+    finally:
+        client.close()
+    return True
+
+
 def plan_repair(state_db: str | Path) -> dict[str, Any]:
     path = Path(state_db).expanduser().resolve(strict=False)
     integrity = _integrity(path)
@@ -51,13 +80,22 @@ def plan_repair(state_db: str | Path) -> dict[str, Any]:
             key=lambda item: item.stat().st_mtime,
             reverse=True,
         )
-        valid = next((item for item in backups if _integrity(item) == "ok"), None)
+        valid = next(
+            (
+                item
+                for item in backups
+                if _integrity(item) == "ok" and _schema_version(item) == STORE_SCHEMA_VERSION
+            ),
+            None,
+        )
         if valid is not None:
             actions.append(
                 {
                     "type": "restore_store_backup",
                     "backup_path": str(valid),
                     "backup_sha256": _file_sha(valid),
+                    "schema_version": STORE_SCHEMA_VERSION,
+                    "requires_daemon_stopped": True,
                 }
             )
     elif integrity == "ok":
@@ -72,11 +110,10 @@ def plan_repair(state_db: str | Path) -> dict[str, Any]:
         "state_db": str(path),
         "before_sha256": _state_sha(path),
         "integrity": integrity,
+        "required_schema_version": STORE_SCHEMA_VERSION,
         "actions": actions,
     }
-    proposal["proposal_sha256"] = sha256(
-        canonical_json(proposal).encode("utf-8")
-    ).hexdigest()
+    proposal["proposal_sha256"] = sha256(canonical_json(proposal).encode("utf-8")).hexdigest()
     return proposal
 
 
@@ -107,15 +144,39 @@ def apply_repair(
     for action in proposal.get("actions") or []:
         action_type = str(action.get("type") or "")
         if action_type == "restore_store_backup":
+            if action.get("requires_daemon_stopped") is not True or _daemon_socket_active(path):
+                raise HubV2Error(
+                    "repair_daemon_active",
+                    "The Agent Hub daemon must be stopped before restoring its store.",
+                    scope="repair",
+                    retryable=True,
+                    next_action={
+                        "type": "local_cli",
+                        "command": (f"launchctl bootout gui/{os.getuid()}/com.agent-hub.daemon"),
+                    },
+                )
             backup = Path(str(action.get("backup_path") or "")).resolve(strict=True)
-            if _file_sha(backup) != action.get("backup_sha256") or _integrity(backup) != "ok":
+            schema_version = _schema_version(backup)
+            if (
+                _file_sha(backup) != action.get("backup_sha256")
+                or _integrity(backup) != "ok"
+                or schema_version != STORE_SCHEMA_VERSION
+                or action.get("schema_version") != STORE_SCHEMA_VERSION
+                or proposal.get("required_schema_version") != STORE_SCHEMA_VERSION
+            ):
                 raise HubV2Error(
                     "repair_source_conflict",
-                    "The selected backup changed or is not healthy.",
+                    "The selected backup changed, is unhealthy, or has an incompatible schema.",
                     scope="repair",
+                    safe_details={
+                        "required_schema_version": STORE_SCHEMA_VERSION,
+                        "backup_schema_version": schema_version,
+                    },
                 )
-            safety = path.parent / "backups" / (
-                f"pre-repair-{sha256(os.urandom(32)).hexdigest()[:12]}.sqlite3"
+            safety = (
+                path.parent
+                / "backups"
+                / (f"pre-repair-{sha256(os.urandom(32)).hexdigest()[:12]}.sqlite3")
             )
             safety.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if path.exists():

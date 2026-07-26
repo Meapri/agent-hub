@@ -20,6 +20,7 @@ from agent_hub.doctor import run_doctor
 
 from .context import collect_scoped_fact_pack, index_project, search_fact_pack
 from .contracts import (
+    CAPABILITIES,
     PLAN_SCHEMA,
     TASK_SCHEMA,
     canonical_json,
@@ -29,6 +30,7 @@ from .contracts import (
     validate_task,
 )
 from .crypto import ArtifactCipher, MacOSKeychainKeyProvider
+from .dependency_context import assemble_dependency_context, enforce_provider_context_budget
 from .egress import prepare_egress, redact_secret_lines, verify_egress_approval
 from .errors import HubV2Error, public_failure, safe_unexpected_error
 from .policy import (
@@ -37,13 +39,14 @@ from .policy import (
     prepare_policy_update,
 )
 from .provider_client import ProviderWorkerClient
-from .provider_manifests import builtin_provider_manifests, manifest_for
+from .provider_manifests import builtin_provider_manifests, manifest_for, model_input_limit
 from .routing import route, routing_context
 from .store import HubStore
 from .tools import TOOL_NAMES, tool_definitions
 from .verifier import verify_output
 
 MAX_PLANNER_MANIFEST_CHARS = 32_000
+MODEL_CATALOG_LIMIT_CACHE_TTL_SECONDS = 300.0
 RUN_LEASE_GRACE_SECONDS = 60.0
 MAX_RUN_LEASE_SECONDS = 3600.0
 
@@ -110,6 +113,8 @@ class HubService:
         self._active_lock = threading.Lock()
         self._status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._status_cache_lock = threading.Lock()
+        self._catalog_limit_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._catalog_limit_cache_lock = threading.Lock()
 
     def dispatch(self, name: str, arguments: Any) -> dict[str, Any]:
         if name not in TOOL_NAMES:
@@ -137,6 +142,8 @@ class HubService:
             response = {"success": True, "operation": name, "error": None, "data": data}
         except HubV2Error as exc:
             response = public_failure(exc, operation=name)
+        except handoff_state.HandoffError as exc:
+            response = public_failure(self._safe_handoff_error(exc), operation=name)
         except Exception:  # noqa: BLE001
             response = safe_unexpected_error(operation=name)
         try:
@@ -148,6 +155,78 @@ class HubService:
         except Exception:  # noqa: BLE001
             pass
         return response
+
+    def pending_egress_reviews(self) -> dict[str, Any]:
+        reviews = self.store.list_egress_reviews()
+        return {
+            "schema": "agent_hub_egress_review_list_v1",
+            "reviews": reviews,
+            "pending_count": sum(item["status"] == "pending" for item in reviews),
+            "approved_count": sum(item["status"] == "approved" for item in reviews),
+        }
+
+    def decide_egress_review(
+        self,
+        review_id: str,
+        *,
+        decision: str,
+    ) -> dict[str, Any]:
+        return self.store.decide_egress_review(review_id, decision=decision)
+
+    @staticmethod
+    def _safe_handoff_error(error: handoff_state.HandoffError) -> HubV2Error:
+        if isinstance(
+            error,
+            (
+                handoff_state.HandoffManagedRevisionConflict,
+                handoff_state.HandoffRevisionConflict,
+            ),
+        ):
+            revision_kind = (
+                "managed_block"
+                if isinstance(error, handoff_state.HandoffManagedRevisionConflict)
+                else "file"
+            )
+            return HubV2Error(
+                "handoff_revision_conflict",
+                "HANDOFF.md changed after the update was prepared.",
+                scope="handoff",
+                retryable=True,
+                safe_details={
+                    "revision_kind": revision_kind,
+                    "expected_sha256": error.expected,
+                    "current_sha256": error.current,
+                },
+                next_action={
+                    "type": "call_tool",
+                    "tool": "agent_hub_handoff",
+                    "action": "prepare_update",
+                },
+            )
+        if isinstance(error, handoff_state.HandoffQualityError):
+            return HubV2Error(
+                "handoff_quality_invalid",
+                "The HANDOFF.md managed body did not pass quality checks.",
+                scope="handoff",
+                safe_details={"issue_count": len(error.issues)},
+            )
+        if isinstance(error, handoff_state.HandoffUnsafePath):
+            return HubV2Error(
+                "handoff_path_denied",
+                "The requested HANDOFF.md path is not safe for this project.",
+                scope="handoff",
+            )
+        if isinstance(error, handoff_state.HandoffNotFound):
+            return HubV2Error(
+                "handoff_not_found",
+                "No project HANDOFF.md could be found.",
+                scope="handoff",
+            )
+        return HubV2Error(
+            "invalid_request",
+            "The HANDOFF.md request is invalid.",
+            scope="handoff",
+        )
 
     def _worker(self, provider: str) -> ProviderWorkerClient:
         manifest_for(provider)
@@ -231,6 +310,96 @@ class HubService:
         providers = data.get("providers") if isinstance(data, Mapping) else None
         state = providers.get(provider) if isinstance(providers, Mapping) else None
         return dict(state) if isinstance(state, Mapping) else {}
+
+    @staticmethod
+    def _routing_models(
+        providers: list[str],
+        states: Mapping[str, Mapping[str, Any]],
+        *,
+        planner_provider: str,
+        requested_model: str | None,
+    ) -> dict[str, str]:
+        return {
+            provider: (
+                str(requested_model)
+                if provider == planner_provider and requested_model
+                else str(states.get(provider, {}).get("default_model") or "")
+            )
+            for provider in providers
+        }
+
+    def _cache_catalog_limits(
+        self,
+        provider: str,
+        model_payload: Mapping[str, Any],
+        *,
+        catalog_state: str,
+    ) -> dict[str, Any]:
+        raw_models = model_payload.get("text_models")
+        if not isinstance(raw_models, list):
+            raw_models = model_payload.get("models")
+        safe_models: list[dict[str, Any]] = []
+        for raw in raw_models if isinstance(raw_models, list) else []:
+            if not isinstance(raw, Mapping):
+                continue
+            model = str(raw.get("id") or "")
+            limit = raw.get("max_input_tokens")
+            if (
+                not model
+                or not isinstance(limit, int)
+                or isinstance(limit, bool)
+                or not 1 <= limit <= 10_000_000
+            ):
+                continue
+            safe_models.append(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "max_input_tokens": limit,
+                }
+            )
+        safe_models.sort(key=lambda item: item["model"])
+        revision = (
+            sha256(canonical_json(safe_models).encode("utf-8")).hexdigest() if safe_models else None
+        )
+        if safe_models and catalog_state in {"live", "cached"}:
+            expires_at = time.monotonic() + MODEL_CATALOG_LIMIT_CACHE_TTL_SECONDS
+            with self._catalog_limit_cache_lock:
+                for key in [key for key in self._catalog_limit_cache if key[0] == provider]:
+                    self._catalog_limit_cache.pop(key, None)
+                for item in safe_models:
+                    self._catalog_limit_cache[(provider, item["model"])] = {
+                        **item,
+                        "source": ("live_catalog" if catalog_state == "live" else "cached_catalog"),
+                        "catalog_revision": revision,
+                        "expires_at": expires_at,
+                    }
+        return {
+            "catalog_revision": revision,
+            "context_limit_model_count": len(safe_models),
+            "context_limit_ttl_seconds": int(MODEL_CATALOG_LIMIT_CACHE_TTL_SECONDS),
+        }
+
+    def _cached_model_limit(self, provider: str, model: str | None) -> dict[str, Any] | None:
+        selected_model = str(model or "")
+        if not selected_model:
+            return None
+        now = time.monotonic()
+        with self._catalog_limit_cache_lock:
+            cached = self._catalog_limit_cache.get((provider, selected_model))
+            if cached is None:
+                return None
+            if float(cached.get("expires_at") or 0.0) <= now:
+                self._catalog_limit_cache.pop((provider, selected_model), None)
+                return None
+            return {key: value for key, value in cached.items() if key != "expires_at"}
+
+    def _routing_model_limits(self, models: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+        return {
+            provider: cached
+            for provider, model in models.items()
+            if (cached := self._cached_model_limit(provider, model)) is not None
+        }
 
     @staticmethod
     def _auth_state(state: Mapping[str, Any]) -> str:
@@ -379,6 +548,19 @@ class HubService:
                     catalog_state = "cached"
                 else:
                     catalog_state = "live"
+                catalog_limit_state = (
+                    self._cache_catalog_limits(
+                        provider_id,
+                        model_payload,
+                        catalog_state=catalog_state,
+                    )
+                    if isinstance(model_payload, Mapping)
+                    else {
+                        "catalog_revision": None,
+                        "context_limit_model_count": 0,
+                        "context_limit_ttl_seconds": int(MODEL_CATALOG_LIMIT_CACHE_TTL_SECONDS),
+                    }
+                )
                 catalog[provider_id] = {
                     "manifest": manifest,
                     "auth_state": self._auth_state(state),
@@ -387,6 +569,7 @@ class HubService:
                         verification["generation_state"] if verification else "unknown"
                     ),
                     "generation_verification": verification,
+                    **catalog_limit_state,
                     "result": result,
                 }
             except HubV2Error as exc:
@@ -456,7 +639,18 @@ class HubService:
         ]
         explicit = str(arguments.get("provider") or "")
         planner_provider = explicit or allowed[0]
-        readiness, _ = self._readiness(allowed)
+        base_context_budget = enforce_provider_context_budget(
+            str(task.get("inline_input") or ""),
+            max_tokens=int(task["constraints"]["max_tokens"]),
+            context_stats={"source_artifact_count": 0},
+        )
+        readiness, states = self._readiness(allowed)
+        models = self._routing_models(
+            allowed,
+            states,
+            planner_provider=planner_provider,
+            requested_model=str(arguments.get("model") or "") or None,
+        )
         decision = route(
             store=self.store,
             task=task,
@@ -468,13 +662,29 @@ class HubService:
                 provider: self.store.provider_health(provider)["circuit_open"]
                 for provider in allowed
             },
-            models={planner_provider: str(arguments.get("model") or "")},
+            models=models,
+            model_limits=self._routing_model_limits(models),
+            estimated_input_tokens=base_context_budget["estimated_input_tokens"],
         )
         provider = decision["selected_provider"]
+        selected_model = models.get(provider) or None
+        selected_limit = model_input_limit(
+            provider,
+            selected_model,
+            observed=self._cached_model_limit(provider, selected_model),
+        )
+        context_budget = enforce_provider_context_budget(
+            str(task.get("inline_input") or ""),
+            max_tokens=int(task["constraints"]["max_tokens"]),
+            max_input_tokens=int(selected_limit["max_input_tokens"]),
+            provider=provider,
+            model=selected_model,
+            context_stats={"source_artifact_count": 0},
+        )
         try:
             result = self._worker(provider).request(
                 "invoke",
-                {"task": task, "model": arguments.get("model")},
+                {"task": task, "model": selected_model},
                 timeout=float(task["constraints"].get("timeout_seconds") or 1790),
             )
         except HubV2Error as exc:
@@ -494,7 +704,7 @@ class HubService:
             raise self._safe_provider_error(exc, provider=provider) from None
         self._invalidate_provider_state(provider)
         self.store.record_provider_outcome(provider=provider, success=True)
-        resolved_model = str(result.get("model") or arguments.get("model") or "")
+        resolved_model = str(result.get("model") or selected_model or "")
         if resolved_model:
             result = {**result, "model": resolved_model}
             self.store.record_generation_verification(
@@ -507,6 +717,7 @@ class HubService:
             "schema": "agent_hub_execution_v2",
             "provider": provider,
             "routing_decision": decision,
+            "context_budget": context_budget,
             "result": result,
         }
 
@@ -582,6 +793,20 @@ class HubService:
                     }
                 ).encode("utf-8")
             ).hexdigest()
+            if proposal["manifest"].get("entries"):
+                proposal["approval_required"] = True
+                proposal["approval_request"] = self.store.prepare_egress_review(
+                    project_root=project_root,
+                    proposal=proposal,
+                )
+                proposal["next_action"] = {
+                    "type": "local_gui",
+                    "command": "agent-hub-connect",
+                    "review_id": proposal["approval_request"]["review_id"],
+                }
+            else:
+                proposal["approval_required"] = False
+                proposal["approval_request"] = None
             return proposal
         if mode != "apply":
             raise HubV2Error(
@@ -628,6 +853,14 @@ class HubService:
             approved_manifest_sha256=str(proposal.get("manifest", {}).get("manifest_sha256") or ""),
             expected_policy_revision=expected_policy_revision,
         )
+        if verified["manifest"].get("entries"):
+            self.store.consume_egress_review(
+                str(arguments.get("approval_request_id") or ""),
+                project_root=project_root,
+                proposal_sha256=proposal_sha,
+                manifest_sha256=str(verified["manifest"]["manifest_sha256"]),
+                policy_revision=expected_policy_revision,
+            )
         self.store.record_egress_approval(
             project_root=project_root,
             manifest=verified["manifest"],
@@ -683,8 +916,18 @@ class HubService:
                 capability = "review"
             elif capability == "inspect_codebase":
                 capability = "inspect"
+            if capability not in CAPABILITIES:
+                raise HubV2Error(
+                    "planner_capability_violation",
+                    "The planner selected a capability outside the v2 runtime contract.",
+                    scope="planner",
+                    safe_details={"capability": capability},
+                )
             output_contract = dict(step.get("output_contract") or {})
             planned_provider = str(step.get("provider") or provider)
+            planned_model = str(
+                step.get("model") or (model if planned_provider == provider else "") or ""
+            )
             planned_fallbacks = [
                 str(item) for item in step.get("fallback_providers") or step.get("fallbacks") or []
             ]
@@ -709,6 +952,12 @@ class HubService:
                         "require_complete": bool(requested_sources or approved_paths),
                     }
                 )
+            routing_requirements: dict[str, Any] = {
+                "planner_provider": planned_provider,
+                "fallbacks": planned_fallbacks,
+            }
+            if planned_model:
+                routing_requirements["model"] = planned_model
             steps.append(
                 {
                     "id": str(step.get("id") or f"step_{index + 1}"),
@@ -717,10 +966,7 @@ class HubService:
                     "instruction": str(
                         step.get("instruction") or step.get("prompt") or task["intent"]
                     ),
-                    "routing_requirements": {
-                        "planner_provider": planned_provider,
-                        "fallbacks": planned_fallbacks,
-                    },
+                    "routing_requirements": routing_requirements,
                     "output_contract": output_contract,
                     "verifier": dict(step.get("verifier") or {}),
                 }
@@ -1048,7 +1294,7 @@ class HubService:
                 for entry in (approval or {}).get("entries", [])
                 if entry.get("kind") == "artifact"
             }
-            dependency_parts = []
+            dependency_parts: list[str] = []
             for artifact_id in source_refs:
                 artifact_text = self._artifact_text(artifact_id)
                 if artifact_id in input_artifacts and artifact_id not in inline_consent:
@@ -1068,7 +1314,12 @@ class HubService:
                             scope="egress",
                         )
                 dependency_parts.append(artifact_text)
-            dependency_text = "\n\n".join(dependency_parts)
+            dependency_text, dependency_stats = assemble_dependency_context(dependency_parts)
+            base_context_budget = enforce_provider_context_budget(
+                dependency_text,
+                max_tokens=int(plan["task"]["constraints"]["max_tokens"]),
+                context_stats=dependency_stats,
+            )
             task = validate_task(
                 {
                     "schema": TASK_SCHEMA,
@@ -1109,7 +1360,13 @@ class HubService:
                     "The planned primary provider is outside the task provider allowlist.",
                     scope="routing",
                 )
-            readiness, _ = self._readiness(routing_allowlist)
+            readiness, states = self._readiness(routing_allowlist)
+            models = self._routing_models(
+                routing_allowlist,
+                states,
+                planner_provider=planner_provider,
+                requested_model=requested_model,
+            )
             decision = route(
                 store=self.store,
                 task=task,
@@ -1124,7 +1381,9 @@ class HubService:
                 run_id=run_id,
                 step_id=step["id"],
                 policy_revision=plan["policy_revision"],
-                models={planner_provider: requested_model or ""},
+                models=models,
+                model_limits=self._routing_model_limits(models),
+                estimated_input_tokens=base_context_budget["estimated_input_tokens"],
             )
             eligible = {
                 str(item["provider"]) for item in decision["candidates"] if item["eligible"]
@@ -1153,6 +1412,20 @@ class HubService:
             last_error: HubV2Error | None = None
             for candidate in provider_order:
                 provider = candidate
+                candidate_model = models.get(candidate) or None
+                candidate_limit = model_input_limit(
+                    candidate,
+                    candidate_model,
+                    observed=self._cached_model_limit(candidate, candidate_model),
+                )
+                context_budget = enforce_provider_context_budget(
+                    dependency_text,
+                    max_tokens=int(plan["task"]["constraints"]["max_tokens"]),
+                    max_input_tokens=int(candidate_limit["max_input_tokens"]),
+                    provider=candidate,
+                    model=candidate_model,
+                    context_stats=dependency_stats,
+                )
                 worker = self._worker(provider)
                 attempt_started = time.monotonic()
                 correlation_id = f"{run_id}.{step['id']}.{provider}"
@@ -1162,6 +1435,7 @@ class HubService:
                     details={
                         "step_id": str(step["id"]),
                         "provider": provider,
+                        "model": candidate_model,
                         "capability": str(step["capability"]),
                         "correlation_id": correlation_id,
                     },
@@ -1171,7 +1445,7 @@ class HubService:
                 try:
                     result = worker.request(
                         "invoke",
-                        {"task": task, "model": requested_model},
+                        {"task": task, "model": candidate_model},
                         timeout=float(task["constraints"].get("timeout_seconds") or 1790),
                         request_id=correlation_id,
                     )
@@ -1187,6 +1461,7 @@ class HubService:
                         details={
                             "step_id": str(step["id"]),
                             "provider": provider,
+                            "model": candidate_model,
                             "error_code": exc.code,
                             "retryable": exc.retryable,
                             "correlation_id": correlation_id,
@@ -1215,6 +1490,7 @@ class HubService:
                     details={
                         "step_id": str(step["id"]),
                         "provider": provider,
+                        "model": candidate_model,
                         "correlation_id": correlation_id,
                         "elapsed_ms": int((time.monotonic() - attempt_started) * 1000),
                     },
@@ -1226,13 +1502,33 @@ class HubService:
                     "fallback_exhausted",
                     "All eligible provider fallbacks failed.",
                     scope="routing",
-                    retryable=True,
+                    retryable=bool(last_error and last_error.retryable),
                     safe_details={"last_error_code": last_error.code if last_error else "unknown"},
                 )
             text = _structured_text(result)
-            model = result.get("model") if isinstance(result.get("model"), str) else requested_model
+            model = (
+                result.get("model")
+                if isinstance(result.get("model"), str)
+                else models.get(provider) or None
+            )
             media_type = "text/plain; charset=utf-8"
-            checkpoint = {"routing_decision_id": decision["decision_id"]}
+            checkpoint = {
+                "routing_decision_id": decision["decision_id"],
+                "context_source_artifacts": dependency_stats["source_artifact_count"],
+                "context_segments": dependency_stats["context_segment_count"],
+                "context_duplicate_artifacts": dependency_stats["duplicate_artifact_count"],
+                "context_fact_pack_count": dependency_stats["fact_pack_count"],
+                "context_fact_pack_items": dependency_stats["fact_pack_item_count"],
+                "context_fact_pack_duplicate_items": dependency_stats[
+                    "fact_pack_duplicate_item_count"
+                ],
+                "context_chars": context_budget["context_chars"],
+                "context_bytes": context_budget["context_bytes"],
+                "context_estimated_input_tokens": context_budget["estimated_input_tokens"],
+                "context_token_budget": context_budget["token_budget"],
+                "context_model_max_input_tokens": context_budget["model_max_input_tokens"],
+                "context_effective_input_limit": context_budget["effective_input_limit"],
+            }
         aad = f"agent-hub-v2-step:{step['id']}".encode("utf-8")
         try:
             verification = verify_output(text, step.get("verifier"))
@@ -1415,6 +1711,26 @@ class HubService:
                                     "phase": (
                                         "outcome_unknown" if ambiguous else "provider_failed"
                                     ),
+                                    "retry_safe": bool(exc.retryable and not ambiguous),
+                                    "error_code": exc.code,
+                                },
+                            )
+                            current_revision = updated["revision"]
+                        except Exception:  # noqa: BLE001 - isolate one failed wave future
+                            exc = HubV2Error(
+                                "run_internal_error",
+                                "A run step failed unexpectedly.",
+                                scope="run",
+                                retryable=False,
+                            )
+                            errors[step_id] = exc
+                            updated = self.store.update_step(
+                                run_id,
+                                step_id=step_id,
+                                expected_run_revision=current_revision,
+                                status="failed",
+                                checkpoint={
+                                    "phase": "internal_error",
                                     "retry_safe": False,
                                     "error_code": exc.code,
                                 },
@@ -1641,6 +1957,20 @@ class HubService:
                 "max_waves must be between 1 and 8.",
                 scope="run",
             )
+        retry_failed_steps = arguments.get("retry_failed_steps")
+        if retry_failed_steps is not None:
+            if not isinstance(retry_failed_steps, list):
+                raise HubV2Error(
+                    "invalid_request",
+                    "retry_failed_steps must be an array.",
+                    scope="run",
+                )
+            retried = self.store.requeue_failed_steps(
+                run_id,
+                expected_revision=expected,
+                step_ids=retry_failed_steps,
+            )
+            expected = int(retried["revision"])
         plan = self.store.get_plan(run_id)
         timeout_seconds = float(plan["task"]["constraints"].get("timeout_seconds") or 60.0)
         lease_seconds = min(

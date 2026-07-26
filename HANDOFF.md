@@ -11,18 +11,22 @@
   정본 원칙: 모든 상태는 Git에 커밋되는 파일에 산다. 도구는 소모품이다.
 
 <!-- agent-hub:handoff:v1:start -->
-- **원래 목표**: Agent Hub 자체의 코드와 공개 계약을 근거로, 특징·강점·구조를 쉽게 설명하는 자연스러운 한국어 README를 처음부터 다시 작성하고 검증된 결과를 GitHub에 반영합니다.
-- **현재 단계**: Agent Hub document-write run과 로컬 검증을 마쳤으며 `README.md`와 이 인계 기록을 같은 커밋으로 `main`에 반영하는 단계입니다.
+- **원래 목표**: Agent Hub의 README 작성 과정과 Claude Code 저장소 감사를 현재 checkout에 대조하고, 아직 남아 있으며 타당한 실행·보안·복구 문제를 근본 원인 기준으로 수정한 뒤 커밋·푸시합니다.
+- **현재 단계**: `main`의 기준 커밋 `6cae011` 위에서 감사 후속 수정과 독립적인 GUI egress 승인, provider sandbox 강화를 구현했습니다. 패키지·플러그인 버전은 `2.2.0`, 저장소 schema는 8이며, 전체 검증을 마쳐 이 HANDOFF와 함께 단일 개선 커밋으로 묶을 준비가 됐습니다.
 - **완료**:
-  - `agent_hub_plan`의 승인된 fact pack으로 저장소 구조와 공개 계약을 조사하고 durable run `adb57d0b406f8ff6` revision 16을 완료했습니다.
-  - Claude `claude-opus-5`가 초안과 최종 문서를 작성하고 Gemini `gemini-3.6-flash-high`가 사실성·구성·문체를 검토했습니다.
-  - 최종 Agent Hub artifact `art_21384b76dc0ce3ca07a901f3`의 content digest `5666a23e792e8cdeca53f38cd2274beae7915cd29ba72c2f0cfed761b8811e16`과 암호화 content 인증을 확인했습니다.
-  - 기존 475줄 README를 340줄로 재구성해 주요 특징, 빠른 시작, 구조, provider 상태, 실행 흐름, 14개 MCP 도구, 라우팅·정책, 보안, artifact·HANDOFF, 복구, 지원 범위를 쉬운 문장으로 정리했습니다.
-  - 검증 완료 후 `final_readme` step에 `verified`, rating 5 feedback을 기록했습니다.
-- **미완**: 저장소 전체 Ruff format 기준선에는 기존 Python 파일 79개의 포맷 차이가 남아 있습니다. README 작업 중 발견한 대형 dependency artifact 중복 전달 문제도 후속 수정이 필요합니다.
-- **변경 파일**: `README.md`, `HANDOFF.md`를 변경합니다.
-- **검증 실행 결과**: README user-facing verify와 document quality를 통과했습니다. `tests/agent_hub/test_readme_copy.py`와 `tests/agent_hub/test_hub_plugins.py`는 12 passed, Ruler sync·Hub plugin sync·release version 2.1.4·`git diff --check`를 통과했습니다. 전체 pytest는 README 재적용 전 실행에서 558 passed, 2 skipped였고 package build도 성공했습니다. 전체 Ruff check는 통과했지만 `ruff format --check src tests`는 기존 79개 Python 파일 때문에 실패했습니다.
-- **현재 리스크**: 첫 광범위 plan은 중복된 대형 inspect artifact를 downstream provider에 전달해 실패했습니다. 축약 plan은 성공했지만 `src/agent_hub/v2/service.py`에 dependency artifact 중복 제거와 provider context 크기 제한이 없어 같은 문제가 다시 생길 수 있습니다. 또한 전체 pytest와 build를 병렬 실행한 뒤 미커밋 README가 HEAD 내용으로 돌아온 현상을 관측했으나 원인 command는 아직 특정하지 못했습니다.
-- **Do-Not-Repeat**: active external step에 중복 continue를 보내지 마세요. 대형 동일 source scope의 inspect step을 여러 개 만들지 마세요. 원인을 격리하기 전에는 미커밋 작업이 있는 현재 checkout에서 전체 pytest와 package build를 병렬 실행하지 마세요. 기존 79개 파일을 README 작업에 섞어 자동 포맷하지 마세요.
-- **다음 한 걸음**: `src/agent_hub/v2/service.py`의 downstream artifact 조립 경로에 동일 fact pack digest 중복 제거와 provider context 크기 검사를 추가하고 `tests/agent_hub/test_v2_service.py`에 대형 중복 inspect artifact 회귀 fixture를 작성하세요.
+  - retry-safe failed step의 명시적 CAS 재대기열화, 병렬 wave 예외 격리와 완료 checkpoint 보존, `outcome_unknown` 재호출 방지를 구현했습니다.
+  - repair backup의 schema/integrity 재검증과 활성 daemon DB 교체 차단, update 실패 시 기존 rollback metadata·plist·DB snapshot 보존을 구현했습니다.
+  - source 민감 경로 거부와 credential·PEM redaction을 확대하고, provider별 홈 읽기 경계를 제한했습니다.
+  - provider worker sandbox가 외부 TCP/UDP뿐 아니라 직접 DNS와 사용자 홈·runtime·임시 디렉터리의 Unix socket을 차단하면서 Python worker와 localhost egress proxy는 계속 동작하도록 했습니다.
+  - repository/artifact egress에 15분 TTL의 `egress_review_v1`을 추가했습니다. proposal·manifest·policy revision·project root에 결합된 승인을 연결 GUI에서만 승인/거부하고 `apply`가 한 번 원자적으로 소비합니다. 승인 전과 재사용 시 provider 호출은 0회입니다.
+  - egress review 조회·결정은 daemon의 내부 GUI 채널에만 두고 14개 공개 MCP 도구에는 승인 mutation을 추가하지 않았습니다. GUI 요청에는 세션 인증, same-origin, visible-intent 검사를 적용했습니다.
+  - planner capability 계약, safe handoff 오류, dependency context 압축, live model input-limit cache, provider fallback model과 Gemini session 복구 경로를 정비했습니다.
+  - artifact AES-GCM 변조/AAD/digest, macOS Keychain mock, release rollback, repair, provider sandbox, GUI approval을 포함한 회귀 테스트를 추가했습니다.
+  - README, NOTICE, V2 protocol, 공유 skill 정본과 Codex/Claude 생성물을 실제 동작에 맞게 동기화하고 버전을 `2.2.0`으로 올렸습니다.
+- **미완**: legacy V1 잔여 모듈 제거와 공개 도구 전체 dispatch coverage는 별도 작업입니다. 저장소 전체 `ruff format --check`에는 이번 변경과 무관한 기존 63개 파일 차이가 남아 있습니다. 현재 로컬에 설치되어 실행 중인 Agent Hub는 아직 이전 `2.1.4` 배포본입니다.
+- **변경 파일**: 실행·저장소는 `src/agent_hub/v2/service.py`, `store.py`, `repair.py`, `release.py`, `dependency_context.py`; 보안은 `egress.py`, `provider_client.py`; provider/routing은 `provider_manifests.py`, `provider_runtime.py`, `routing.py`, 각 provider adapter; GUI는 `connect_app.py`, `connect_service.py`, `connect_ui/*`; 계약·문서는 `contracts.py`, `tools.py`, `schemas/contracts.json`, `README.md`, `NOTICE.md`, `docs/architecture/agent-hub-v2-protocol.md`, Ruler 정본과 생성물이며 관련 테스트를 함께 변경했습니다.
+- **검증 실행 결과**: 전체 pytest `611 passed, 2 skipped in 15.87s`; `ruff check src tests`; 변경 파일 `ruff format`; `node --check src/agent_hub/connect_ui/app.js`; `git diff --check`; Ruler와 Hub plugin sync/check; README·NOTICE·V2 protocol user-facing verify; README·V2 protocol document quality; package version 정합성; `agent_hub-2.2.0` sdist/wheel build를 통과했습니다. 실제 macOS sandbox에서 worker status 성공, 직접 DNS 실패, `/tmp` AF_UNIX 연결 실패를 확인했습니다. 저장소 전체 format check만 기존 63개 파일 때문에 실패합니다.
+- **현재 리스크**: 같은 macOS 사용자 권한으로 임의 로컬 코드를 실행할 수 있는 공격자는 private daemon socket에도 접근할 수 있어 GUI 승인은 MCP prompt injection 경계이지 손상된 OS 계정의 보안 경계는 아닙니다. macOS system runtime socket은 worker 호환성을 위해 허용합니다. 일회용 승인은 planner 호출 직전에 소비되므로 호출 실패 시 새 prepare·승인이 필요합니다. live model limit cache는 daemon memory에만 있어 재시작 시 manifest fallback으로 돌아갑니다. 로컬 설치본은 별도 update 전까지 `2.1.4`입니다.
+- **Do-Not-Repeat**: GUI 승인 mutation을 공개 MCP 도구로 노출하거나 자동 승인하지 마세요. 소비된 review ID를 재사용하지 마세요. `outcome_unknown`을 자동/명시 재호출하지 마세요. 살아 있는 daemon 아래에서 SQLite 파일을 교체하지 마세요. provider 기동 검증 없이 전체 network/AF_UNIX를 blanket deny하거나 홈 전체 읽기를 다시 허용하지 마세요. 기존 63개 파일을 이 변경과 섞어 repo-wide format하지 마세요.
+- **다음 한 걸음**: 푸시된 `2.2.0` commit을 기준으로 `agent-hub update`의 preview/apply 절차를 실행한 뒤 `agent_hub_status`에서 daemon 버전과 schema 8을 확인하고 연결 GUI에서 repository egress prepare→승인→일회용 apply 흐름을 실제 설치본으로 검증하세요.
 <!-- agent-hub:handoff:v1:end -->

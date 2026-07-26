@@ -35,7 +35,7 @@ from .contracts import (
 from .errors import HubV2Error
 from .metrics import summarize_operation_metrics
 
-STORE_SCHEMA_VERSION = 7
+STORE_SCHEMA_VERSION = 8
 DEFAULT_STATE_DIR = Path("~/.agent-hub").expanduser()
 DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
@@ -83,6 +83,21 @@ _REQUIRED_SCHEMA_COLUMNS = {
         "policy_revision",
         "destinations_json",
         "entries_json",
+    },
+    "egress_reviews": {
+        "review_id",
+        "proposal_sha256",
+        "manifest_sha256",
+        "project_root",
+        "policy_revision",
+        "provider",
+        "destinations_json",
+        "entries_json",
+        "status",
+        "created_at",
+        "expires_at",
+        "decided_at",
+        "consumed_at",
     },
     "operation_metrics": {
         "metric_id",
@@ -536,6 +551,28 @@ class HubStore:
                     entries_json TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS egress_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    proposal_sha256 TEXT NOT NULL,
+                    manifest_sha256 TEXT NOT NULL,
+                    project_root TEXT NOT NULL,
+                    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+                    provider TEXT NOT NULL,
+                    model TEXT,
+                    destinations_json TEXT NOT NULL,
+                    entries_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('pending', 'approved', 'rejected', 'consumed', 'expired')),
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    decided_at REAL,
+                    consumed_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS egress_reviews_status_created
+                    ON egress_reviews(status, created_at DESC);
+                CREATE INDEX IF NOT EXISTS egress_reviews_proposal
+                    ON egress_reviews(proposal_sha256, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS provider_health (
                     provider TEXT PRIMARY KEY,
@@ -1310,6 +1347,113 @@ class HubStore:
                     "model": next_model,
                     "reason_code": status,
                 },
+            )
+            updated, steps = self._load_run(connection, run_id)
+            return self._public_run(updated, steps)
+
+    def requeue_failed_steps(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        step_ids: list[str],
+    ) -> dict[str, Any]:
+        expected = require_non_negative_int(expected_revision, field="expected_revision")
+        identifiers = [
+            require_identifier(step_id, field="retry_failed_steps[]") for step_id in step_ids
+        ]
+        if not identifiers or len(identifiers) > 64 or len(set(identifiers)) != len(identifiers):
+            raise HubV2Error(
+                "invalid_request",
+                "retry_failed_steps must contain 1..64 unique step ids.",
+                scope="run",
+            )
+        now = self._clock()
+        with self._transaction() as connection:
+            row, _ = self._load_run(connection, run_id)
+            if row["revision"] != expected:
+                raise HubV2Error(
+                    "revision_conflict",
+                    "The run revision changed.",
+                    scope="run",
+                    retryable=True,
+                    safe_details={"expected": expected, "current": row["revision"]},
+                )
+            if row["status"] != "paused" or row["lease_token_sha256"]:
+                raise HubV2Error(
+                    "run_not_retryable",
+                    "Only an unclaimed paused run can retry failed steps.",
+                    scope="run",
+                )
+            placeholders = ",".join("?" for _ in identifiers)
+            selected = connection.execute(
+                f"""
+                SELECT * FROM steps
+                WHERE run_id = ? AND step_id IN ({placeholders})
+                """,
+                (run_id, *identifiers),
+            ).fetchall()
+            selected_by_id = {str(item["step_id"]): item for item in selected}
+            if set(selected_by_id) != set(identifiers):
+                raise HubV2Error(
+                    "step_not_found",
+                    "A requested retry step was not found.",
+                    scope="run",
+                )
+            for identifier in identifiers:
+                step = selected_by_id[identifier]
+                checkpoint = _json_object(step["checkpoint_state"])
+                retry_safe = (
+                    checkpoint.get("retry_safe") is True
+                    or checkpoint.get("error_code") == "fallback_exhausted"
+                )
+                if step["status"] != "failed" or not retry_safe:
+                    raise HubV2Error(
+                        "step_not_retryable",
+                        "A requested step is not safe to retry.",
+                        scope="run",
+                        safe_details={"step_id": identifier},
+                    )
+            for identifier in identifiers:
+                previous = _json_object(selected_by_id[identifier]["checkpoint_state"])
+                connection.execute(
+                    """
+                    UPDATE steps
+                    SET status = 'queued', revision = revision + 1,
+                        provider = NULL, model = NULL,
+                        input_artifact_ids = '[]', output_artifact_ids = '[]',
+                        checkpoint_state = ?, updated_at = ?
+                    WHERE run_id = ? AND step_id = ?
+                    """,
+                    (
+                        canonical_json(
+                            {
+                                "phase": "retry_queued",
+                                "retry_safe": True,
+                                "previous_error_code": str(previous.get("error_code") or "unknown"),
+                            }
+                        ),
+                        now,
+                        run_id,
+                        identifier,
+                    ),
+                )
+            next_revision = expected + 1
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = 'queued', revision = ?, updated_at = ?
+                WHERE run_id = ? AND revision = ?
+                """,
+                (next_revision, now, run_id, expected),
+            )
+            self._append_event_tx(
+                connection,
+                run_id=run_id,
+                run_revision=next_revision,
+                event_type="failed_steps_requeued",
+                occurred_at=now,
+                details={"reason_code": "explicit_retry", "retryable": True},
             )
             updated, steps = self._load_run(connection, run_id)
             return self._public_run(updated, steps)
@@ -2163,6 +2307,329 @@ class HubStore:
                     (document_id,),
                 )
         return len(stale)
+
+    @staticmethod
+    def _public_egress_review(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "schema": "agent_hub_egress_review_v1",
+            "review_id": str(row["review_id"]),
+            "proposal_sha256": str(row["proposal_sha256"]),
+            "manifest_sha256": str(row["manifest_sha256"]),
+            "project_root": str(row["project_root"]),
+            "policy_revision": int(row["policy_revision"]),
+            "provider": str(row["provider"]),
+            "model": str(row["model"]) if row["model"] is not None else None,
+            "destinations": _json_list(row["destinations_json"]),
+            "entries": _json_list(row["entries_json"]),
+            "status": str(row["status"]),
+            "created_at": float(row["created_at"]),
+            "expires_at": float(row["expires_at"]),
+            "decided_at": (float(row["decided_at"]) if row["decided_at"] is not None else None),
+            "consumed_at": (float(row["consumed_at"]) if row["consumed_at"] is not None else None),
+        }
+
+    @staticmethod
+    def _require_sha256(value: Any, *, field: str) -> str:
+        digest = str(value or "")
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise HubV2Error(
+                "invalid_egress_proposal",
+                f"{field} must be a SHA-256 digest.",
+                scope="egress",
+            )
+        return digest
+
+    def prepare_egress_review(
+        self,
+        *,
+        project_root: str,
+        proposal: Mapping[str, Any],
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        if isinstance(ttl_seconds, bool) or not 60 <= ttl_seconds <= 3600:
+            raise HubV2Error(
+                "invalid_request",
+                "The egress review TTL is outside the supported range.",
+                scope="egress",
+            )
+        proposal_sha = self._require_sha256(
+            proposal.get("proposal_sha256"),
+            field="proposal_sha256",
+        )
+        manifest = proposal.get("manifest")
+        if not isinstance(manifest, Mapping):
+            raise HubV2Error(
+                "invalid_egress_proposal",
+                "The egress proposal has no manifest.",
+                scope="egress",
+            )
+        manifest_sha = self._require_sha256(
+            manifest.get("manifest_sha256"),
+            field="manifest_sha256",
+        )
+        root = canonical_project_root(project_root)
+        policy_revision = require_non_negative_int(
+            manifest.get("policy_revision"),
+            field="policy_revision",
+        )
+        destinations = list(
+            dict.fromkeys(
+                str(item)
+                for item in manifest.get("destinations") or [proposal.get("provider")]
+                if str(item or "")
+            )
+        )
+        entries = []
+        for raw in manifest.get("entries") or []:
+            if not isinstance(raw, Mapping):
+                continue
+            entries.append(
+                {
+                    "kind": str(raw.get("kind") or "repository"),
+                    "artifact_id": str(raw.get("artifact_id") or ""),
+                    "path_alias": str(raw.get("path_alias") or ""),
+                    "sha256": str(raw.get("sha256") or ""),
+                    "chars": int(raw.get("chars") or 0),
+                    "classification": str(raw.get("classification") or ""),
+                }
+            )
+        now = self._clock()
+        expires_at = now + float(ttl_seconds)
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE egress_reviews
+                SET status = 'expired'
+                WHERE status IN ('pending', 'approved') AND expires_at <= ?
+                """,
+                (now,),
+            )
+            existing = connection.execute(
+                """
+                SELECT * FROM egress_reviews
+                WHERE proposal_sha256 = ? AND manifest_sha256 = ?
+                  AND project_root = ? AND policy_revision = ?
+                  AND status IN ('pending', 'approved') AND expires_at > ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (proposal_sha, manifest_sha, root, policy_revision, now),
+            ).fetchone()
+            if existing is not None:
+                return self._public_egress_review(existing)
+            review_id = f"egr_{secrets.token_hex(16)}"
+            connection.execute(
+                """
+                INSERT INTO egress_reviews(
+                    review_id, proposal_sha256, manifest_sha256, project_root,
+                    policy_revision, provider, model, destinations_json, entries_json,
+                    status, created_at, expires_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    review_id,
+                    proposal_sha,
+                    manifest_sha,
+                    root,
+                    policy_revision,
+                    str(proposal.get("provider") or ""),
+                    str(proposal.get("model")) if proposal.get("model") else None,
+                    canonical_json(destinations),
+                    canonical_json(entries),
+                    now,
+                    expires_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review_id,),
+            ).fetchone()
+        assert row is not None
+        return self._public_egress_review(row)
+
+    def list_egress_reviews(self) -> list[dict[str, Any]]:
+        now = self._clock()
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE egress_reviews
+                SET status = 'expired'
+                WHERE status IN ('pending', 'approved') AND expires_at <= ?
+                """,
+                (now,),
+            )
+            rows = connection.execute(
+                """
+                SELECT * FROM egress_reviews
+                WHERE status IN ('pending', 'approved')
+                ORDER BY created_at DESC
+                LIMIT 100
+                """
+            ).fetchall()
+        return [self._public_egress_review(row) for row in rows]
+
+    def decide_egress_review(
+        self,
+        review_id: str,
+        *,
+        decision: str,
+    ) -> dict[str, Any]:
+        review = require_identifier(review_id, field="review_id")
+        if decision not in {"approve", "reject"}:
+            raise HubV2Error(
+                "invalid_request",
+                "The egress review decision is not supported.",
+                scope="egress",
+            )
+        now = self._clock()
+        target = "approved" if decision == "approve" else "rejected"
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review,),
+            ).fetchone()
+            if row is None:
+                raise HubV2Error(
+                    "egress_review_not_found",
+                    "The egress review was not found.",
+                    scope="egress",
+                )
+            if float(row["expires_at"]) <= now:
+                connection.execute(
+                    "UPDATE egress_reviews SET status = 'expired' WHERE review_id = ?",
+                    (review,),
+                )
+                raise HubV2Error(
+                    "egress_review_expired",
+                    "The egress review expired. Prepare the plan again.",
+                    scope="egress",
+                    retryable=True,
+                    next_action={"type": "call_tool", "tool": "agent_hub_plan", "mode": "prepare"},
+                )
+            if row["status"] != "pending":
+                raise HubV2Error(
+                    "egress_review_already_decided",
+                    "The egress review was already decided.",
+                    scope="egress",
+                )
+            connection.execute(
+                """
+                UPDATE egress_reviews
+                SET status = ?, decided_at = ?
+                WHERE review_id = ? AND status = 'pending'
+                """,
+                (target, now, review),
+            )
+            updated = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review,),
+            ).fetchone()
+        assert updated is not None
+        return self._public_egress_review(updated)
+
+    def consume_egress_review(
+        self,
+        review_id: str,
+        *,
+        project_root: str,
+        proposal_sha256: str,
+        manifest_sha256: str,
+        policy_revision: int,
+    ) -> dict[str, Any]:
+        if not str(review_id or ""):
+            raise HubV2Error(
+                "egress_human_approval_required",
+                "Approve this egress request in the local Agent Hub GUI.",
+                scope="egress",
+                next_action={"type": "local_gui", "command": "agent-hub-connect"},
+            )
+        review = require_identifier(review_id, field="approval_request_id")
+        proposal_sha = self._require_sha256(
+            proposal_sha256,
+            field="proposal_sha256",
+        )
+        manifest_sha = self._require_sha256(
+            manifest_sha256,
+            field="manifest_sha256",
+        )
+        root = canonical_project_root(project_root)
+        revision = require_non_negative_int(policy_revision, field="policy_revision")
+        now = self._clock()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review,),
+            ).fetchone()
+            if row is None:
+                raise HubV2Error(
+                    "egress_human_approval_required",
+                    "Approve this egress request in the local Agent Hub GUI.",
+                    scope="egress",
+                    next_action={"type": "local_gui", "command": "agent-hub-connect"},
+                )
+            if float(row["expires_at"]) <= now:
+                connection.execute(
+                    "UPDATE egress_reviews SET status = 'expired' WHERE review_id = ?",
+                    (review,),
+                )
+                raise HubV2Error(
+                    "egress_review_expired",
+                    "The egress review expired. Prepare the plan again.",
+                    scope="egress",
+                    retryable=True,
+                    next_action={"type": "call_tool", "tool": "agent_hub_plan", "mode": "prepare"},
+                )
+            if (
+                row["proposal_sha256"] != proposal_sha
+                or row["manifest_sha256"] != manifest_sha
+                or row["project_root"] != root
+                or int(row["policy_revision"]) != revision
+            ):
+                raise HubV2Error(
+                    "egress_approval_conflict",
+                    "The GUI approval belongs to different planner inputs.",
+                    scope="egress",
+                )
+            if row["status"] == "consumed":
+                raise HubV2Error(
+                    "egress_review_already_consumed",
+                    "The one-time egress approval was already consumed.",
+                    scope="egress",
+                )
+            if row["status"] == "rejected":
+                raise HubV2Error(
+                    "egress_review_rejected",
+                    "The local user rejected this egress request.",
+                    scope="egress",
+                )
+            if row["status"] != "approved":
+                raise HubV2Error(
+                    "egress_human_approval_required",
+                    "Approve this egress request in the local Agent Hub GUI.",
+                    scope="egress",
+                    next_action={"type": "local_gui", "command": "agent-hub-connect"},
+                    safe_details={"review_status": str(row["status"])},
+                )
+            updated = connection.execute(
+                """
+                UPDATE egress_reviews
+                SET status = 'consumed', consumed_at = ?
+                WHERE review_id = ? AND status = 'approved'
+                """,
+                (now, review),
+            )
+            if updated.rowcount != 1:
+                raise HubV2Error(
+                    "egress_review_already_consumed",
+                    "The one-time egress approval was already consumed.",
+                    scope="egress",
+                )
+            consumed = connection.execute(
+                "SELECT * FROM egress_reviews WHERE review_id = ?",
+                (review,),
+            ).fetchone()
+        assert consumed is not None
+        return self._public_egress_review(consumed)
 
     def record_egress_approval(
         self,
