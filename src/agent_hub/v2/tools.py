@@ -151,7 +151,9 @@ def tool_definitions() -> list[dict[str, Any]]:
                 "Call one model once and get the answer back inline. No run, no "
                 "plan, no stored artifact. Use this for a single question, a "
                 "review, or reading an image; use agent_hub_start when the work "
-                "needs several steps or has to survive a restart."
+                "needs several steps, has to survive a restart, or generates an "
+                "image -- generated images come back as a stored artifact, "
+                "never inline."
             ),
             _object(
                 {

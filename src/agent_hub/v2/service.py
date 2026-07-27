@@ -770,6 +770,21 @@ class HubService:
                 scope="run",
                 next_action={"type": "call_tool", "tool": "agent_hub_start"},
             )
+        if task["capability"] == "image":
+            # execute's contract is an answer that comes back inline, and a
+            # picture is not one: a 300 KB image is 400 KB of base64, which is
+            # unusable in the response of a tool whose caller is a model. The
+            # durable path stores the bytes as an encrypted artifact, and
+            # agent_hub_artifact hands them back under a size cap that says what
+            # to do when they are too large. Refusing before the call means the
+            # caller does not pay for an image they cannot collect.
+            raise HubV2Error(
+                "durable_run_required",
+                "Generated images are returned as a stored artifact, not inline.",
+                scope="run",
+                safe_details={"capability": "image"},
+                next_action={"type": "call_tool", "tool": "agent_hub_start"},
+            )
         project_root = arguments.get("project_root")
         if not isinstance(project_root, str) or not project_root:
             raise HubV2Error(

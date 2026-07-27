@@ -1,6 +1,6 @@
 {
   "name": "agent-hub",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Use the Agent Hub v2 local daemon for durable multi-model runs, policy-fenced context egress, encrypted artifacts, and Git handoff in Codex.",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
