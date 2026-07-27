@@ -478,12 +478,30 @@ class HubService:
         *,
         planner_provider: str,
         requested_model: str | None,
+        capability: str = "chat",
     ) -> dict[str, str]:
+        """Which model each provider would use, or "" to let the adapter choose.
+
+        A provider reports one default_model, and it is a text model. Handing it
+        to image generation asks a chat model to draw, which gemini rejects with
+        an unsupported-model error -- the runtime tracks only text_models from
+        the catalog, so it has no image default to offer. Saying nothing lets
+        the adapter use the image default it already knows about.
+
+        An explicitly requested model is always honoured: the caller named it,
+        and if it is wrong for the capability, that error is theirs to see.
+        """
+
+        substitute_default = capability != "image"
         return {
             provider: (
                 str(requested_model)
                 if provider == planner_provider and requested_model
-                else str(states.get(provider, {}).get("default_model") or "")
+                else (
+                    str(states.get(provider, {}).get("default_model") or "")
+                    if substitute_default
+                    else ""
+                )
             )
             for provider in providers
         }
@@ -810,6 +828,7 @@ class HubService:
             states,
             planner_provider=planner_provider,
             requested_model=str(arguments.get("model") or "") or None,
+            capability=task["capability"],
         )
         decision = select_provider(
             task=task,
@@ -1595,6 +1614,7 @@ class HubService:
                 states,
                 planner_provider=planner_provider,
                 requested_model=requested_model,
+                capability=step["capability"],
             )
             decision = select_provider(
                 task=task,
