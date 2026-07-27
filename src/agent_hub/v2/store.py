@@ -12,7 +12,9 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+from statistics import median_low
 import sqlite3
 import stat
 import tempfile
@@ -22,20 +24,25 @@ from typing import Any, Callable, Iterator, Mapping
 from .contracts import (
     ARTIFACT_SCHEMA,
     EVENT_SCHEMA,
+    MAX_STEP_TOKENS,
+    RECONCILIATION_SCHEMA,
     ROUTING_DECISION_SCHEMA,
+    ROUTING_PROFILES,
     RUN_SCHEMA,
     RUN_STATUSES,
+    STEP_TOKEN_SOURCES,
     canonical_json,
     canonical_project_root,
     digest_json,
     require_identifier,
     require_non_negative_int,
     safe_usage,
+    total_token_limit,
 )
 from .errors import HubV2Error
 from .metrics import summarize_operation_metrics
 
-STORE_SCHEMA_VERSION = 9
+STORE_SCHEMA_VERSION = 10
 DEFAULT_STATE_DIR = Path("~/.agent-hub").expanduser()
 DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
@@ -54,6 +61,35 @@ _REQUIRED_SCHEMA_COLUMNS = {
         "idempotency_key",
         "lease_token_sha256",
         "lease_expires_at",
+        "token_budget_limit",
+        "token_budget_grant",
+        "reconciliation_count",
+    },
+    "handoff_snapshots": {
+        "snapshot_id",
+        "scope_identity",
+        "scope_root",
+        "target_alias",
+        "sequence",
+        "origin",
+        "file_sha256",
+        "managed_sha256",
+        "body",
+        "body_sha256",
+        "recorded_at",
+    },
+    "run_reconciliations": {
+        "reconciliation_id",
+        "run_id",
+        "base_revision",
+        "witness_sha256",
+        "proposal_sha256",
+        "confirmation_sha256",
+        "run_disposition",
+        "resolutions_json",
+        "status",
+        "created_at",
+        "expires_at",
     },
     "steps": {
         "run_id",
@@ -63,6 +99,10 @@ _REQUIRED_SCHEMA_COLUMNS = {
         "provider",
         "model",
         "attempt",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "tokens_source",
         "input_artifact_ids",
         "output_artifact_ids",
         "checkpoint_state",
@@ -113,8 +153,63 @@ _REQUIRED_SCHEMA_COLUMNS = {
         "success",
         "duration_ms",
         "recorded_at",
+        "error_code",
+    },
+    "routing_decisions": {
+        "decision_id",
+        "routing_mode",
+        "selected_provider",
+        "planner_provider",
+        "candidates_json",
+        "score_json",
+        "sample_count",
+        "policy_revision",
+        "reason_code",
+        "routing_profile",
+        "evidence_kind",
+        "prior_sha256",
+        "prior_revision",
+        "prior_weight_fraction",
     },
 }
+# HubV2Error.code is a plain str field, so metric rows normalize it against this
+# pattern before storing. Anything else becomes UNCLASSIFIED_ERROR_CODE, which keeps
+# free-form text out of the content-free metrics surface.
+_ERROR_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+UNCLASSIFIED_ERROR_CODE = "unclassified_error"
+MAX_RUN_TOKEN_GRANT = 100_000_000
+MAX_RUN_RECONCILIATIONS = 3
+HANDOFF_SNAPSHOT_RETENTION = 50
+MAX_HANDOFF_SNAPSHOT_CHARS = 128_000
+RECONCILIATION_TTL_SECONDS = 900.0
+MAX_RECONCILIATION_TTL_SECONDS = 3600.0
+
+
+def _plan_token_budget(plan: Mapping[str, Any]) -> int:
+    """Denormalize the sealed plan's total token budget onto the run row."""
+
+    task = plan.get("task")
+    constraints = task.get("constraints") if isinstance(task, Mapping) else None
+    return int(total_token_limit(constraints if isinstance(constraints, Mapping) else {}))
+
+
+def normalize_error_code(code: Any, *, success: bool) -> str | None:
+    """Reduce a dispatch failure code to the fixed, content-free metric taxonomy.
+
+    Success rows never carry a code and failure rows always do, so a NULL
+    error_code can only mean the row was written before store schema 10.
+    fullmatch (not match) is required because ``$`` also matches just before a
+    trailing newline, and provider-supplied codes reach this function unvalidated.
+    """
+
+    if success:
+        return None
+    text = code if isinstance(code, str) else ""
+    if _ERROR_CODE_PATTERN.fullmatch(text) is None:
+        return UNCLASSIFIED_ERROR_CODE
+    return text
+
+
 _SAFE_EVENT_FIELDS = frozenset(
     {
         "provider",
@@ -133,6 +228,40 @@ _SAFE_EVENT_FIELDS = frozenset(
         "previous_status",
         "routing_mode",
         "correlation_id",
+        "tokens_used",
+        "tokens_budget",
+        "tokens_granted",
+        "tokens_remaining",
+        "tokens_estimated_wave",
+        "budget_used_percent",
+        "wave_step_count",
+        "estimate_source",
+        "evidence_kind",
+        "routing_profile",
+        "prior_sha256",
+        "prior_revision",
+        "prior_weight_fraction",
+        "reconciliation_id",
+        "verdict",
+        "run_disposition",
+        "step_count",
+        "witness_sha256",
+    }
+)
+_NON_NEGATIVE_EVENT_FIELDS = frozenset(
+    {
+        "elapsed_ms",
+        "prompt_chars",
+        "result_chars",
+        "tokens_used",
+        "tokens_budget",
+        "tokens_granted",
+        "tokens_remaining",
+        "tokens_estimated_wave",
+        "budget_used_percent",
+        "wave_step_count",
+        "prior_revision",
+        "step_count",
     }
 )
 
@@ -213,13 +342,20 @@ def _safe_event_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
         elif key in {"retryable"}:
             if isinstance(value, bool):
                 safe[key] = value
-        elif key in {"elapsed_ms", "prompt_chars", "result_chars"}:
+        elif key in _NON_NEGATIVE_EVENT_FIELDS:
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 safe[key] = value
-        elif key in {"prompt_sha256", "result_sha256"}:
+        elif key in {"prompt_sha256", "result_sha256", "prior_sha256", "witness_sha256"}:
             text = str(value or "")
             if len(text) == 64 and all(char in "0123456789abcdef" for char in text):
                 safe[key] = text
+        elif key == "prior_weight_fraction":
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and 0.0 <= float(value) <= 1.0
+            ):
+                safe[key] = round(float(value), 6)
         else:
             text = str(value or "")[:MAX_SAFE_STRING]
             safe[key] = text if text else "redacted"
@@ -394,6 +530,12 @@ class HubStore:
                     routing_mode TEXT NOT NULL,
                     parent_run_id TEXT,
                     replan_count INTEGER NOT NULL DEFAULT 0 CHECK (replan_count >= 0),
+                    token_budget_limit INTEGER NOT NULL DEFAULT 0
+                        CHECK (token_budget_limit >= 0),
+                    token_budget_grant INTEGER NOT NULL DEFAULT 0
+                        CHECK (token_budget_grant >= 0),
+                    reconciliation_count INTEGER NOT NULL DEFAULT 0
+                        CHECK (reconciliation_count >= 0),
                     idempotency_key TEXT NOT NULL UNIQUE,
                     lease_token_sha256 TEXT,
                     lease_expires_at REAL,
@@ -414,6 +556,12 @@ class HubStore:
                     input_artifact_ids TEXT NOT NULL DEFAULT '[]',
                     output_artifact_ids TEXT NOT NULL DEFAULT '[]',
                     checkpoint_state TEXT NOT NULL DEFAULT '{}',
+                    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+                    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+                    total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+                    tokens_source TEXT NOT NULL DEFAULT 'unset'
+                        CHECK (tokens_source IN
+                            ('unset', 'reported', 'estimated', 'mixed', 'local')),
                     updated_at REAL NOT NULL,
                     PRIMARY KEY (run_id, step_id)
                 );
@@ -491,6 +639,12 @@ class HubStore:
                     score_json TEXT NOT NULL,
                     sample_count INTEGER NOT NULL CHECK (sample_count >= 0),
                     policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    routing_profile TEXT NOT NULL DEFAULT 'quality_balanced',
+                    evidence_kind TEXT NOT NULL DEFAULT 'observed',
+                    prior_sha256 TEXT,
+                    prior_revision INTEGER,
+                    prior_weight_fraction REAL,
                     created_at REAL NOT NULL
                 );
 
@@ -510,6 +664,8 @@ class HubStore:
                 );
                 CREATE INDEX IF NOT EXISTS routing_samples_context_provider
                     ON routing_samples(context_sha256, provider, recorded_at);
+                CREATE INDEX IF NOT EXISTS routing_samples_capability_provider
+                    ON routing_samples(capability, provider, recorded_at);
 
                 CREATE TABLE IF NOT EXISTS routing_daily_aggregates (
                     day INTEGER NOT NULL,
@@ -618,10 +774,59 @@ class HubStore:
                     operation TEXT NOT NULL,
                     success INTEGER NOT NULL CHECK (success IN (0, 1)),
                     duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
-                    recorded_at REAL NOT NULL
+                    recorded_at REAL NOT NULL,
+                    error_code TEXT
                 );
                 CREATE INDEX IF NOT EXISTS operation_metrics_recorded
                     ON operation_metrics(recorded_at, metric_id);
+
+                CREATE TABLE IF NOT EXISTS run_reconciliations (
+                    reconciliation_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    base_revision INTEGER NOT NULL CHECK (base_revision >= 0),
+                    witness_sha256 TEXT NOT NULL,
+                    proposal_sha256 TEXT NOT NULL,
+                    confirmation_sha256 TEXT NOT NULL,
+                    run_disposition TEXT NOT NULL
+                        CHECK (run_disposition IN ('resume', 'fail')),
+                    resolutions_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('pending', 'applied', 'expired', 'superseded')),
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    applied_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS run_reconciliations_run
+                    ON run_reconciliations(run_id, status, created_at);
+
+                CREATE TABLE IF NOT EXISTS handoff_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    scope_identity TEXT NOT NULL,
+                    scope_root TEXT NOT NULL,
+                    target_alias TEXT NOT NULL,
+                    last_project_root TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+                    origin TEXT NOT NULL CHECK (origin IN ('applied', 'observed')),
+                    file_sha256 TEXT NOT NULL,
+                    managed_sha256 TEXT NOT NULL,
+                    previous_file_sha256 TEXT,
+                    previous_managed_sha256 TEXT,
+                    body TEXT NOT NULL,
+                    body_sha256 TEXT NOT NULL,
+                    body_chars INTEGER NOT NULL CHECK (body_chars >= 0),
+                    body_truncated INTEGER NOT NULL DEFAULT 0
+                        CHECK (body_truncated IN (0, 1)),
+                    redacted_lines INTEGER NOT NULL DEFAULT 0
+                        CHECK (redacted_lines >= 0),
+                    sections_json TEXT NOT NULL DEFAULT '{}',
+                    next_step TEXT NOT NULL DEFAULT '',
+                    created INTEGER NOT NULL DEFAULT 0 CHECK (created IN (0, 1)),
+                    recorded_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS handoff_snapshots_target
+                    ON handoff_snapshots(scope_identity, target_alias, sequence);
+                CREATE INDEX IF NOT EXISTS handoff_snapshots_recorded
+                    ON handoff_snapshots(recorded_at);
                 """
             )
             connection.execute("BEGIN IMMEDIATE")
@@ -663,6 +868,74 @@ class HubStore:
                 if "decision_settings_revision" not in review_columns:
                     connection.execute(
                         "ALTER TABLE egress_reviews ADD COLUMN decision_settings_revision INTEGER"
+                    )
+                metric_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(operation_metrics)").fetchall()
+                }
+                if "error_code" not in metric_columns:
+                    # Rows written before schema 10 keep NULL, which summaries report
+                    # separately from a recorded failure code.
+                    connection.execute("ALTER TABLE operation_metrics ADD COLUMN error_code TEXT")
+                run_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+                }
+                if "token_budget_limit" not in run_columns:
+                    connection.execute(
+                        "ALTER TABLE runs ADD COLUMN token_budget_limit "
+                        "INTEGER NOT NULL DEFAULT 0 CHECK (token_budget_limit >= 0)"
+                    )
+                if "token_budget_grant" not in run_columns:
+                    connection.execute(
+                        "ALTER TABLE runs ADD COLUMN token_budget_grant "
+                        "INTEGER NOT NULL DEFAULT 0 CHECK (token_budget_grant >= 0)"
+                    )
+                if "reconciliation_count" not in run_columns:
+                    connection.execute(
+                        "ALTER TABLE runs ADD COLUMN reconciliation_count "
+                        "INTEGER NOT NULL DEFAULT 0 CHECK (reconciliation_count >= 0)"
+                    )
+                step_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(steps)").fetchall()
+                }
+                for column in ("input_tokens", "output_tokens", "total_tokens"):
+                    if column not in step_columns:
+                        connection.execute(
+                            f"ALTER TABLE steps ADD COLUMN {column} "
+                            f"INTEGER NOT NULL DEFAULT 0 CHECK ({column} >= 0)"
+                        )
+                if "tokens_source" not in step_columns:
+                    connection.execute(
+                        "ALTER TABLE steps ADD COLUMN tokens_source TEXT NOT NULL "
+                        "DEFAULT 'unset' CHECK (tokens_source IN "
+                        "('unset', 'reported', 'estimated', 'mixed', 'local'))"
+                    )
+                decision_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(routing_decisions)").fetchall()
+                }
+                for column, ddl in (
+                    ("reason_code", "TEXT NOT NULL DEFAULT ''"),
+                    ("routing_profile", "TEXT NOT NULL DEFAULT 'quality_balanced'"),
+                    ("evidence_kind", "TEXT NOT NULL DEFAULT 'observed'"),
+                    ("prior_sha256", "TEXT"),
+                    ("prior_revision", "INTEGER"),
+                    ("prior_weight_fraction", "REAL"),
+                ):
+                    if column not in decision_columns:
+                        connection.execute(
+                            f"ALTER TABLE routing_decisions ADD COLUMN {column} {ddl}"
+                        )
+                # Sentinel backfill: a run with a zero budget is meaningless, so the
+                # zero value is a safe idempotent marker for "not yet derived".
+                for row in connection.execute(
+                    "SELECT run_id, plan_json FROM runs WHERE token_budget_limit = 0"
+                ).fetchall():
+                    connection.execute(
+                        "UPDATE runs SET token_budget_limit = ? WHERE run_id = ?",
+                        (_plan_token_budget(_json_object(row["plan_json"])), row["run_id"]),
                     )
                 connection.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema_version'",
@@ -736,6 +1009,7 @@ class HubStore:
         operation: str,
         success: bool,
         duration_ms: int,
+        error_code: str | None = None,
     ) -> None:
         name = str(operation)
         if (
@@ -745,15 +1019,16 @@ class HubStore:
             or duration_ms < 0
         ):
             return
+        recorded_error = normalize_error_code(error_code, success=success)
         now = self._clock()
         with self._transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO operation_metrics(
-                    operation, success, duration_ms, recorded_at
-                ) VALUES(?, ?, ?, ?)
+                    operation, success, duration_ms, recorded_at, error_code
+                ) VALUES(?, ?, ?, ?, ?)
                 """,
-                (name, int(success), int(duration_ms), now),
+                (name, int(success), int(duration_ms), now, recorded_error),
             )
             connection.execute(
                 "DELETE FROM operation_metrics WHERE recorded_at < ?",
@@ -776,7 +1051,7 @@ class HubStore:
         try:
             rows = connection.execute(
                 """
-                SELECT operation, success, duration_ms
+                SELECT operation, success, duration_ms, error_code
                 FROM operation_metrics
                 ORDER BY metric_id DESC
                 LIMIT ?
@@ -817,12 +1092,42 @@ class HubStore:
             "sha256": sha256(target.read_bytes()).hexdigest(),
         }
 
+    @staticmethod
+    def _token_usage(row: sqlite3.Row, steps: list[dict[str, Any]]) -> dict[str, Any]:
+        total = sum(int(step["total_tokens"]) for step in steps)
+        limit = int(row["token_budget_limit"] or 0)
+        grant = int(row["token_budget_grant"] or 0)
+        budget = limit + grant
+        return {
+            "schema": "agent_hub_run_token_usage_v1",
+            "input_tokens": sum(int(step["input_tokens"]) for step in steps),
+            "output_tokens": sum(int(step["output_tokens"]) for step in steps),
+            "total_tokens": total,
+            "max_total_tokens": budget,
+            "granted_tokens": grant,
+            "remaining_tokens": max(0, budget - total),
+            "budget_used_percent": (total * 100) // budget if budget else 0,
+            "reported_step_count": sum(
+                1 for step in steps if step["tokens_source"] in {"reported", "mixed"}
+            ),
+            "estimated_step_count": sum(
+                1 for step in steps if step["tokens_source"] == "estimated"
+            ),
+            # `total > 0` keeps a run that has not spent anything yet (and a
+            # local-only run with a zero budget) from being gated before its first wave.
+            "exhausted": bool(total > 0 and total >= budget),
+        }
+
     def _public_run(self, row: sqlite3.Row, steps: list[dict[str, Any]]) -> dict[str, Any]:
         retryable_failed_steps = [
             step["step_id"]
             for step in steps
             if step["status"] == "failed" and step["checkpoint"].get("retry_safe") is True
         ]
+        outcome_unknown_steps = [
+            step["step_id"] for step in steps if step["status"] == "outcome_unknown"
+        ]
+        token_usage = self._token_usage(row, steps)
         result = {
             "schema": row["schema_name"],
             "run_id": row["run_id"],
@@ -844,17 +1149,44 @@ class HubStore:
             "updated_at": row["updated_at"],
             "steps": steps,
             "retryable_failed_steps": retryable_failed_steps,
+            "outcome_unknown_steps": outcome_unknown_steps,
+            "reconciliation_count": row["reconciliation_count"],
+            "token_usage": token_usage,
         }
-        if row["status"] == "paused" and retryable_failed_steps:
+        if outcome_unknown_steps:
+            # Deliberately pre-fills the SAFE verdict only. A caller that executes
+            # next_action verbatim can never trigger an external re-send; asking for
+            # not_delivered requires consciously rewriting the arguments.
             result["next_action"] = {
                 "type": "call_tool",
-                "tool": "agent_hub_continue",
+                "tool": "agent_hub_cancel",
                 "arguments": {
+                    "action": "prepare_reconcile",
                     "run_id": row["run_id"],
                     "expected_revision": row["revision"],
-                    "retry_failed_steps": retryable_failed_steps,
+                    "resolutions": [
+                        {"step_id": step_id, "verdict": "delivered_discarded"}
+                        for step_id in outcome_unknown_steps
+                    ],
+                    "run_disposition": "fail",
                 },
             }
+        elif row["status"] == "paused":
+            arguments: dict[str, Any] = {
+                "run_id": row["run_id"],
+                "expected_revision": row["revision"],
+            }
+            if token_usage["exhausted"]:
+                # Offer one more budget of the size the sealed plan already declared.
+                arguments["token_budget_grant"] = max(1, int(row["token_budget_limit"] or 0))
+            if retryable_failed_steps:
+                arguments["retry_failed_steps"] = retryable_failed_steps
+            if len(arguments) > 2:
+                result["next_action"] = {
+                    "type": "call_tool",
+                    "tool": "agent_hub_continue",
+                    "arguments": arguments,
+                }
         return result
 
     @staticmethod
@@ -870,6 +1202,10 @@ class HubStore:
             "input_artifact_ids": _json_list(row["input_artifact_ids"]),
             "output_artifact_ids": _json_list(row["output_artifact_ids"]),
             "checkpoint": _json_object(row["checkpoint_state"]),
+            "input_tokens": int(row["input_tokens"] or 0),
+            "output_tokens": int(row["output_tokens"] or 0),
+            "total_tokens": int(row["total_tokens"] or 0),
+            "tokens_source": str(row["tokens_source"] or "unset"),
             "updated_at": row["updated_at"],
         }
 
@@ -984,8 +1320,9 @@ class HubStore:
                 INSERT INTO runs(
                     run_id, schema_name, project_root, status, revision,
                     plan_sha256, plan_json, policy_revision, routing_mode,
-                    parent_run_id, idempotency_key, created_at, updated_at
-                ) VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                    parent_run_id, idempotency_key, token_budget_limit,
+                    created_at, updated_at
+                ) VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -997,6 +1334,7 @@ class HubStore:
                     str(plan.get("routing_mode") or "shadow"),
                     parent_run_id,
                     key,
+                    _plan_token_budget(plan),
                     now,
                     now,
                 ),
@@ -1309,6 +1647,7 @@ class HubStore:
         input_artifact_ids: list[str] | None = None,
         output_artifact_ids: list[str] | None = None,
         checkpoint: Mapping[str, Any] | None = None,
+        token_usage: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         expected = require_non_negative_int(
             expected_run_revision,
@@ -1365,13 +1704,42 @@ class HubStore:
                 **dict(checkpoint or {}),
             }
             next_revision = expected + 1
+            # Token deltas accumulate across attempts: a retried step really is
+            # billed again, so the ledger has to be the sum of all attempts.
+            delta_input = delta_output = delta_total = 0
+            next_source = str(row["tokens_source"] or "unset")
+            if token_usage is not None:
+                delta_input = require_non_negative_int(
+                    token_usage.get("input_tokens", 0), field="token_usage.input_tokens"
+                )
+                delta_output = require_non_negative_int(
+                    token_usage.get("output_tokens", 0), field="token_usage.output_tokens"
+                )
+                delta_total = require_non_negative_int(
+                    token_usage.get("total_tokens", 0), field="token_usage.total_tokens"
+                )
+                source = str(token_usage.get("source") or "unset")
+                if (
+                    source not in STEP_TOKEN_SOURCES
+                    or max(delta_input, delta_output, delta_total) > MAX_STEP_TOKENS
+                ):
+                    raise HubV2Error(
+                        "invalid_step_usage",
+                        "The step token usage is not supported.",
+                        scope="run",
+                    )
+                next_source = source if next_source in {"unset", source} else "mixed"
             connection.execute(
                 """
                 UPDATE steps
                 SET status = ?, revision = revision + 1, provider = ?, model = ?,
                     attempt = attempt + ?, input_artifact_ids = ?,
                     output_artifact_ids = ?,
-                    checkpoint_state = ?, updated_at = ?
+                    checkpoint_state = ?,
+                    input_tokens = input_tokens + ?,
+                    output_tokens = output_tokens + ?,
+                    total_tokens = total_tokens + ?,
+                    tokens_source = ?, updated_at = ?
                 WHERE run_id = ? AND step_id = ?
                 """,
                 (
@@ -1382,6 +1750,10 @@ class HubStore:
                     canonical_json(next_input_artifacts),
                     canonical_json(next_output_artifacts),
                     canonical_json(next_checkpoint),
+                    delta_input,
+                    delta_output,
+                    delta_total,
+                    next_source,
                     now,
                     run_id,
                     identifier,
@@ -1613,6 +1985,682 @@ class HubStore:
             updated, steps = self._load_run(connection, run_id)
             return self._public_run(updated, steps)
 
+    @staticmethod
+    def _reconciliation_witness(
+        *,
+        run_id: str,
+        base_revision: int,
+        steps: list[Mapping[str, Any]],
+    ) -> str:
+        """Identity of the exact attempts being adjudicated.
+
+        The run revision alone cannot say *which* attempt a human judged, so the
+        witness pins each step's revision, attempt and request digest.
+        """
+
+        return digest_json(
+            {
+                "schema": "agent_hub_reconciliation_witness_v1",
+                "run_id": run_id,
+                "base_revision": base_revision,
+                "steps": [
+                    {
+                        "step_id": str(step["step_id"]),
+                        "step_revision": int(step["revision"]),
+                        "attempt": int(step["attempt"]),
+                        "provider": step["provider"],
+                        "request_sha256": step["checkpoint"].get("request_sha256"),
+                        "error_code": step["checkpoint"].get("error_code"),
+                    }
+                    for step in sorted(steps, key=lambda item: str(item["step_id"]))
+                ],
+            }
+        )
+
+    def prepare_run_reconciliation(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        resolutions: Mapping[str, Any],
+        ttl_seconds: float = RECONCILIATION_TTL_SECONDS,
+    ) -> dict[str, Any]:
+        expected = require_non_negative_int(expected_revision, field="expected_revision")
+        ttl = min(max(float(ttl_seconds), 60.0), MAX_RECONCILIATION_TTL_SECONDS)
+        entries = list(resolutions["resolutions"])
+        disposition = str(resolutions["run_disposition"])
+        requested = {str(entry["step_id"]) for entry in entries}
+        now = self._clock()
+        with self._transaction() as connection:
+            row, step_rows = self._load_run(connection, run_id)
+            if row["revision"] != expected:
+                raise HubV2Error(
+                    "revision_conflict",
+                    "The run revision changed.",
+                    scope="run",
+                    retryable=True,
+                    safe_details={"expected": expected, "current": row["revision"]},
+                )
+            if row["status"] != "outcome_unknown" or row["lease_token_sha256"]:
+                raise HubV2Error(
+                    "run_not_reconcilable",
+                    "Only an unclaimed outcome_unknown run can be reconciled.",
+                    scope="run",
+                    safe_details={"status": str(row["status"])},
+                )
+            if int(row["reconciliation_count"]) >= MAX_RUN_RECONCILIATIONS:
+                raise HubV2Error(
+                    "reconciliation_limit_exceeded",
+                    "The run reached its human reconciliation limit.",
+                    scope="run",
+                    safe_details={"maximum": MAX_RUN_RECONCILIATIONS},
+                )
+            by_id = {str(item["step_id"]): item for item in step_rows}
+            missing = sorted(requested - set(by_id))
+            if missing:
+                raise HubV2Error(
+                    "step_not_found",
+                    "A reconciled step does not exist in this run.",
+                    scope="run",
+                    safe_details={"step_id": missing[0]},
+                )
+            for step_id in sorted(requested):
+                if by_id[step_id]["status"] != "outcome_unknown":
+                    raise HubV2Error(
+                        "step_not_reconcilable",
+                        "Only an outcome_unknown step can be reconciled.",
+                        scope="run",
+                        safe_details={"step_id": step_id},
+                    )
+            ambiguous = {
+                str(item["step_id"]) for item in step_rows if item["status"] == "outcome_unknown"
+            }
+            if ambiguous - requested:
+                # Resuming with an unjudged ambiguous step left behind would run the
+                # DAG on top of an unknown external outcome.
+                raise HubV2Error(
+                    "reconciliation_incomplete",
+                    "Every outcome_unknown step must be judged together.",
+                    scope="run",
+                    safe_details={"step_id": sorted(ambiguous - requested)[0]},
+                )
+            if disposition == "resume" and not self._reconciliation_resumable(
+                plan=_json_object(row["plan_json"]),
+                steps=step_rows,
+                entries=entries,
+            ):
+                raise HubV2Error(
+                    "reconciliation_not_resumable",
+                    "The reconciled run has no dependency-ready step left to execute.",
+                    scope="run",
+                )
+            connection.execute(
+                "UPDATE run_reconciliations SET status = 'superseded' "
+                "WHERE run_id = ? AND status = 'pending'",
+                (run_id,),
+            )
+            witness = self._reconciliation_witness(
+                run_id=run_id,
+                base_revision=expected,
+                steps=[by_id[step_id] for step_id in sorted(requested)],
+            )
+            reconciliation_id = f"rec_{secrets.token_hex(12)}"
+            resend = any(entry["verdict"] == "not_delivered" for entry in entries)
+            # The phrase itself states what is being approved.
+            phrase = ("resend-" if resend else "discard-") + secrets.token_hex(4)
+            proposal = {
+                "schema": RECONCILIATION_SCHEMA,
+                "reconciliation_id": reconciliation_id,
+                "run_id": run_id,
+                "base_revision": expected,
+                "run_disposition": disposition,
+                "resolutions": entries,
+                "witness_sha256": witness,
+                "expires_at": now + ttl,
+                "resend_requested": resend,
+            }
+            proposal["proposal_sha256"] = sha256(
+                canonical_json(proposal).encode("utf-8")
+            ).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO run_reconciliations(
+                    reconciliation_id, run_id, base_revision, witness_sha256,
+                    proposal_sha256, confirmation_sha256, run_disposition,
+                    resolutions_json, status, created_at, expires_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    reconciliation_id,
+                    run_id,
+                    expected,
+                    witness,
+                    proposal["proposal_sha256"],
+                    sha256(phrase.encode("ascii")).hexdigest(),
+                    disposition,
+                    canonical_json(entries),
+                    now,
+                    now + ttl,
+                ),
+            )
+            self._append_event_tx(
+                connection,
+                run_id=run_id,
+                run_revision=int(row["revision"]),
+                event_type="reconciliation_prepared",
+                occurred_at=now,
+                details={
+                    "reconciliation_id": reconciliation_id,
+                    "run_disposition": disposition,
+                    "step_count": len(entries),
+                    "witness_sha256": witness,
+                    "reason_code": "resend_requested" if resend else "discard_only",
+                },
+            )
+        return {
+            **proposal,
+            "confirmation_phrase": phrase,
+            "confirmation_prompt": (
+                "Re-send an external request that may already have been delivered."
+                if resend
+                else "Close the ambiguous steps without re-sending anything."
+            ),
+        }
+
+    @staticmethod
+    def _reconciliation_resumable(
+        *,
+        plan: Mapping[str, Any],
+        steps: list[Mapping[str, Any]],
+        entries: list[Mapping[str, Any]],
+    ) -> bool:
+        verdicts = {str(entry["step_id"]): str(entry["verdict"]) for entry in entries}
+        after: dict[str, str] = {}
+        for item in steps:
+            step_id = str(item["step_id"])
+            verdict = verdicts.get(step_id)
+            if verdict == "not_delivered":
+                after[step_id] = "queued"
+            elif verdict == "delivered_recovered":
+                after[step_id] = "completed"
+            elif verdict == "delivered_discarded":
+                after[step_id] = "failed"
+            else:
+                after[step_id] = str(item["status"])
+        depends = {
+            str(step["id"]): [str(dep) for dep in step.get("depends_on") or []]
+            for step in plan.get("steps") or []
+        }
+        return any(
+            status == "queued"
+            and all(after.get(dep) == "completed" for dep in depends.get(step_id, []))
+            for step_id, status in after.items()
+        )
+
+    def apply_run_reconciliation(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        proposal: Mapping[str, Any],
+        proposal_sha256: str,
+        confirmation_phrase: str,
+        recovered_artifacts: Mapping[str, str],
+    ) -> dict[str, Any]:
+        expected = require_non_negative_int(expected_revision, field="expected_revision")
+        unsigned = {key: value for key, value in proposal.items() if key != "proposal_sha256"}
+        embedded = str(proposal.get("proposal_sha256") or "")
+        if (
+            embedded != sha256(canonical_json(unsigned).encode("utf-8")).hexdigest()
+            or embedded != proposal_sha256
+        ):
+            raise HubV2Error(
+                "proposal_digest_conflict",
+                "The reconciliation proposal digest does not match.",
+                scope="run",
+            )
+        # require_identifier first so a non-ASCII phrase never reaches compare_digest.
+        phrase = require_identifier(confirmation_phrase, field="confirmation_phrase")
+        now = self._clock()
+        with self._transaction() as connection:
+            record = connection.execute(
+                "SELECT * FROM run_reconciliations WHERE reconciliation_id = ?",
+                (str(proposal.get("reconciliation_id") or ""),),
+            ).fetchone()
+            if record is None or record["status"] != "pending":
+                raise HubV2Error(
+                    "reconciliation_not_found",
+                    "The reconciliation proposal is no longer pending.",
+                    scope="run",
+                    safe_details={"status": str(record["status"]) if record else "missing"},
+                )
+            if record["proposal_sha256"] != proposal_sha256 or record["run_id"] != run_id:
+                raise HubV2Error(
+                    "proposal_digest_conflict",
+                    "The reconciliation proposal digest does not match.",
+                    scope="run",
+                )
+            if not secrets.compare_digest(
+                sha256(phrase.encode("ascii")).hexdigest(),
+                str(record["confirmation_sha256"]),
+            ):
+                raise HubV2Error(
+                    "reconciliation_confirmation_mismatch",
+                    "The confirmation phrase does not match the prepared reconciliation.",
+                    scope="run",
+                )
+            if float(record["expires_at"]) <= now:
+                connection.execute(
+                    "UPDATE run_reconciliations SET status = 'expired' WHERE reconciliation_id = ?",
+                    (record["reconciliation_id"],),
+                )
+                raise HubV2Error(
+                    "reconciliation_expired",
+                    "The reconciliation proposal expired. Prepare it again.",
+                    scope="run",
+                    retryable=True,
+                    next_action={
+                        "type": "call_tool",
+                        "tool": "agent_hub_cancel",
+                        "arguments": {"action": "prepare_reconcile", "run_id": run_id},
+                    },
+                )
+            row, step_rows = self._load_run(connection, run_id)
+            if row["revision"] != expected or int(record["base_revision"]) != expected:
+                raise HubV2Error(
+                    "revision_conflict",
+                    "The run revision changed.",
+                    scope="run",
+                    retryable=True,
+                    safe_details={"expected": expected, "current": row["revision"]},
+                )
+            if row["status"] != "outcome_unknown" or row["lease_token_sha256"]:
+                raise HubV2Error(
+                    "run_not_reconcilable",
+                    "Only an unclaimed outcome_unknown run can be reconciled.",
+                    scope="run",
+                    safe_details={"status": str(row["status"])},
+                )
+            entries = [dict(item) for item in _json_list(record["resolutions_json"])]
+            by_id = {str(item["step_id"]): item for item in step_rows}
+            witness = self._reconciliation_witness(
+                run_id=run_id,
+                base_revision=expected,
+                steps=[by_id[str(entry["step_id"])] for entry in entries],
+            )
+            if witness != str(record["witness_sha256"]):
+                # The judged attempt is no longer the live attempt.
+                raise HubV2Error(
+                    "reconciliation_witness_conflict",
+                    "The reconciled steps changed after preparation.",
+                    scope="run",
+                    retryable=True,
+                )
+            next_revision = expected + 1
+            for entry in sorted(entries, key=lambda item: str(item["step_id"])):
+                step_id = str(entry["step_id"])
+                verdict = str(entry["verdict"])
+                if verdict == "not_delivered":
+                    status, checkpoint = (
+                        "queued",
+                        {
+                            "phase": "reconciled_requeued",
+                            "retry_safe": True,
+                            "result_origin": "human_reconciliation",
+                            "verdict": verdict,
+                        },
+                    )
+                elif verdict == "delivered_recovered":
+                    status, checkpoint = (
+                        "completed",
+                        {
+                            "phase": "reconciled_recovered",
+                            "retry_safe": False,
+                            "result_origin": "human_reconciliation",
+                            "verdict": verdict,
+                            "result_sha256": str(entry.get("result_sha256") or ""),
+                        },
+                    )
+                else:
+                    status, checkpoint = (
+                        "failed",
+                        {
+                            "phase": "reconciled_discarded",
+                            "retry_safe": False,
+                            "result_origin": "human_reconciliation",
+                            "verdict": verdict,
+                            "error_code": "delivered_discarded",
+                        },
+                    )
+                artifact_id = recovered_artifacts.get(step_id)
+                connection.execute(
+                    """
+                    UPDATE steps
+                    SET status = ?, revision = revision + 1, checkpoint_state = ?,
+                        output_artifact_ids = ?, updated_at = ?
+                    WHERE run_id = ? AND step_id = ?
+                    """,
+                    (
+                        status,
+                        canonical_json({**by_id[step_id]["checkpoint"], **checkpoint}),
+                        canonical_json([artifact_id] if artifact_id else []),
+                        now,
+                        run_id,
+                        step_id,
+                    ),
+                )
+            run_status = "queued" if record["run_disposition"] == "resume" else "failed"
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = ?, revision = ?, reconciliation_count = reconciliation_count + 1,
+                    updated_at = ?
+                WHERE run_id = ? AND revision = ?
+                """,
+                (run_status, next_revision, now, run_id, expected),
+            )
+            connection.execute(
+                "UPDATE run_reconciliations SET status = 'applied', applied_at = ? "
+                "WHERE reconciliation_id = ?",
+                (now, record["reconciliation_id"]),
+            )
+            self._append_event_tx(
+                connection,
+                run_id=run_id,
+                run_revision=next_revision,
+                event_type="run_reconciled",
+                occurred_at=now,
+                details={
+                    "reconciliation_id": str(record["reconciliation_id"]),
+                    "run_disposition": str(record["run_disposition"]),
+                    "step_count": len(entries),
+                    "witness_sha256": witness,
+                    "reason_code": "human_reconciliation",
+                },
+            )
+            updated, steps = self._load_run(connection, run_id)
+            return self._public_run(updated, steps)
+
+    def grant_token_budget(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        additional_tokens: int,
+    ) -> dict[str, Any]:
+        """Add budget to a run whose sealed plan limit is already spent.
+
+        The plan is fenced by plan_sha256, so the limit itself must stay
+        untouched; the grant is a separate run-scoped addition.
+        """
+
+        expected = require_non_negative_int(expected_revision, field="expected_revision")
+        additional = require_non_negative_int(additional_tokens, field="token_budget_grant")
+        if additional < 1:
+            raise HubV2Error(
+                "invalid_request",
+                "token_budget_grant must be at least 1.",
+                scope="run",
+            )
+        now = self._clock()
+        with self._transaction() as connection:
+            row, _ = self._load_run(connection, run_id)
+            if row["revision"] != expected:
+                raise HubV2Error(
+                    "revision_conflict",
+                    "The run revision changed.",
+                    scope="run",
+                    retryable=True,
+                    safe_details={"expected": expected, "current": row["revision"]},
+                )
+            if row["status"] not in {"queued", "paused"} or row["lease_token_sha256"]:
+                raise HubV2Error(
+                    "token_grant_not_allowed",
+                    "Only an unclaimed queued or paused run can receive a token budget grant.",
+                    scope="run",
+                    safe_details={"status": str(row["status"])},
+                )
+            granted = int(row["token_budget_grant"] or 0) + additional
+            if granted > MAX_RUN_TOKEN_GRANT:
+                raise HubV2Error(
+                    "token_grant_limit_exceeded",
+                    "The run reached its maximum additional token budget.",
+                    scope="run",
+                    safe_details={
+                        "tokens_granted": int(row["token_budget_grant"] or 0),
+                        "tokens_requested": additional,
+                    },
+                )
+            next_revision = expected + 1
+            # Status stays as-is so a following requeue_failed_steps still passes.
+            connection.execute(
+                """
+                UPDATE runs
+                SET token_budget_grant = token_budget_grant + ?, revision = ?, updated_at = ?
+                WHERE run_id = ? AND revision = ?
+                """,
+                (additional, next_revision, now, run_id, expected),
+            )
+            self._append_event_tx(
+                connection,
+                run_id=run_id,
+                run_revision=next_revision,
+                event_type="run_token_budget_granted",
+                occurred_at=now,
+                details={
+                    "reason_code": "explicit_grant",
+                    "tokens_granted": additional,
+                    "tokens_budget": int(row["token_budget_limit"] or 0) + granted,
+                },
+            )
+            updated, steps = self._load_run(connection, run_id)
+            return self._public_run(updated, steps)
+
+    def record_handoff_snapshot(
+        self,
+        *,
+        scope_identity: str,
+        scope_root: str,
+        target_alias: str,
+        project_root: str,
+        file_sha256: str,
+        managed_sha256: str,
+        body: str,
+        sections: Mapping[str, Any],
+        next_step: str,
+        previous_file_sha256: str | None = None,
+        previous_managed_sha256: str | None = None,
+        redacted_lines: int = 0,
+        created: bool = False,
+    ) -> dict[str, Any]:
+        """Store an applied HANDOFF packet so its history survives an overwrite."""
+
+        truncated = len(body) > MAX_HANDOFF_SNAPSHOT_CHARS
+        stored = body[:MAX_HANDOFF_SNAPSHOT_CHARS]
+        now = self._clock()
+        snapshot_id = f"hs_{secrets.token_hex(12)}"
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT MAX(sequence) AS latest FROM handoff_snapshots "
+                "WHERE scope_identity = ? AND target_alias = ?",
+                (scope_identity, target_alias),
+            ).fetchone()
+            sequence = int(row["latest"] or 0) + 1
+            connection.execute(
+                """
+                INSERT INTO handoff_snapshots(
+                    snapshot_id, scope_identity, scope_root, target_alias,
+                    last_project_root, sequence, origin, file_sha256, managed_sha256,
+                    previous_file_sha256, previous_managed_sha256, body, body_sha256,
+                    body_chars, body_truncated, redacted_lines, sections_json,
+                    next_step, created, recorded_at
+                ) VALUES(?, ?, ?, ?, ?, ?, 'applied', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    scope_identity,
+                    scope_root,
+                    target_alias,
+                    project_root,
+                    sequence,
+                    file_sha256,
+                    managed_sha256,
+                    previous_file_sha256,
+                    previous_managed_sha256,
+                    stored,
+                    sha256(stored.encode("utf-8")).hexdigest(),
+                    len(stored),
+                    int(truncated),
+                    max(0, int(redacted_lines)),
+                    canonical_json(dict(sections)),
+                    str(next_step)[:MAX_SAFE_STRING],
+                    int(bool(created)),
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                DELETE FROM handoff_snapshots
+                WHERE scope_identity = ? AND target_alias = ? AND sequence <= ?
+                """,
+                (scope_identity, target_alias, sequence - HANDOFF_SNAPSHOT_RETENTION),
+            )
+        return {
+            "snapshot_id": snapshot_id,
+            "sequence": sequence,
+            "body_truncated": truncated,
+            "redacted_lines": max(0, int(redacted_lines)),
+        }
+
+    def handoff_history(
+        self,
+        *,
+        scope_identity: str,
+        target_alias: str,
+        limit: int = 20,
+        include_body: bool = False,
+    ) -> dict[str, Any]:
+        bounded = min(max(int(limit), 1), 5 if include_body else HANDOFF_SNAPSHOT_RETENTION)
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT * FROM handoff_snapshots
+                WHERE scope_identity = ? AND target_alias = ?
+                ORDER BY sequence DESC LIMIT ?
+                """,
+                (scope_identity, target_alias, bounded),
+            ).fetchall()
+        finally:
+            connection.close()
+        return {
+            "schema": "agent_hub_handoff_history_v1",
+            "target_alias": target_alias,
+            # Always reported so a caller can tell that older entries were pruned.
+            "retention_limit": HANDOFF_SNAPSHOT_RETENTION,
+            "snapshots": [self._public_handoff_snapshot(row, include_body) for row in rows],
+        }
+
+    def handoff_snapshot(
+        self,
+        *,
+        scope_identity: str,
+        target_alias: str,
+        sequence: int | None = None,
+    ) -> dict[str, Any] | None:
+        connection = self._connect()
+        try:
+            if sequence is None:
+                row = connection.execute(
+                    "SELECT * FROM handoff_snapshots WHERE scope_identity = ? "
+                    "AND target_alias = ? ORDER BY sequence DESC LIMIT 1",
+                    (scope_identity, target_alias),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT * FROM handoff_snapshots WHERE scope_identity = ? "
+                    "AND target_alias = ? AND sequence = ?",
+                    (
+                        scope_identity,
+                        target_alias,
+                        require_non_negative_int(sequence, field="sequence"),
+                    ),
+                ).fetchone()
+        finally:
+            connection.close()
+        return self._public_handoff_snapshot(row, True) if row is not None else None
+
+    @staticmethod
+    def _public_handoff_snapshot(row: sqlite3.Row, include_body: bool) -> dict[str, Any]:
+        payload = {
+            "snapshot_id": row["snapshot_id"],
+            "sequence": int(row["sequence"]),
+            "origin": row["origin"],
+            "file_sha256": row["file_sha256"],
+            "managed_sha256": row["managed_sha256"],
+            "previous_managed_sha256": row["previous_managed_sha256"],
+            "body_sha256": row["body_sha256"],
+            "body_chars": int(row["body_chars"]),
+            "body_truncated": bool(row["body_truncated"]),
+            "redacted_lines": int(row["redacted_lines"]),
+            "sections": _json_object(row["sections_json"]),
+            "next_step": row["next_step"],
+            "created": bool(row["created"]),
+            "recorded_at": row["recorded_at"],
+        }
+        if include_body:
+            payload["body"] = row["body"]
+        return payload
+
+    def capability_token_estimate(
+        self,
+        *,
+        capability: str,
+        provider: str | None = None,
+        lookback_days: float = 30.0,
+        minimum_samples: int = 3,
+    ) -> dict[str, Any]:
+        """Median observed token spend for a capability, for pre-wave forecasting."""
+
+        cutoff = self._clock() - max(0.0, float(lookback_days)) * 86400.0
+        connection = self._connect()
+        try:
+
+            def _totals(with_provider: bool) -> list[int]:
+                sql = (
+                    "SELECT total_tokens FROM routing_samples "
+                    "WHERE capability = ? AND success = 1 AND total_tokens IS NOT NULL "
+                    "AND total_tokens > 0 AND recorded_at >= ?"
+                )
+                params: list[Any] = [str(capability), cutoff]
+                if with_provider:
+                    sql += " AND provider = ?"
+                    params.append(str(provider))
+                sql += " ORDER BY total_tokens"
+                return [int(row["total_tokens"]) for row in connection.execute(sql, params)]
+
+            source = "insufficient_samples"
+            totals: list[int] = []
+            if provider:
+                candidate = _totals(True)
+                if len(candidate) >= minimum_samples:
+                    totals, source = candidate, "routing_samples_provider"
+            if not totals:
+                candidate = _totals(False)
+                if len(candidate) >= minimum_samples:
+                    totals, source = candidate, "routing_samples_capability"
+        finally:
+            connection.close()
+        return {
+            "schema": "agent_hub_token_estimate_v1",
+            "capability": str(capability),
+            "provider": str(provider) if provider else None,
+            "sample_count": len(totals),
+            # median_low keeps the estimate an observed integer, not an average.
+            "median_total_tokens": median_low(totals) if totals else None,
+            "source": source,
+        }
+
     def cancel_run(self, run_id: str, *, expected_revision: int) -> dict[str, Any]:
         expected = require_non_negative_int(expected_revision, field="expected_revision")
         now = self._clock()
@@ -1770,13 +2818,16 @@ class HubStore:
                 """
                 UPDATE runs
                 SET status = 'queued', revision = ?, plan_sha256 = ?, plan_json = ?,
-                    replan_count = replan_count + 1, updated_at = ?
+                    replan_count = replan_count + 1, token_budget_limit = ?, updated_at = ?
                 WHERE run_id = ? AND revision = ?
                 """,
                 (
                     next_revision,
                     plan_sha,
                     canonical_json(candidate_plan),
+                    # Keep the column a pure derivative of the sealed plan. The
+                    # user-supplied grant is deliberately preserved across replans.
+                    _plan_token_budget(candidate_plan),
                     now,
                     run_id,
                     expected,
@@ -2140,7 +3191,36 @@ class HubStore:
         scores: Mapping[str, Any],
         sample_count: int,
         policy_revision: int,
+        reason_code: str = "",
+        routing_profile: str = "quality_balanced",
+        evidence_kind: str = "observed",
+        prior_sha256: str | None = None,
+        prior_revision: int | None = None,
+        prior_weight_fraction: float | None = None,
     ) -> dict[str, Any]:
+        if (
+            evidence_kind not in {"observed", "prior", "blended", "default"}
+            or routing_profile not in ROUTING_PROFILES
+            or (
+                prior_sha256 is not None
+                and (
+                    len(prior_sha256) != 64
+                    or any(char not in "0123456789abcdef" for char in prior_sha256)
+                )
+            )
+            or (
+                prior_revision is not None
+                and (isinstance(prior_revision, bool) or int(prior_revision) < 0)
+            )
+            or (
+                prior_weight_fraction is not None and not 0.0 <= float(prior_weight_fraction) <= 1.0
+            )
+        ):
+            raise HubV2Error(
+                "invalid_routing_decision",
+                "The routing decision metadata is not supported.",
+                scope="routing",
+            )
         decision_id = f"route_{secrets.token_hex(12)}"
         now = self._clock()
         with self._transaction() as connection:
@@ -2151,8 +3231,10 @@ class HubStore:
                 INSERT INTO routing_decisions(
                     decision_id, schema_name, run_id, step_id, routing_mode,
                     selected_provider, planner_provider, candidates_json,
-                    score_json, sample_count, policy_revision, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    score_json, sample_count, policy_revision, reason_code,
+                    routing_profile, evidence_kind, prior_sha256, prior_revision,
+                    prior_weight_fraction, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -2166,6 +3248,12 @@ class HubStore:
                     canonical_json(scores),
                     sample_count,
                     policy_revision,
+                    str(reason_code)[:64],
+                    routing_profile,
+                    evidence_kind,
+                    prior_sha256,
+                    None if prior_revision is None else int(prior_revision),
+                    None if prior_weight_fraction is None else float(prior_weight_fraction),
                     now,
                 ),
             )
@@ -2181,6 +3269,10 @@ class HubStore:
             "scores": dict(scores),
             "sample_count": sample_count,
             "policy_revision": policy_revision,
+            "evidence_kind": evidence_kind,
+            "prior_sha256": prior_sha256,
+            "prior_revision": prior_revision,
+            "prior_weight_fraction": prior_weight_fraction,
             "created_at": now,
         }
 
@@ -2345,6 +3437,14 @@ class HubStore:
             "quality": quality_total / quality_weight if quality_weight else 0.5,
             "latency_ms": latency_total / latency_weight if latency_weight else None,
             "total_tokens": tokens_total / tokens_weight if tokens_weight else None,
+            # Laplace seeds (1.0 each) are removed so callers can blend a prior
+            # against the real observed weight. Aggregate rows carry no seed.
+            "success_weight": max(0.0, weighted_success - 1.0),
+            "failure_weight": max(0.0, weighted_failure - 1.0),
+            "observed_weight": observed_total,
+            "quality_weight": quality_weight,
+            "latency_weight": latency_weight,
+            "tokens_weight": tokens_weight,
         }
 
     def prune_routing_details(self, *, retention_days: float = 90.0) -> int:

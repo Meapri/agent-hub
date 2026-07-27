@@ -88,5 +88,5 @@ def test_bootstrap_rejects_explicit_old_python(tmp_path):
     )
 
     assert completed.returncode != 0
-    assert "must be Python 3.10 or newer" in completed.stderr
+    assert "must be Python 3.11 or newer" in completed.stderr
     assert not (root / ".venv").exists()

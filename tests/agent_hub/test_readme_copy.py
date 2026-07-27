@@ -43,7 +43,7 @@ def test_readme_keeps_copyable_setup_commands() -> None:
 
     for command in REQUIRED_COMMANDS:
         assert command in text
-    assert "Python 3.10" in text
+    assert "Python 3.11" in text
     assert "AGENT_HUB_PYTHON=" in text
     assert "Claude, Grok, Gemini, GPT" in text
     assert "공개 MCP 도구 14개" in text

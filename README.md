@@ -8,7 +8,7 @@ macOS용 멀티 모델 실행 환경입니다.
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
 - 현재 버전: `2.3.0`
-- Python: 3.10 이상
+- Python: 3.11 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
 
@@ -49,6 +49,11 @@ Claude, Grok, Gemini, GPT는 각각 별도 worker process에서 실행됩니다.
 라우팅 결과에는 선택한 provider뿐 아니라 후보, 제외 이유, 점수와 표본 수도 남습니다.
 `HANDOFF.md`에는 다음 작업자가 알아야 할 결정과 검증 결과만 정리합니다.
 
+`agent_hub_status`는 도구별 성공률과 소요 시간에 더해 실패 원인 코드 상위 항목을 함께
+보여 줍니다. 실패가 정책상 의도된 차단인지 실제 오류인지 구분할 수 있습니다. 이 집계에는
+고정된 코드 목록만 들어가며 prompt, 결과, 경로는 기록하지 않습니다. Step마다 사용한 입력과
+출력 token도 남기므로 예산이 어디에서 소모됐는지 확인할 수 있습니다.
+
 ## 빠르게 시작하기
 
 ### 1. 설치
@@ -59,7 +64,7 @@ cd agent-hub
 ./scripts/bootstrap.sh
 ```
 
-`bootstrap.sh`는 Python 3.10 이상을 찾아 `.venv`를 만들고 개발 의존성을 설치합니다.
+`bootstrap.sh`는 Python 3.11 이상을 찾아 `.venv`를 만들고 개발 의존성을 설치합니다.
 특정 Python을 사용하려면 경로를 지정할 수 있습니다.
 
 ```bash
@@ -207,6 +212,33 @@ Provider가 명확한 retryable 실패를 반환한 step은 `agent_hub_continue`
 `outcome_unknown`이나 내부 오류는 이 경로로 재시도할 수 없습니다. `agent_hub_get`은
 재시도 가능한 step ID와 최신 revision이 들어간 `next_action`을 함께 반환합니다.
 
+### 멈춘 run을 다시 움직이는 방법
+
+| 멈춘 이유 | 이어가는 방법 |
+| --- | --- |
+| 안전하게 재시도 가능한 step 실패 | `agent_hub_continue`에 `retry_failed_steps` |
+| `run_token_budget_exhausted` | `agent_hub_continue`에 `token_budget_grant` |
+| `outcome_unknown` | `agent_hub_cancel`의 `prepare_reconcile` / `apply_reconcile` |
+
+토큰 예산은 계획에 봉인돼 있어 정책을 올려도 이미 만들어진 run에는 적용되지 않습니다. 그래서
+계획의 예산은 그대로 두고 run 단위로 예산을 더하는 `token_budget_grant`를 사용합니다.
+`agent_hub_get`이 남은 예산과 함께 권장 금액을 `next_action`에 담아 돌려줍니다.
+
+`outcome_unknown`은 사람이 판단해야 풀립니다. `prepare_reconcile`로 step별 판정을 준비하고,
+반환된 확인 문구와 digest를 그대로 넘겨 `apply_reconcile`로 적용합니다. 판정은 세 가지입니다.
+
+| 판정 | 의미 | 결과 |
+| --- | --- | --- |
+| `not_delivered` | 외부 요청이 나가지 않았습니다 | step을 다시 대기열에 넣습니다 |
+| `delivered_discarded` | 나갔지만 결과를 버립니다 | step을 실패로 확정합니다 |
+| `delivered_recovered` | 나갔고 결과를 사람이 제공합니다 | 제공한 텍스트를 결과물로 저장합니다 |
+
+외부 요청을 다시 보내는 판정은 `not_delivered` 하나뿐이고, 이때 확인 문구가 `resend-`로
+시작해 무엇을 승인하는지 문구 자체에 드러납니다. `agent_hub_get`의 `next_action`은 언제나
+재전송하지 않는 `delivered_discarded`만 미리 채워 두므로, 그 값을 그대로 실행해도 외부 요청이
+다시 나가지 않습니다. 사람이 제공한 결과도 계획이 선언한 verifier를 통과해야 하며 출처가
+`human_reconciliation`으로 남습니다.
+
 ## 공개 MCP 도구 14개
 
 | 도구 | 역할 |
@@ -219,11 +251,11 @@ Provider가 명확한 retryable 실패를 반환한 step은 `agent_hub_continue`
 | `agent_hub_continue` | 예상 revision을 확인하고 다음 실행 단계를 진행하거나 안전한 failed step을 명시적으로 재시도합니다. |
 | `agent_hub_get` | Run과 step의 현재 상태를 읽습니다. |
 | `agent_hub_events` | 민감한 본문을 제외한 event를 cursor 방식으로 조회합니다. |
-| `agent_hub_cancel` | Run과 실행 중인 worker를 취소합니다. |
+| `agent_hub_cancel` | Run을 취소하거나, `outcome_unknown` run을 사람 판정으로 정리합니다. |
 | `agent_hub_artifact` | 결과물 조회, 검증, 내보내기와 보관 정책을 다룹니다. |
 | `agent_hub_feedback` | 평점과 채택·검증 결과를 기록합니다. |
-| `agent_hub_policy` | 프로젝트 정책을 조회하거나 prepare/apply 방식으로 변경합니다. |
-| `agent_hub_handoff` | `HANDOFF.md` 갱신과 takeover를 관리합니다. |
+| `agent_hub_policy` | 프로젝트 정책과 라우팅 prior를 조회하거나 prepare/apply 방식으로 변경합니다. |
+| `agent_hub_handoff` | `HANDOFF.md` 갱신과 takeover를 관리하고, 적용 이력과 구간별 diff를 읽습니다. |
 | `agent_hub_doctor` | 상태를 읽기 전용으로 진단하고 수리 계획을 만듭니다. |
 
 Run 시작·진행·취소와 feedback은 `idempotency_key` 또는 `expected_revision`으로 경합을
@@ -233,11 +265,32 @@ Run 시작·진행·취소와 feedback은 `idempotency_key` 또는 `expected_rev
 
 ## 라우팅과 프로젝트 정책
 
-기본 설정인 `quality_balanced`는 품질 60%, 신뢰성 20%, 지연시간 10%, token 효율 10%를
-기준으로 후보를 비교합니다. `shadow`와 `advisory`는 planner가 고른 provider가 capability,
-정책, 연결 상태와 context limit 검사를 통과하면 그 선택을 유지합니다. 실행할 수 없는
-provider는 eligible fallback으로 바뀔 수 있습니다. `auto`는 충분한 표본과 품질 기준을
-만족할 때만 provider 순서를 조정합니다. Mode는 자동으로 승격되지 않습니다.
+`routing_profile`은 후보를 비교하는 가중치를 정합니다. 세 가지를 지원합니다.
+
+| Profile | 품질 | 신뢰성 | 지연시간 | Token 효율 |
+| --- | ---: | ---: | ---: | ---: |
+| `quality_balanced` (기본) | 60% | 20% | 10% | 10% |
+| `latency_first` | 35% | 25% | 30% | 10% |
+| `cost_first` | 35% | 20% | 5% | 40% |
+
+`shadow`와 `advisory`는 planner가 고른 provider가 capability, 정책, 연결 상태와 context limit
+검사를 통과하면 그 선택을 유지합니다. 실행할 수 없는 provider는 eligible fallback으로 바뀔 수
+있습니다. `auto`는 충분한 표본과 품질 기준을 만족할 때만 provider 순서를 조정합니다. Mode는
+자동으로 승격되지 않습니다.
+
+### 라우팅 prior
+
+실제 사용 표본이 쌓이기 전에는 통계가 provider를 구분하지 못합니다. `~/.agent-hub/routing_prior.toml`에
+capability와 provider별 예상값을 적어 두면 관측값과 함께 계산합니다. 저장소에는 성능 수치가
+하나도 들어 있지 않습니다. `agent_hub_policy`를 `target="routing_prior"`로 호출하면 모든 항목이
+`source = "unset"`인 빈 서식을 만들어 주고, 이 상태의 항목은 가중치가 0이라 라우팅 결과가
+바뀌지 않습니다. 값을 직접 채우고 `source`를 `user_estimate` 같은 값으로 바꿔야 반영됩니다.
+
+Prior의 지분은 관측 표본이 쌓일수록 자동으로 줄어듭니다. 실제 실패가 몇 건만 기록돼도 낙관적인
+prior는 곧바로 뒤집힙니다. `auto`가 provider를 바꾸려면 prior가 근거의 절반을 넘지 않아야 하고,
+두 후보의 점수 차이가 각자의 불확실성보다 커야 합니다. 즉 예상값만으로는 provider가 바뀌지
+않습니다. 어떤 근거로 선택했는지는 `routing_decision_v1`의 `evidence_kind`에 남습니다.
+`collected_at`이 오래되면 prior 가중치가 서서히 줄고 `agent_hub_doctor`가 경고합니다.
 
 프로젝트별 설정은 `.agent-hub/project.toml`에 둡니다.
 
@@ -301,6 +354,16 @@ worker 실행에 필요한 system runtime 파일과 일부 macOS system socket�
 `HANDOFF.md`는 실행 DB의 복사본이 아닙니다. Git에 남길 목표, 결정, 완료 증거, 검증 결과,
 현재 위험과 다음 한 행동을 기록합니다. Agent Hub는 파일 전체 SHA와 관리 영역 SHA를 함께
 검사하므로 다른 사람이 수정한 내용을 조용히 덮어쓰지 않습니다.
+
+`apply_update`가 성공하면 그때 적용된 관리 영역을 로컬 DB에 스냅샷으로 남깁니다. Git에 커밋되기
+전에 인계 기록이 덮어써져도 `agent_hub_handoff`의 `history`로 이전 내용을 되찾을 수 있습니다.
+`diff`는 스냅샷끼리, 또는 스냅샷과 현재 파일을 비교해 아홉 개 필수 구간 중 무엇이 바뀌었는지
+보여 줍니다. 현재 파일과 비교하면 Agent Hub를 거치지 않고 수정된 내용도 드러납니다.
+`prepare_update`에 `include_diff`를 주면 적용하기 전에 같은 비교를 미리 볼 수 있습니다.
+
+스냅샷은 대상마다 최근 50개까지 보관하고 secret으로 보이는 줄은 저장 전에 제외합니다. 다만
+Git 밖에 인계 본문의 사본이 생긴다는 점은 알아 두어야 합니다. 상태 DB는 `0600` 권한이지만
+전체가 암호화되지는 않습니다.
 
 ## 진단, 업데이트와 복구
 

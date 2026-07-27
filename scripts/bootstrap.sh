@@ -9,7 +9,7 @@ readonly REPO_ROOT
 readonly VENV_DIR="${REPO_ROOT}/.venv"
 
 python_is_compatible() {
-  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' \
     >/dev/null 2>&1
 }
 
@@ -20,7 +20,7 @@ resolve_python() {
       return 1
     fi
     if ! python_is_compatible "${AGENT_HUB_PYTHON}"; then
-      echo "error: AGENT_HUB_PYTHON must be Python 3.10 or newer" >&2
+      echo "error: AGENT_HUB_PYTHON must be Python 3.11 or newer" >&2
       return 1
     fi
     command -v -- "${AGENT_HUB_PYTHON}"
@@ -28,7 +28,7 @@ resolve_python() {
   fi
 
   local candidate
-  for candidate in python3.13 python3.12 python3.11 python3.10 python3; do
+  for candidate in python3.13 python3.12 python3.11 python3; do
     if command -v -- "${candidate}" >/dev/null 2>&1 \
       && python_is_compatible "${candidate}"; then
       command -v -- "${candidate}"
@@ -36,7 +36,7 @@ resolve_python() {
     fi
   done
 
-  echo "error: Python 3.10 or newer is required" >&2
+  echo "error: Python 3.11 or newer is required" >&2
   echo "install a supported Python or set AGENT_HUB_PYTHON to its executable" >&2
   return 1
 }
@@ -46,7 +46,7 @@ readonly python_command
 
 if [[ -x "${VENV_DIR}/bin/python" ]]; then
   if ! python_is_compatible "${VENV_DIR}/bin/python"; then
-    echo "error: existing .venv uses Python older than 3.10" >&2
+    echo "error: existing .venv uses Python older than 3.11" >&2
     echo "move or remove ${VENV_DIR} after reviewing it, then run bootstrap again" >&2
     exit 1
   fi

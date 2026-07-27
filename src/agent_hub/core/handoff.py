@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import unified_diff
 import fcntl
 from hashlib import sha256
 import os
@@ -27,6 +28,11 @@ DEFAULT_MAX_CHARS = MAX_HANDOFF_CHARS
 MAX_HANDOFF_FILE_BYTES = 1_000_000
 MAX_UPDATE_BODY_CHARS = 128_000
 SNAPSHOT_SCHEMA = "agent_hub_handoff_snapshot_v1"
+SNAPSHOT_RECORD_SCHEMA = "agent_hub_handoff_record_v1"
+MANAGED_BLOCK_SCHEMA = "agent_hub_handoff_managed_block_v1"
+DIFF_SCHEMA = "agent_hub_handoff_diff_v1"
+DIFF_DEFAULT_LINES = 400
+DIFF_MAX_LINES = 2_000
 START_MARKER = "<!-- agent-hub:handoff:v1:start -->"
 END_MARKER = "<!-- agent-hub:handoff:v1:end -->"
 _LATEST_BLOCK_RE = re.compile(r"(?m)^[ \t]*\*\*\[[^\]\n]*최신[^\]\n]*\]\*\*[ \t]*$")
@@ -341,6 +347,127 @@ def _parse_managed_block(text: str) -> _ManagedBlock | None:
 def _managed_block(text: str) -> str | None:
     parsed = _parse_managed_block(text)
     return parsed.block.strip() + "\n" if parsed is not None else None
+
+
+def scope_identity(scope_root: str | Path) -> str:
+    """Stable identity for the repository a HANDOFF file belongs to."""
+
+    return sha256(str(scope_root).encode("utf-8")).hexdigest()
+
+
+def managed_body(text: str) -> str | None:
+    """Inner body of the managed block, without the markers."""
+
+    parsed = _parse_managed_block(text)
+    return parsed.body.strip() if parsed is not None else None
+
+
+def _normalized_body(body: str) -> str:
+    return str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def managed_sections(body: str) -> Dict[str, str]:
+    """Best-effort section split that never raises.
+
+    A hand-edited packet that would fail quality validation still has to be
+    diffable, so this deliberately does not validate.
+    """
+
+    matched = _section_matches(_normalized_body(body))
+    return {
+        key: (matched[key][0][1].strip() if len(matched[key]) == 1 else "")
+        for key in REQUIRED_SECTIONS
+    }
+
+
+def section_digests(body: str) -> Dict[str, Dict[str, Any]]:
+    sections = managed_sections(body)
+    result: Dict[str, Dict[str, Any]] = {}
+    for key, value in sections.items():
+        present = bool(value)
+        result[key] = {
+            "present": present,
+            "chars": len(value),
+            # "" rather than the digest of an empty string, so absent is distinguishable.
+            "sha256": sha256(value.encode("utf-8")).hexdigest() if present else "",
+        }
+    return result
+
+
+def diff_managed_bodies(
+    before: str,
+    after: str,
+    *,
+    include_text: bool = True,
+    max_lines: int = DIFF_DEFAULT_LINES,
+) -> Dict[str, Any]:
+    """Section-aware diff of two managed packets. Pure function, no I/O."""
+
+    budget = max(0, min(int(max_lines), DIFF_MAX_LINES))
+    before_text = _normalized_body(before)
+    after_text = _normalized_body(after)
+    before_sections = managed_sections(before_text)
+    after_sections = managed_sections(after_text)
+    sections: Dict[str, Any] = {}
+    changed = 0
+    added_total = 0
+    removed_total = 0
+    used = 0
+    text_truncated = False
+    for key in REQUIRED_SECTIONS:
+        old = before_sections[key]
+        new = after_sections[key]
+        if old and new:
+            status = "unchanged" if old == new else "changed"
+        elif new:
+            status = "added"
+        elif old:
+            status = "removed"
+        else:
+            status = "unchanged"
+        lines = list(
+            unified_diff(
+                old.splitlines(),
+                new.splitlines(),
+                lineterm="",
+                n=1,
+            )
+        )
+        body_lines = [line for line in lines if not line.startswith(("+++", "---"))]
+        added = sum(1 for line in body_lines if line.startswith("+"))
+        removed = sum(1 for line in body_lines if line.startswith("-"))
+        if status != "unchanged":
+            changed += 1
+        added_total += added
+        removed_total += removed
+        entry: Dict[str, Any] = {
+            "status": status,
+            "added_lines": added,
+            "removed_lines": removed,
+            "before_chars": len(old),
+            "after_chars": len(new),
+        }
+        if include_text and status != "unchanged":
+            if used + len(body_lines) <= budget:
+                entry["unified_diff"] = "\n".join(body_lines)
+                used += len(body_lines)
+            else:
+                text_truncated = True
+        sections[key] = entry
+    return {
+        "schema": DIFF_SCHEMA,
+        "identical": before_text == after_text,
+        # Content outside the nine known sections still counts as a change.
+        "body_changed_outside_sections": before_text != after_text and changed == 0,
+        "summary": {
+            "changed_sections": changed,
+            "added_lines": added_total,
+            "removed_lines": removed_total,
+            "text_truncated": text_truncated,
+            "max_lines": budget,
+        },
+        "sections": sections,
+    }
 
 
 def _managed_sha256(text: str) -> str | None:
@@ -749,6 +876,45 @@ def _read_update_target(
         return raw
 
 
+def load_managed_block(
+    project_root: str | Path,
+    *,
+    file: str = "",
+    search: str = "project-only",
+) -> Dict[str, Any]:
+    """Read the managed block without the truncation load_handoff applies.
+
+    load_handoff caps the file at max_chars, which can cut the END marker and
+    make the block unparseable; history and diff need the whole packet.
+    """
+
+    root = _validated_project_root(project_root)
+    target, scope, git_root = _update_target(
+        root,
+        file=file,
+        search=_normalize_search(search),
+    )
+    raw = _read_update_target(target, scope, git_root=git_root)
+    text = raw.decode("utf-8") if raw is not None else ""
+    parsed = _parse_managed_block(text) if text else None
+    body = parsed.body.strip() if parsed is not None else ""
+    return {
+        "schema": MANAGED_BLOCK_SCHEMA,
+        "project_root": str(root),
+        "target": str(target),
+        "scope_root": str(scope),
+        "target_alias": target.relative_to(scope).as_posix(),
+        "git_root": str(git_root) if git_root is not None else None,
+        "loaded": raw is not None,
+        "has_managed_block": parsed is not None,
+        "file_sha256": sha256(raw).hexdigest() if raw is not None else None,
+        "managed_sha256": _managed_sha256(text) if text else None,
+        "body": body,
+        "body_chars": len(body),
+        "file_chars": len(text),
+    }
+
+
 def prepare_handoff_update(
     project_root: str | Path,
     *,
@@ -939,6 +1105,13 @@ def apply_handoff_update(
             fcntl.flock(parent_fd, fcntl.LOCK_EX)
             current, mode, current_identity = _read_current_at(parent_fd, target.name)
             current_sha = sha256(current).hexdigest() if current is not None else None
+            try:
+                previous_managed = (
+                    _managed_sha256(current.decode("utf-8")) if current is not None else None
+                )
+            except (UnicodeDecodeError, HandoffError):
+                # Never fail an apply just because the prior block was unreadable.
+                previous_managed = None
             if current_sha != expected_sha256:
                 raise HandoffRevisionConflict(
                     expected=expected_sha256,
@@ -1003,6 +1176,10 @@ def apply_handoff_update(
         "sha256": sha256(encoded).hexdigest(),
         "previous_sha256": expected_sha256,
         "managed_sha256": sha256(managed.block.encode("utf-8")).hexdigest(),
+        "previous_managed_sha256": previous_managed,
+        "project_root": str(root),
+        "scope_root": str(scope),
+        "target_alias": relative.as_posix(),
         "quality": quality,
         "chars": len(content),
         "created": expected_sha256 is None,

@@ -174,3 +174,204 @@ def test_v2_takeover_capsule_contains_only_run_and_digest_identity(tmp_path):
     assert len(capsule["capsule_sha256"]) == 64
     assert "prompt" not in str(capsule).lower()
     assert "content" not in str(capsule).lower()
+
+
+def _apply(service: HubService, repo: Path, label: str) -> dict:
+    prepared = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "prepare_update",
+            "project_root": str(repo),
+            "arguments": {"body": _body(label)},
+        },
+    )["data"]
+    return service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "apply_update",
+            "project_root": str(repo),
+            "arguments": {
+                "file": prepared["target"],
+                "content": prepared["content"],
+                "expected_sha256": prepared["expected_sha256"],
+            },
+        },
+    )["data"]
+
+
+def test_apply_records_a_snapshot_and_history_reads_it_back(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+
+    first = _apply(service, repo, "First")
+    second = _apply(service, repo, "Second")
+
+    assert first["snapshot"]["recorded"] is True
+    assert (first["snapshot"]["sequence"], second["snapshot"]["sequence"]) == (1, 2)
+
+    history = service.dispatch(
+        "agent_hub_handoff",
+        {"action": "history", "project_root": str(repo), "arguments": {}},
+    )["data"]
+
+    assert [item["sequence"] for item in history["snapshots"]] == [2, 1]
+    assert history["retention_limit"] == 50
+    # Body is withheld unless it is asked for.
+    assert "body" not in history["snapshots"][0]
+    assert history["snapshots"][0]["sections"]["next_step"]["present"] is True
+    assert (
+        history["snapshots"][1]["managed_sha256"]
+        == history["snapshots"][0]["previous_managed_sha256"]
+    )
+
+
+def test_history_survives_an_overwrite_that_git_never_saw(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+    _apply(service, repo, "Original")
+    _apply(service, repo, "Replacement")
+
+    # The uncommitted original is gone from the file but not from the store.
+    assert "Original" not in (repo / "HANDOFF.md").read_text(encoding="utf-8")
+
+    history = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "history",
+            "project_root": str(repo),
+            "arguments": {"include_body": True, "limit": 5},
+        },
+    )["data"]
+
+    bodies = [item["body"] for item in history["snapshots"]]
+    assert any("Original" in body for body in bodies)
+
+
+def test_diff_reports_section_level_changes(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+    _apply(service, repo, "Before")
+    _apply(service, repo, "After")
+
+    diff = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "diff",
+            "project_root": str(repo),
+            "arguments": {"base_sequence": 1, "target_sequence": 2},
+        },
+    )["data"]
+
+    assert diff["identical"] is False
+    assert diff["sections"]["original_goal"]["status"] == "changed"
+    assert diff["sections"]["current_stage"]["status"] == "unchanged"
+    assert diff["summary"]["changed_sections"] == 1
+    assert "unified_diff" in diff["sections"]["original_goal"]
+    assert "unified_diff" not in diff["sections"]["current_stage"]
+
+
+def test_diff_against_the_working_file_detects_an_out_of_band_edit(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    target = repo / "HANDOFF.md"
+    target.write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+    _apply(service, repo, "Managed")
+
+    # Another harness edits the file directly, bypassing Agent Hub.
+    text = target.read_text(encoding="utf-8")
+    target.write_text(
+        text.replace("SHA fence 적용을 준비했습니다.", "누군가 직접 고쳤습니다."),
+        encoding="utf-8",
+    )
+
+    diff = service.dispatch(
+        "agent_hub_handoff",
+        {"action": "diff", "project_root": str(repo), "arguments": {}},
+    )["data"]
+
+    assert diff["after"]["kind"] == "working_file"
+    assert diff["identical"] is False
+    assert diff["sections"]["current_stage"]["status"] == "changed"
+
+
+def test_prepare_update_can_preview_its_own_diff(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+    _apply(service, repo, "Existing")
+
+    prepared = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "prepare_update",
+            "project_root": str(repo),
+            "arguments": {"body": _body("Proposed"), "include_diff": True},
+        },
+    )["data"]
+
+    assert prepared["diff"]["sections"]["original_goal"]["status"] == "changed"
+    # Still a pure preview: nothing was written.
+    assert "Proposed" not in (repo / "HANDOFF.md").read_text(encoding="utf-8")
+
+
+def test_snapshot_redacts_secret_lines_before_storing(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+    leaky = _body("Leaky").replace(
+        "- **변경 파일**: `HANDOFF.md`",
+        '- **변경 파일**: `HANDOFF.md` (api_key = "sk-live-abcdefghijklmnopqrstuvwx")',
+    )
+    prepared = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "prepare_update",
+            "project_root": str(repo),
+            "arguments": {"body": leaky},
+        },
+    )["data"]
+    applied = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "apply_update",
+            "project_root": str(repo),
+            "arguments": {
+                "file": prepared["target"],
+                "content": prepared["content"],
+                "expected_sha256": prepared["expected_sha256"],
+            },
+        },
+    )["data"]
+
+    assert applied["snapshot"]["redacted_lines"] >= 1
+    history = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "history",
+            "project_root": str(repo),
+            "arguments": {"include_body": True},
+        },
+    )["data"]
+    assert "sk-live-abcdefghijklmnopqrstuvwx" not in str(history)
+
+
+def test_diff_rejects_a_missing_snapshot(tmp_path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    service = _service(tmp_path)
+    _apply(service, repo, "Only")
+
+    response = service.dispatch(
+        "agent_hub_handoff",
+        {
+            "action": "diff",
+            "project_root": str(repo),
+            "arguments": {"base_sequence": 99},
+        },
+    )
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "handoff_snapshot_not_found"

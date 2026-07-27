@@ -44,12 +44,22 @@ Agent Hub daemon이 계획, 정책 검증, 라우팅, 실행 상태를 소유한
 - `pinned`는 선택한 provider가 실행 불가능하면 fallback으로 바꾸지 않고 실패한다.
 - `shadow`와 `advisory`는 planner provider가 capability, policy, readiness와 context 검사를
   통과할 때 선택을 유지한다. 부적격 provider는 eligible fallback으로 바뀔 수 있다.
-- `auto`도 정확한 context 표본이 20건 미만이면 planner 선택을 유지한다.
+- `auto`는 관측 표본 하한, prior 지분 상한, 두 후보의 점수 분리 조건을 모두 만족할 때만 planner
+  선택을 바꾼다. 사용자가 적어 둔 prior만으로는 provider가 바뀌지 않는다.
 - 완료된 step은 재계획으로 바꾸지 않는다. fallback 소진, timeout, context limit, deterministic
   verification 실패, capability 변화에서만 미완료 subgraph를 교체한다.
-- `outcome_unknown`, 내부 오류, 인증·동의 문제, HANDOFF drift, 사용자 취소, 전체 예산 소진은
-  명시적 retry 목록에도 넣지 않고 자동 재호출하거나 자동 재계획하지 않는다.
-- `agent_hub_cancel`은 새 결과의 반영을 막지만 이미 외부 provider에 전송된 요청을 되돌리지 못할 수 있다.
+- 내부 오류, 인증·동의 문제, HANDOFF drift, 사용자 취소는 명시적 retry 목록에도 넣지 않고
+  자동 재호출하거나 자동 재계획하지 않는다.
+- run이 `run_token_budget_exhausted`로 멈추면 남은 step은 보존된다. 사용자가 예산 추가를 승인할
+  때만 `agent_hub_continue`에 `token_budget_grant`를 전달한다. 금액은 `agent_hub_get`의
+  `token_usage`와 `next_action`을 근거로 제시한다.
+- `outcome_unknown`은 자동으로 재시도하지 않는다. 사용자가 외부 요청의 실제 전달 여부를 판단해야
+  하므로, `agent_hub_cancel`의 `prepare_reconcile`로 판정안을 만들어 사용자에게 보여 주고 승인을
+  받은 뒤에만 `apply_reconcile`을 호출한다. `agent_hub_get`의 `next_action`은 재전송하지 않는
+  `delivered_discarded`만 미리 채워 두므로, 재전송을 뜻하는 `not_delivered`로 바꾸는 것은 사용자가
+  명시적으로 요청했을 때만 한다.
+- `agent_hub_cancel`의 취소는 새 결과의 반영을 막지만 이미 외부 provider에 전송된 요청을 되돌리지
+  못할 수 있다.
 
 ## 보고할 근거
 

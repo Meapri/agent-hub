@@ -20,12 +20,16 @@ description: >
    있으면 원문 대신 참조한다.
 4. `agent_hub_handoff(action="prepare_update")`에 패킷을 넘기고 반환된 `target`,
    `expected_sha256`, `base_managed_sha256`, `proposed_managed_sha256`, `quality`, `content`를
-   확인한다. prepare 단계에서는 파일이 바뀌지 않는다.
+   확인한다. prepare 단계에서는 파일이 바뀌지 않는다. `include_diff`를 함께 주면 어느 구간이
+   바뀌는지 적용 전에 확인할 수 있다.
 5. diff가 맞을 때만 `agent_hub_handoff(action="apply_update")`에 준비된 전체 content와
    `expected_sha256`을 넘긴다. 전체 SHA만 충돌하고 managed SHA가 유지되면 직전
    `base_managed_sha256`으로 재준비한다. managed SHA도 바뀌었으면 최신 패킷을 읽고 충돌을 조정한다.
 6. 적용 뒤 `git diff -- HANDOFF.md`와 `git status --short`를 확인한다. stage·commit·push는 요청 범위
    안에서만 수행한다.
+7. 이전 인계 내용이 필요하면 `agent_hub_handoff(action="history")`로 적용 이력을 읽는다. Agent Hub를
+   거치지 않은 수정이 의심되면 `action="diff"`를 `target_sequence` 없이 호출해 마지막 스냅샷과
+   현재 파일을 비교한다.
 
 ## 경계
 

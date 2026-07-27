@@ -55,19 +55,31 @@ def test_cli_help_has_no_retired_migration_command():
     assert "migrate-v1" not in result.stdout
 
 
+def _module_absent(name: str) -> bool:
+    # find_spec raises instead of returning None when the parent package itself
+    # is gone, which is exactly the state a clean checkout is in.
+    try:
+        return importlib.util.find_spec(name) is None
+    except ModuleNotFoundError:
+        return True
+
+
 def test_retired_runtime_modules_are_absent():
-    assert importlib.util.find_spec("agent_hub.operations") is None
-    assert importlib.util.find_spec("agent_hub.providers.hub") is None
-    assert importlib.util.find_spec("agent_hub.core.inprocess") is None
-    assert importlib.util.find_spec("agent_hub.core.run_lifecycle") is None
-    assert importlib.util.find_spec("agent_hub.core.takeover") is None
-    assert importlib.util.find_spec("agent_hub.core.mcp") is None
-    assert importlib.util.find_spec("agent_hub.core.rpc") is None
-    assert importlib.util.find_spec("agent_hub.core.parallel") is None
-    assert importlib.util.find_spec("google_antigravity_codex.cli") is None
-    assert importlib.util.find_spec("orchestrate_codex.mcp_server") is None
-    assert importlib.util.find_spec("orchestrate_codex.runner") is None
-    assert importlib.util.find_spec("orchestrate_codex.store") is None
+    for name in (
+        "agent_hub.operations",
+        "agent_hub.providers.hub",
+        "agent_hub.core.inprocess",
+        "agent_hub.core.run_lifecycle",
+        "agent_hub.core.takeover",
+        "agent_hub.core.mcp",
+        "agent_hub.core.rpc",
+        "agent_hub.core.parallel",
+        "google_antigravity_codex.cli",
+        "orchestrate_codex.mcp_server",
+        "orchestrate_codex.runner",
+        "orchestrate_codex.store",
+    ):
+        assert _module_absent(name), name
 
 
 def test_v2_setup_is_digest_fenced_and_can_apply_without_launchctl(tmp_path):

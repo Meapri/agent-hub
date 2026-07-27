@@ -107,7 +107,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_continue",
-            "Claim a run revision, optionally requeue explicitly retry-safe failed steps, and execute the next dependency-ready wave. Never retry outcome_unknown steps.",
+            "Claim a run revision, optionally grant more token budget and requeue explicitly retry-safe failed steps, then execute the next dependency-ready wave. Never retry outcome_unknown steps.",
             _object(
                 {
                     "run_id": text,
@@ -118,6 +118,11 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "items": text,
                         "maxItems": 64,
                         "description": "Paused failed step IDs listed by agent_hub_get.retryable_failed_steps. The store rejects ambiguous or unsafe retries.",
+                    },
+                    "token_budget_grant": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Extra tokens for a run paused by run_token_budget_exhausted. The sealed plan limit is unchanged; this is added on top. agent_hub_get.next_action suggests an amount.",
                     },
                 },
                 required=["run_id", "expected_revision"],
@@ -143,9 +148,40 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_cancel",
-            "Cancel a run using its expected revision.",
+            "Cancel a run, or adjudicate an outcome_unknown run through a digest-fenced human reconciliation. Only the not_delivered verdict can re-send an external request, and it requires an explicit confirmation phrase.",
             _object(
-                {"run_id": text, "expected_revision": integer},
+                {
+                    "run_id": text,
+                    "expected_revision": integer,
+                    "action": {
+                        "enum": ["cancel", "prepare_reconcile", "apply_reconcile"],
+                        "description": "Defaults to cancel.",
+                    },
+                    "resolutions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "items": _object(
+                            {
+                                "step_id": text,
+                                "verdict": {
+                                    "enum": [
+                                        "not_delivered",
+                                        "delivered_discarded",
+                                        "delivered_recovered",
+                                    ],
+                                    "description": "not_delivered re-sends the external request; delivered_discarded closes the step as failed; delivered_recovered accepts a result the human supplies.",
+                                },
+                                "result_text": text,
+                            },
+                            required=["step_id", "verdict"],
+                        ),
+                    },
+                    "run_disposition": {"enum": ["resume", "fail"]},
+                    "proposal": {"type": "object"},
+                    "proposal_sha256": text,
+                    "confirmation_phrase": text,
+                },
                 required=["run_id", "expected_revision"],
             ),
         ),
@@ -189,11 +225,15 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_policy",
-            "Get or digest-fence a project policy update.",
+            "Get or digest-fence a project policy update, or the user-global routing prior.",
             _object(
                 {
                     "action": {"enum": ["get", "prepare_update", "apply_update"]},
                     "project_root": text,
+                    "target": {
+                        "enum": ["policy", "routing_prior"],
+                        "description": "Defaults to the project policy. 'routing_prior' edits the user-global routing prior, whose entries stay inactive until their source moves away from 'unset'.",
+                    },
                     "patch": {"type": "object"},
                     "expected_revision": integer,
                     "proposal": {"type": "object"},
@@ -204,10 +244,20 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_handoff",
-            "Use the project HANDOFF prepare/apply and takeover boundary.",
+            "Use the project HANDOFF prepare/apply and takeover boundary, or read its applied history and section-level diffs.",
             _object(
                 {
-                    "action": {"enum": ["get", "prepare_update", "apply_update", "takeover"]},
+                    "action": {
+                        "enum": [
+                            "get",
+                            "prepare_update",
+                            "apply_update",
+                            "takeover",
+                            "history",
+                            "diff",
+                        ],
+                        "description": "history and diff are read-only. diff without target_sequence compares a snapshot against the working file, which reveals edits made outside Agent Hub.",
+                    },
                     "project_root": text,
                     "arguments": {"type": "object"},
                 },
