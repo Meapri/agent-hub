@@ -19,6 +19,7 @@ from agent_hub.core.repository_facts import (
     read_repository_bytes,
     repository_relative_path_reason,
     repository_root_fd,
+    validate_project_root,
 )
 
 
@@ -150,9 +151,7 @@ class HandoffDrift(HandoffError):
 
 
 def _validated_project_root(project_root: str | Path) -> Path:
-    from orchestrate_codex import gather
-
-    return gather.validate_project_root(project_root)
+    return validate_project_root(project_root)
 
 
 def _normalize_mode(value: Any) -> str:

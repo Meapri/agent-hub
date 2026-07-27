@@ -15,14 +15,12 @@ this provider helper enforces durable *safety* when called directly.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
-import subprocess
 from typing import Any, Dict, List
 
 from agent_hub.core import limits
 
-from . import chat, doc_facts, model_prefs, response as response_schema, security
+from . import chat, model_prefs, response as response_schema, security
 
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
 TASKS = {
@@ -141,34 +139,6 @@ def redact(value: Any) -> str:
     return SECRET_RE.sub(lambda match: f"{match.group(1)}=REDACTED", str(value or ""))
 
 
-def _run_git(root: Path, args: List[str], *, timeout_sec: int = 20) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(root),
-        text=True,
-        capture_output=True,
-        timeout=timeout_sec,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return ""
-    return proc.stdout.strip()
-
-
-def _git_root(path: Path) -> Path | None:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        cwd=str(path),
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return None
-    return Path(proc.stdout.strip()).resolve()
-
-
 def infer_task(arguments: Dict[str, Any], source_text: str = "") -> str:
     requested = str(arguments.get("task") or "auto").strip().lower()
     if requested and requested != "auto":
@@ -250,86 +220,11 @@ def is_durable_task(task: str) -> bool:
     return task in DURABLE_TASKS
 
 
-def resolve_project_context_mode(arguments: Dict[str, Any], task: str) -> str:
-    """Resolve git context mode with durable safety.
-
-    Durable tasks never pull git diary (even if caller passes auto/git-*).
-    Change tasks default auto → git-diff / git-summary.
-    """
-    requested = str(arguments.get("project_context") or "off").strip().lower()
-    if is_durable_task(task):
-        # Explicit override only if force_git_context=true (escape hatch for rare cases).
-        if arguments.get("force_git_context") is True and requested in {"git-summary", "git-diff"}:
-            return requested
-        return "off"
-    if requested == "auto":
-        if task in CHANGE_TASKS:
-            return "git-diff" if task == "pr-description" else "git-summary"
-        return "off"
-    if requested in {"git-summary", "git-diff", "off"}:
-        return requested
-    return "off"
-
-
-def collect_project_context(arguments: Dict[str, Any], task: str) -> str:
-    requested = resolve_project_context_mode(arguments, task)
-    if requested not in {"git-summary", "git-diff"}:
-        return ""
-    requested_root = security.resolve_allowed_path(
-        str(arguments.get("project_root") or "."),
-        purpose="project_root",
-        directory=True,
-        explicit_root=str(arguments.get("project_root") or "."),
-    )
-    root = _git_root(requested_root)
-    if root is None:
-        return ""
-    max_chars = max(
-        1000,
-        min(
-            int(arguments.get("max_project_context_chars") or 1_000_000),
-            1_000_000,
-        ),
-    )
-    sections = [
-        f"Repository: {root}",
-        f"Branch: {_run_git(root, ['branch', '--show-current']) or '[detached]'}",
-        f"Head: {_run_git(root, ['rev-parse', '--short', 'HEAD'])}",
-        "Status:\n" + (_run_git(root, ["status", "--short"]) or "clean"),
-        "Recent commits:\n" + (_run_git(root, ["log", "--oneline", "-12"]) or "[none]"),
-        "Diff stat:\n" + (_run_git(root, ["diff", "--stat"]) or "[none]"),
-    ]
-    if requested == "git-diff":
-        sections.append(
-            "Diff:\n" + (_run_git(root, ["diff", "--", "."], timeout_sec=30) or "[none]")
-        )
-    context = "\n\n".join(sections)
-    return context[:max_chars]
-
-
-def collect_durable_context(arguments: Dict[str, Any], task: str) -> Dict[str, Any]:
-    """Fact pack for durable leaf writes. Disabled when fact_pack=false."""
-    if not is_durable_task(task):
-        return {"used": False, "text": ""}
-    if arguments.get("fact_pack") is False:
-        return {"used": False, "text": "", "skipped": True}
-    root = (
-        str(arguments.get("project_root") or arguments.get("workspace_root") or ".").strip() or "."
-    )
-    try:
-        facts = doc_facts.collect_durable_facts(root)
-    except Exception as exc:  # noqa: BLE001
-        return {"used": False, "text": "", "error": str(exc)}
-    return {"used": True, "text": str(facts.get("text") or ""), "facts": facts}
-
-
 def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
     source_text = read_source(arguments)
     task = infer_task(arguments, source_text)
     profiles = _profile_names(arguments.get("profile"), task)
     durable = is_durable_task(task)
-    project_context = collect_project_context(arguments, task)
-    durable_ctx = collect_durable_context(arguments, task)
     instruction = str(arguments.get("instruction") or "").strip()
     context = str(arguments.get("context") or "").strip()
     tone = str(arguments.get("tone") or "").strip()
@@ -342,13 +237,9 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
             instruction,
             source_text,
             context,
-            project_context,
-            durable_ctx.get("text"),
         ]
     ):
-        raise ValueError(
-            "instruction, source_text, source_file, context, project_context, or durable fact pack is required"
-        )
+        raise ValueError("instruction, source_text, source_file, or context is required")
 
     system = (
         "You are the writing arm of Agent Hub. Return only the "
@@ -390,10 +281,6 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
             else "Additional context"
         )
         parts.append(f"{label}:\n{context}")
-    if durable_ctx.get("text"):
-        parts.append(f"Durable fact pack:\n{redact(durable_ctx['text'])}")
-    if project_context:
-        parts.append(f"Project context:\n{redact(project_context)}")
     if source_text:
         parts.append(f"Source text:\n{redact(source_text)}")
     return {
@@ -401,10 +288,7 @@ def build_prompt(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "profiles": profiles,
         "system": system,
         "prompt": "\n\n".join(parts),
-        "project_context_used": bool(project_context),
         "durable": durable,
-        "fact_pack_used": bool(durable_ctx.get("used")),
-        "fact_pack": durable_ctx.get("facts"),
         "doc_class": "durable" if durable else ("change" if task in CHANGE_TASKS else "transform"),
     }
 
@@ -460,8 +344,6 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
         {
             "doc_class": built.get("doc_class"),
             "durable": built.get("durable"),
-            "fact_pack_used": built.get("fact_pack_used"),
-            "project_context_used": built.get("project_context_used"),
         }
     )
     return {
@@ -470,8 +352,6 @@ def run_writing(arguments: Dict[str, Any]) -> Dict[str, Any]:
         "profiles": built["profiles"],
         "model": model,
         "doc_class": built.get("doc_class"),
-        "project_context_used": built["project_context_used"],
-        "fact_pack_used": built.get("fact_pack_used"),
         "quality_warnings": warnings,
         "usage": chat_response.get("usage", {}),
         "finish_reason": finish_reason,
