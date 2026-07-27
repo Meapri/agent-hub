@@ -11,21 +11,19 @@
   정본 원칙: 모든 상태는 Git에 커밋되는 파일에 산다. 도구는 소모품이다.
 
 <!-- agent-hub:handoff:v1:start -->
-- **원래 목표**: Agent Hub의 관측 공백과 죽은 학습 루프를 메우고, 멈춘 run을 되살릴 복구 경로와 handoff 이력을 추가합니다.
-- **현재 단계**: `feat/observability-and-routing-priors` 브랜치에서 우선순위 5건을 모두 구현하고 문서까지 갱신했습니다. 전체 검증을 통과했고 사용자 commit 승인을 기다립니다.
+- **원래 목표**: Agent Hub를 "선택적 control plane"으로 재정의하기 전에, 실행 경로에서 모델에게 거짓 근거를 주입하는 코드를 지우고 라우팅 층의 실효성을 판정합니다. 4주 계획의 1주차입니다.
+- **현재 단계**: 1주차 네 항목을 모두 끝내고 게이트 A·B 판정을 기록했습니다. `week1/remove-false-evidence` 브랜치에 커밋 2건이 있고 push 전입니다.
 - **완료**:
-  - `operation_metrics`에 `error_code`를 추가하고 `agent_hub_status`가 도구별 상위 실패 코드를 집계합니다. `HubV2Error.code`가 자유 문자열이고 provider 응답 code가 무검증 승격되므로 `normalize_error_code`가 `fullmatch`로 taxonomy 형태만 통과시키고 나머지는 `unclassified_error`로 접습니다. 실패는 항상 코드를 가지므로 NULL은 schema 10 이전 row만 뜻합니다.
-  - step별 `input_tokens`/`output_tokens`/`total_tokens`/`tokens_source`를 시도 단위로 누적합니다. provider마다 다른 usage 키를 `normalize_token_usage`로 정규화하고 순수 추정치는 routing 표본에서 제외합니다. wave 시작 전 `routing_samples` 중앙값으로 예상 소비를 계산해 `run_token_budget_warning`을 남기되 차단하지 않습니다.
-  - 토큰 예산 소진을 재개 가능한 종착으로 바꿨습니다. plan은 `plan_sha256`으로 봉인돼 있으므로 `runs.token_budget_limit`(plan 파생)과 `token_budget_grant`(사용자 가산)를 분리하고 `agent_hub_continue`의 `token_budget_grant`로 이어갑니다.
-  - 사용자 편집 routing prior(`~/.agent-hub/routing_prior.toml`)를 추가했습니다. `routing_samples`와 분리 저장하고 Bayesian shrinkage로 합성하며 지분은 표본이 쌓일수록 자동 감쇠합니다. 저장소 source에는 provider 성능 수치가 하나도 없고 seed template은 전부 `source = "unset"`이라 가중치 0입니다.
-  - `AUTO_MIN_SAMPLES` 20을 관측 하한 5로 낮추되 prior 지분 상한 0.5와 점수 분리 조건을 추가했습니다. auto가 켜지지 않던 두 번째 원인인 `context_sha256`의 model 포함은 prior의 model wildcard로 완화했습니다. `routing_profile`이 실제 가중치를 결정하게 하고 policy 검증을 붙였습니다.
-  - `outcome_unknown` 조정을 `agent_hub_cancel`의 `prepare_reconcile`/`apply_reconcile`로 추가했습니다. 판정 3종 중 재전송을 유발하는 것은 `not_delivered` 하나뿐이고 확인 문구가 `resend-`로 시작합니다. `agent_hub_get`의 `next_action`은 재전송하지 않는 판정만 미리 채웁니다.
-  - handoff `apply_update`가 managed block 스냅샷을 남기고 `history`와 구간별 `diff`를 읽습니다. `target_sequence` 없는 diff는 현재 파일과 비교해 Agent Hub 밖 수정을 드러냅니다. `prepare_update`의 `include_diff`로 적용 전 미리보기도 됩니다.
-  - 공개 도구는 14개를 유지했습니다. 모든 신규 기능을 기존 도구의 action이나 인자로 넣었습니다. schema 9에서 10으로 올리는 단일 마이그레이션에 다섯 기능의 변경을 합쳤습니다.
-- **미완**: handoff `action="list"`는 다른 프로젝트 절대경로 노출 위험 대비 가치가 낮아 제외했습니다. 로컬 설치본과 실행 중인 daemon에는 이번 변경을 적용하지 않았습니다. 멈춘 run 5개는 사용자 승인 없이 조정하지 않았습니다.
-- **변경 파일**: `src/agent_hub/v2/{store.py,service.py,contracts.py,routing.py,tools.py,policy.py,dependency_context.py,metrics.py}`, 신규 `src/agent_hub/v2/routing_prior.py`, `src/agent_hub/core/handoff.py`, `src/agent_hub/v2/schemas/contracts.json`, README와 protocol 문서, adaptive-orchestrate·handoff skill 정본과 동기화 사본, 신규 테스트 `tests/agent_hub/test_v2_{routing_prior,reconciliation}.py`를 변경했습니다.
-- **검증 실행 결과**: 전체 pytest `672 passed, 2 skipped`; `ruff check src tests`; `ruff format --check src tests`(176 files); `./scripts/check-sync.sh`; `./scripts/check-hub-plugins.sh`; release version 2.3.0 정합성; sdist/wheel build; README document quality와 README·protocol user-facing verify를 통과했습니다. 운영 DB 사본으로 schema 9에서 10 마이그레이션을 반복 검증해 run 17개와 integrity가 보존되고 `token_budget_limit` backfill이 채워지는 것을 확인했습니다.
-- **현재 리스크**: handoff 스냅샷이 사용자 작성 본문을 `state.sqlite3`에 평문 저장하는 새 at-rest 범주를 만듭니다. 0600 권한과 저장 전 secret redaction, 50개·128KB 상한으로 완화했지만 Git 밖 사본이 생긴다는 사실은 남습니다. daemon 설정은 여전히 `auto_approve=true`이고 소스는 설치본보다 앞서 있습니다.
-- **Do-Not-Repeat**: 라우팅 prior를 `routing_samples`에 섞지 마세요. 저장소 source에 provider 성능 수치를 넣지 마세요. `agent_hub_get`의 `next_action`에 재전송 판정을 미리 채우지 마세요. `requeue_failed_steps`의 UPDATE에 토큰 컬럼을 추가하지 마세요. 이미 지출된 예산이 사라집니다. `normalize_error_code`에서 `match`를 쓰지 마세요. 끝 개행이 통과합니다.
-- **다음 한 걸음**: `git add -A && git commit`으로 이 브랜치의 변경과 HANDOFF를 하나의 목적 커밋으로 만든 뒤, `./.venv/bin/agent-hub stage-release --repo-root .`로 2.3.0 runtime을 staging하고 `setup --runtime-root`로 설치본을 갱신하세요.
+  - write 경로가 만들던 거짓 fact pack을 제거했습니다. provider worker는 project_root를 넘기지 않고 cwd가 빈 샌드박스 디렉터리라, 모든 write step이 "Skills/MCP tools/Install commands: [none detected], manifest complete: True (0/0)"를 권위 있는 근거로 받고 있었습니다. writing.py의 수집 함수 4개와 전용 git 헬퍼, doc_facts.py, gather.py를 지웠고 validate_project_root만 core/repository_facts.py로 이관했습니다. writing.py는 이제 subprocess와 pathlib을 import하지 않습니다.
+  - 삭제 전 실패하고 삭제 후 통과하는 경계 테스트 3개를 먼저 작성해 red에서 green 전이를 확인했습니다.
+  - store 불변식 12개와 모든 테스트 teardown에서 자동 검사하는 conftest를 추가했습니다. _REQUIRED_SCHEMA_COLUMNS와 PRAGMA 루프를 store 오픈 경로에서 invariants로 옮겨 마이그레이션과 검사기가 어긋날 수 없게 했습니다.
+  - 게이트 A를 판정했습니다. 사전 기준은 808b46c가 고친 결함 3건 중 2건 이상 소급 검출이었고 결과는 1건이라 미달입니다. 통과로 기록하지 않았습니다.
+  - 게이트 B를 판정했습니다. 정책 routing_mode=auto로 durable run 10건을 돌리고 planner를 번갈아 지정해 두 provider가 각각 5회 실행되게 했는데도 provider 변경은 0건이고 전부 cold_start_preserves_planner였습니다.
+  - handoff 스냅샷 0행의 원인이 고장이 아니라 미실행임을 배포된 daemon에서 확인했습니다. apply_update가 snapshot.recorded=true를 반환하고 DB에 1행이 기록됩니다.
+- **미완**: 2주차의 실패 분류표 통합과 fault injection 스위트, 3주차의 라우팅 층 삭제, 4주차의 provider MCP 중복층·sdk·workflows 삭제와 claude API 키 lane 실험이 남았습니다. 브랜치를 아직 push하지 않았습니다.
+- **변경 파일**: `src/google_antigravity_codex/writing.py`, 삭제된 `src/google_antigravity_codex/doc_facts.py`와 `src/orchestrate_codex/gather.py`, `src/agent_hub/core/repository_facts.py`, `src/agent_hub/core/handoff.py`, 신규 `src/agent_hub/v2/invariants.py`와 `tests/conftest.py`, `src/agent_hub/v2/store.py`, 관련 테스트 4개를 바꿨습니다.
+- **검증 실행 결과**: 전체 pytest `678 passed, 2 skipped`; `ruff check`와 `ruff format --check`(177 files); `./scripts/check-sync.sh`; `./scripts/check-hub-plugins.sh`; sdist/wheel build를 통과했습니다. main 대비 12 files changed, 480 insertions, 713 deletions로 순 233줄 감소입니다.
+- **현재 리스크**: 게이트 A 미달로 불변식은 실패 경로 안전망이 아니라 상태 오염 조기경보로만 신뢰합니다. 실패 경로 검증은 2주차 fault injection이 담당해야 합니다. 배포된 2.4.1 릴리스에는 1주차 변경이 아직 반영되지 않았습니다.
+- **Do-Not-Repeat**: 샌드박스 worker에 project_root를 넘겨 fact pack 수집을 되살리지 마세요. worker는 사용자 프로젝트를 볼 정당한 경로가 없습니다. 불변식 술어를 특정 결함에 맞춰 쓰지 마세요. 그런 술어는 구성상 통과하며 아무것도 증명하지 않습니다. routing_context에서 model을 제거하지 않은 채 auto 게이트의 표본 하한만 낮추지 마세요. 버킷이 provider별로 고립되어 있어 하한을 낮춰도 게이트는 열리지 않습니다.
+- **다음 한 걸음**: `src/agent_hub/v2/provider_runtime.py`에 `FAILURE_CLASSES: dict[str, str]` 표를 추가하고 86행의 `"operation_failed"` 기본값을 그 표를 통한 조회로 바꾸세요.
 <!-- agent-hub:handoff:v1:end -->

@@ -7,6 +7,7 @@ import selectors
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -743,3 +744,46 @@ def collect_repository_manifest(
         "repository_manifest_truncated": input_truncated,
         "repository_manifest_source": manifest_source,
     }
+
+
+def validate_project_root(project_root: str | Path) -> Path:
+    """Resolve an explicit repository root without allowing broad or sensitive roots."""
+
+    root = Path(project_root).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"project_root is not a directory: {root}")
+    filesystem_root = Path(root.anchor).resolve()
+    home = Path.home().resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    blocked_roots = {
+        filesystem_root,
+        home,
+        *home.parents,
+        temp_root,
+        *temp_root.parents,
+    }
+    for raw_path in (
+        "/Applications",
+        "/Library",
+        "/System",
+        "/Volumes",
+        "/etc",
+        "/home",
+        "/opt",
+        "/private",
+        "/private/tmp",
+        "/private/var",
+        "/tmp",
+        "/usr",
+        "/var",
+    ):
+        candidate = Path(raw_path)
+        if candidate.exists():
+            blocked_roots.add(candidate.resolve())
+    if root in blocked_roots:
+        raise ValueError(
+            f"project_root is too broad and is blocked; provide a repository directory: {root}"
+        )
+    if root.name in REPOSITORY_SKIP_PARTS or is_sensitive_repository_path(root):
+        raise ValueError(f"project_root points to a sensitive directory: {root}")
+    return root

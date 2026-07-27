@@ -40,6 +40,7 @@ from .contracts import (
     total_token_limit,
 )
 from .errors import HubV2Error
+from .invariants import InvariantViolation, assert_required_schema
 from .metrics import summarize_operation_metrics
 
 STORE_SCHEMA_VERSION = 10
@@ -48,130 +49,6 @@ DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_SAFE_STRING = 256
-_REQUIRED_SCHEMA_COLUMNS = {
-    "runs": {
-        "run_id",
-        "project_root",
-        "status",
-        "revision",
-        "plan_sha256",
-        "plan_json",
-        "policy_revision",
-        "routing_mode",
-        "idempotency_key",
-        "lease_token_sha256",
-        "lease_expires_at",
-        "token_budget_limit",
-        "token_budget_grant",
-        "reconciliation_count",
-    },
-    "handoff_snapshots": {
-        "snapshot_id",
-        "scope_identity",
-        "scope_root",
-        "target_alias",
-        "sequence",
-        "origin",
-        "file_sha256",
-        "managed_sha256",
-        "body",
-        "body_sha256",
-        "recorded_at",
-    },
-    "run_reconciliations": {
-        "reconciliation_id",
-        "run_id",
-        "base_revision",
-        "witness_sha256",
-        "proposal_sha256",
-        "confirmation_sha256",
-        "run_disposition",
-        "resolutions_json",
-        "status",
-        "created_at",
-        "expires_at",
-    },
-    "steps": {
-        "run_id",
-        "step_id",
-        "status",
-        "revision",
-        "provider",
-        "model",
-        "attempt",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "tokens_source",
-        "input_artifact_ids",
-        "output_artifact_ids",
-        "checkpoint_state",
-    },
-    "artifacts": {
-        "artifact_id",
-        "content_sha256",
-        "sensitivity",
-        "encrypted",
-        "content",
-        "source_refs_json",
-        "verification_json",
-        "retention",
-    },
-    "egress_approvals": {
-        "manifest_sha256",
-        "project_root",
-        "policy_revision",
-        "destinations_json",
-        "entries_json",
-    },
-    "egress_reviews": {
-        "review_id",
-        "proposal_sha256",
-        "manifest_sha256",
-        "project_root",
-        "policy_revision",
-        "provider",
-        "destinations_json",
-        "entries_json",
-        "status",
-        "created_at",
-        "expires_at",
-        "decided_at",
-        "consumed_at",
-        "decision_source",
-        "decision_settings_revision",
-    },
-    "egress_settings": {
-        "singleton_id",
-        "revision",
-        "auto_approve",
-        "updated_at",
-    },
-    "operation_metrics": {
-        "metric_id",
-        "operation",
-        "success",
-        "duration_ms",
-        "recorded_at",
-        "error_code",
-    },
-    "routing_decisions": {
-        "decision_id",
-        "routing_mode",
-        "selected_provider",
-        "planner_provider",
-        "candidates_json",
-        "score_json",
-        "sample_count",
-        "policy_revision",
-        "reason_code",
-        "routing_profile",
-        "evidence_kind",
-        "prior_sha256",
-        "prior_revision",
-        "prior_weight_fraction",
-    },
-}
 # HubV2Error.code is a plain str field, so metric rows normalize it against this
 # pattern before storing. Anything else becomes UNCLASSIFIED_ERROR_CODE, which keeps
 # free-form text out of the content-free metrics surface.
@@ -363,18 +240,17 @@ def _safe_event_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _assert_required_schema(connection: sqlite3.Connection) -> None:
-    for table, required in _REQUIRED_SCHEMA_COLUMNS.items():
-        actual = {
-            str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-        }
-        missing = sorted(required - actual)
-        if missing:
-            raise HubV2Error(
-                "store_migration_failed",
-                "The migrated database is missing required schema fields.",
-                scope="store",
-                safe_details={"table": table, "missing": ",".join(missing)[:128]},
-            )
+    # The column set lives in invariants so the migration and the post-test
+    # checker cannot drift apart.
+    try:
+        assert_required_schema(connection)
+    except InvariantViolation as exc:
+        raise HubV2Error(
+            "store_migration_failed",
+            "The migrated database is missing required schema fields.",
+            scope="store",
+            safe_details={"detail": str(exc)[:128]},
+        ) from exc
 
 
 class HubStore:
