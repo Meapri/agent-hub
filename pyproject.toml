@@ -54,3 +54,9 @@ addopts = "--import-mode=importlib --strict-markers"
 
 [tool.ruff]
 line-length = 100
+
+# Pin the rule set explicitly. Leaving it implicit ties the lint contract to
+# whichever ruff the dev extra resolves to, so a release that widens the
+# defaults (0.16 did) turns CI red with no source change.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
