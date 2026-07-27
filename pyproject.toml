@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-hub"
-version = "3.0.0"
+version = "3.0.1"
 description = "Local-first durable multi-model agent runtime with an MCP bridge, isolated provider workers, policy-fenced egress, artifacts, and cross-harness handoff."
 readme = "README.md"
 requires-python = ">=3.11"
