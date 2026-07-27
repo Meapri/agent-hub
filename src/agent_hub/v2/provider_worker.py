@@ -6,7 +6,10 @@ never imports provider credentials or provider HTTP modules itself.
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
+from pathlib import Path
 import sys
 from typing import Any, Mapping
 
@@ -18,6 +21,11 @@ from . import provider_runtime
 
 WORKER_PROTOCOL = "agent_hub_provider_worker_v2"
 MAX_REQUEST_CHARS = 4_000_000
+# The response travels back as base64 inside one JSON line, and the daemon caps
+# a worker response at 32 MB. Two thirds of that, before base64's 4/3 expansion,
+# is what a raw image may be.
+MAX_GENERATED_IMAGE_BYTES = 16 * 1024 * 1024
+GENERATED_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
 
 def _payload(result: Any) -> dict[str, Any]:
@@ -162,7 +170,91 @@ def _invoke(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
         arguments["model"] = ensure_public_model_id(model)
     result = _payload(provider_runtime.invoke(provider, task["capability"], arguments))
     _raise_failed_payload(result)
+    if task["capability"] == "image":
+        result = _collect_generated_image(provider, result)
     return result
+
+
+def _collect_generated_image(provider: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Carry the image out as bytes, and leave nothing behind on disk.
+
+    An image adapter writes its result into the provider's own cache directory
+    and reports the path. That path was all the daemon ever kept: the artifact
+    held the string "Generated image: /Users/.../abc.png" and the actual picture
+    stayed in a directory nothing in this repository ever cleans up, growing
+    without bound, while callers of agent_hub_execute were handed an absolute
+    path into the user's home.
+
+    Reading it here rather than in the daemon keeps the sandbox as the guard --
+    this process may read its own cache and little else -- and lets the file be
+    removed as soon as its content is safely in hand.
+    """
+
+    data = result.get("data")
+    path_text = str(data.get("path") or "") if isinstance(data, Mapping) else ""
+    if not path_text:
+        raise HubV2Error(
+            "provider_protocol_error",
+            "The image provider reported no output file.",
+            scope="provider",
+        )
+    path = Path(path_text)
+    expected_root = provider_runtime.generated_image_root(provider)
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(expected_root.resolve())
+    except (OSError, ValueError):
+        # A path outside the provider's own cache is not something this worker
+        # wrote, and reading it would turn a provider response into an arbitrary
+        # file read.
+        raise HubV2Error(
+            "provider_protocol_error",
+            "The image provider reported an output file outside its cache.",
+            scope="provider",
+        ) from None
+    raw = resolved.read_bytes()
+    if len(raw) > MAX_GENERATED_IMAGE_BYTES:
+        resolved.unlink(missing_ok=True)
+        raise HubV2Error(
+            "provider_response_too_large",
+            "The generated image is larger than one response can carry.",
+            scope="provider",
+            safe_details={"maximum_bytes": MAX_GENERATED_IMAGE_BYTES},
+        )
+    payload = dict(result)
+    payload["image_base64"] = base64.b64encode(raw).decode("ascii")
+    payload["image_media_type"] = _image_media_type(resolved, data)
+    payload["image_bytes"] = len(raw)
+    # The path is now a detail of a file that no longer exists. Reporting it
+    # would only tell the caller where something used to be.
+    summary = f"Generated a {payload['image_media_type']} image."
+    payload["text"] = summary
+    payload["data"] = {
+        key: (summary if key == "text" else value)
+        for key, value in (data or {}).items()
+        # `text` is rewritten rather than dropped: the adapters put the same
+        # "Generated image: <path>" sentence in both places, and leaving the
+        # nested copy would defeat the point of rewriting the outer one.
+        if key not in {"path", "image"}
+    }
+    resolved.unlink(missing_ok=True)
+    return payload
+
+
+def _image_media_type(path: Path, data: Mapping[str, Any] | None) -> str:
+    """Trust the file's suffix over the adapter's guess.
+
+    The grok adapter reports image/jpeg for anything that is not .png, so a
+    saved .webp is announced as a JPEG. The suffix is what it actually wrote.
+    """
+
+    guessed = mimetypes.guess_type(path.name)[0] or ""
+    if guessed in GENERATED_IMAGE_MEDIA_TYPES:
+        return guessed
+    reported = str((data or {}).get("mime_type") or "")
+    if reported in GENERATED_IMAGE_MEDIA_TYPES:
+        return reported
+    return "application/octet-stream"
 
 
 def _plan(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Mapping
 
 from agent_hub import capabilities, consistency, orchestrator, provider_settings
@@ -20,6 +21,7 @@ from claude_codex import search as claude_search
 from claude_codex import security as claude_security
 from google_antigravity_codex import mcp_server as google_mcp
 from google_antigravity_codex import model_prefs as google_model_prefs
+from google_antigravity_codex import paths as google_paths
 from google_antigravity_codex import oauth_login as google_oauth
 from google_antigravity_codex import profiles as google_profiles
 from google_antigravity_codex import provider as google_provider
@@ -28,6 +30,7 @@ from google_antigravity_codex import session_prefs as google_session_prefs
 from google_antigravity_codex import writing as google_writing
 from grok_codex import auth as grok_auth
 from grok_codex import image as grok_image
+from grok_codex import paths as grok_paths
 from grok_codex import models as grok_models
 from grok_codex import mcp_server as grok_mcp
 from grok_codex import search as grok_search
@@ -551,6 +554,24 @@ def write(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
     raw["profiles"] = built["profiles"]
     raw["call_usage"] = {"provider_calls": 1}
     return _envelope("write", raw, provider=provider)
+
+
+def generated_image_root(provider: str) -> Path:
+    """Where this provider's image adapter is allowed to have written its file.
+
+    The worker checks the reported path against this before reading it, so that
+    a provider response cannot turn into a read of an arbitrary file.
+    """
+
+    if provider == "grok":
+        return Path(grok_paths.cache_dir()) / "images"
+    if provider == "gemini":
+        return Path(google_paths.images_dir())
+    raise HubV2Error(
+        "unsupported_worker_capability",
+        "The provider does not support image generation.",
+        scope="provider",
+    )
 
 
 def generate_image(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from hashlib import sha256
@@ -65,6 +67,9 @@ MODEL_CATALOG_LIMIT_CACHE_TTL_SECONDS = 300.0
 RUN_LEASE_GRACE_SECONDS = 60.0
 MAX_RUN_LEASE_SECONDS = 3600.0
 DEFAULT_STEP_TOKEN_ESTIMATE = 8_000
+# Base64 costs 4/3, and the encoded content shares one response with the
+# artifact's metadata, so this stays a fraction of the daemon's 8 MB ceiling.
+MAX_INLINE_ARTIFACT_BYTES = 4 * 1024 * 1024
 TOKEN_ESTIMATE_LOOKBACK_DAYS = 30.0
 TOKEN_ESTIMATE_MIN_SAMPLES = 3
 # Ordered weakest to strongest so a mixed wave reports its least reliable source.
@@ -74,6 +79,30 @@ _ESTIMATE_CONFIDENCE = (
     "step_ledger_capability",
     "step_ledger_provider",
 )
+
+
+def _generated_image_bytes(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Decode the image a worker carried back, or None if this was not one."""
+
+    encoded = result.get("image_base64")
+    media_type = str(result.get("image_media_type") or "")
+    if not isinstance(encoded, str) or not encoded:
+        return None
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        raise HubV2Error(
+            "provider_protocol_error",
+            "The generated image was not valid base64.",
+            scope="provider",
+        ) from None
+    if not content:
+        raise HubV2Error(
+            "provider_protocol_error",
+            "The generated image was empty.",
+            scope="provider",
+        )
+    return {"content": content, "media_type": media_type or "application/octet-stream"}
 
 
 def _resolve_task_images(
@@ -1322,7 +1351,14 @@ class HubService:
                 scope="egress",
             )
 
-    def _artifact_text(self, artifact_id: str) -> str:
+    def _artifact_bytes(self, artifact_id: str) -> bytes:
+        """Decrypt an artifact without assuming its content is text.
+
+        Artifacts have always been stored as bytes -- the column is a BLOB and
+        the cipher is byte-oriented -- but every read went through a UTF-8
+        decode, so a stored image was unreadable through every existing path.
+        """
+
         artifact = self.store.get_artifact(artifact_id, include_content=True)
         content = artifact.get("content")
         if not isinstance(content, bytes):
@@ -1331,7 +1367,7 @@ class HubService:
                 "The artifact does not contain durable content.",
                 scope="artifact",
             )
-        plaintext = self.cipher.decrypt(
+        return self.cipher.decrypt(
             content,
             aad=(
                 b"agent-hub-v2-task-input"
@@ -1340,8 +1376,10 @@ class HubService:
             ),
             expected_sha256=artifact["content_sha256"],
         )
+
+    def _artifact_text(self, artifact_id: str) -> str:
         try:
-            return plaintext.decode("utf-8")
+            return self._artifact_bytes(artifact_id).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise HubV2Error(
                 "artifact_not_text",
@@ -1428,6 +1466,7 @@ class HubService:
             provider = "local"
             model = None
             media_type = "application/json"
+            generated_image = None
             checkpoint: dict[str, Any] = {"retrieval": str(facts.get("retrieval") or "unknown")}
             # A local inspect spends no provider tokens. "local" is recorded rather
             # than "unset" so the ledger distinguishes measured-zero from unmeasured.
@@ -1689,7 +1728,11 @@ class HubService:
                         event_type="provider_model_id_rejected",
                         details={"step_id": str(step["id"]), "provider": provider},
                     )
-            media_type = "text/plain; charset=utf-8"
+            # A generated image comes back as bytes; everything else is text.
+            generated_image = _generated_image_bytes(result)
+            media_type = (
+                generated_image["media_type"] if generated_image else "text/plain; charset=utf-8"
+            )
             checkpoint = {
                 "provider_selection_reason": decision["reason_code"],
                 "context_source_artifacts": dependency_stats["source_artifact_count"],
@@ -1730,7 +1773,12 @@ class HubService:
                     "spent_token_usage": token_usage,
                 }
             raise
-        encrypted = self.cipher.encrypt(text.encode("utf-8"), aad=aad)
+        # Store what the step actually produced. A generated image used to be
+        # stored as the sentence "Generated image: <path>", which is a note about
+        # a file rather than the file, and the file itself was left in a
+        # provider cache nothing prunes.
+        stored_bytes = generated_image["content"] if generated_image else text.encode("utf-8")
+        encrypted = self.cipher.encrypt(stored_bytes, aad=aad)
         artifact = self.store.put_artifact(
             content=encrypted["payload"],
             media_type=media_type,
@@ -2513,7 +2561,9 @@ class HubService:
             return self.store.prune_expired_artifacts()
         artifact = self.store.get_artifact(artifact_id, include_content=False)
         if action == "verify":
-            self._artifact_text(artifact_id)
+            # Verification is about the ciphertext and its digest, not the
+            # encoding, so it must not reject a binary artifact.
+            self._artifact_bytes(artifact_id)
             return {
                 **artifact,
                 "verification": {
@@ -2629,7 +2679,10 @@ class HubService:
                     scope="artifact",
                     retryable=True,
                 )
-            plaintext = self._artifact_text(artifact_id).encode("utf-8")
+            # Write the bytes that were stored. Decoding to text and re-encoding
+            # would corrupt any artifact that is not UTF-8 -- an exported image
+            # could never have survived the round trip.
+            plaintext = self._artifact_bytes(artifact_id)
             if sha256(plaintext).hexdigest() != artifact["content_sha256"]:
                 raise HubV2Error(
                     "artifact_integrity_failed",
@@ -2665,7 +2718,36 @@ class HubService:
             )
         if arguments.get("include_text") is True:
             artifact["text"] = self._artifact_text(artifact_id)
+        if arguments.get("include_base64") is True:
+            artifact["base64"] = self._artifact_base64(artifact_id)
         return artifact
+
+    def _artifact_base64(self, artifact_id: str) -> str:
+        """Return binary content the only way a JSON response can carry it.
+
+        Bounded well under the daemon's 8 MB response limit rather than at it:
+        the encoded content is one field among several, and a caller that hits
+        the transport limit gets daemon_response_too_large, which says nothing
+        about what to do instead. Exporting the artifact does.
+        """
+
+        raw = self._artifact_bytes(artifact_id)
+        if len(raw) > MAX_INLINE_ARTIFACT_BYTES:
+            raise HubV2Error(
+                "artifact_too_large",
+                "This artifact is too large to inline; export it instead.",
+                scope="artifact",
+                safe_details={
+                    "content_bytes": len(raw),
+                    "maximum_bytes": MAX_INLINE_ARTIFACT_BYTES,
+                },
+                next_action={
+                    "type": "call_tool",
+                    "tool": "agent_hub_artifact",
+                    "arguments": {"action": "prepare_export", "artifact_id": artifact_id},
+                },
+            )
+        return base64.b64encode(raw).decode("ascii")
 
     def _tool_feedback(self, arguments: dict[str, Any]) -> dict[str, Any]:
         run_id = str(arguments.get("run_id") or "")
