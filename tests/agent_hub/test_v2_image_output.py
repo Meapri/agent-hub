@@ -344,3 +344,52 @@ def test_an_explicitly_requested_image_model_is_still_honoured():
     )
 
     assert chosen["gemini"] == "gemini-3.1-flash-image"
+
+
+def test_execute_refuses_to_return_a_generated_image_inline(tmp_path, image_cache):
+    """A picture is not an inline answer.
+
+    Storing the bytes (rather than a path into a provider cache) was the right
+    fix, but it made agent_hub_execute return them in its response: one 300 KB
+    image is 400 KB of base64 in a payload whose reader is a model. Refusing
+    before the provider call means the caller does not pay for an image they
+    cannot collect.
+    """
+
+    _ImageWorker.cache_root = image_cache
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_ImageWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+
+    result = service.dispatch(
+        "agent_hub_execute",
+        {
+            "project_root": str(tmp_path),
+            "task": {"capability": "image", "intent": "A red square."},
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "durable_run_required"
+    assert result["error"]["next_action"]["tool"] == "agent_hub_start"
+    # Refused before dispatch: no provider call was made.
+    assert _ImageWorker.cache_root is image_cache
+    assert not list(image_cache.iterdir())
+
+
+def test_execute_still_reads_an_image_because_that_answer_is_text(tmp_path):
+    # vision is image-in, text-out. Only generation is refused.
+    from agent_hub.v2.contracts import validate_task
+
+    task = validate_task(
+        {
+            "capability": "vision",
+            "intent": "What is in this picture?",
+            "input_images": ["data:image/png;base64," + base64.b64encode(_png()).decode()],
+        }
+    )
+
+    assert task["capability"] == "vision"
+    assert len(task["input_images"]) == 1
