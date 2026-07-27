@@ -2381,6 +2381,19 @@ class HubService:
                 scope="run",
                 safe_details={"status": str(run["status"])},
             )
+        if texts:
+            # Recovered text is user-authored content that downstream steps will
+            # send to a provider, so it has to clear the same gate inline input
+            # does. Without this a project with egress denied still leaks through
+            # the reconciliation path.
+            policy = load_policy(str(run["project_root"])).policy
+            if policy["egress"].get("inline_prompt") == "denied":
+                raise HubV2Error(
+                    "egress_denied",
+                    "This project does not allow inline text to reach a provider.",
+                    scope="egress",
+                    safe_details={"reason_code": "inline_prompt_denied"},
+                )
         plan = self.store.get_plan(run_id)
         plan_steps = {str(step["id"]): step for step in plan["steps"]}
         recovered: dict[str, str] = {}
@@ -2393,10 +2406,13 @@ class HubService:
                     scope="run",
                     safe_details={"step_id": step_id},
                 )
+            # Strip secret candidates the same way stored input artifacts are
+            # stripped, since this text will be replayed into a provider prompt.
+            recovered_text, redacted_lines = redact_secret_lines(texts[step_id])
             # Human-supplied text still has to satisfy the verifier the plan declared.
-            verification = verify_output(texts[step_id], plan_step.get("verifier"))
+            verification = verify_output(recovered_text, plan_step.get("verifier"))
             encrypted = self.cipher.encrypt(
-                texts[step_id].encode("utf-8"),
+                recovered_text.encode("utf-8"),
                 aad=f"agent-hub-v2-step:{step_id}".encode("utf-8"),
             )
             artifact = self.store.put_artifact(
@@ -2407,7 +2423,11 @@ class HubService:
                 run_id=run_id,
                 producer_step_id=step_id,
                 source_refs=self._step_source_refs(plan, run, plan_step),
-                verification={**verification, "source": "human_reconciliation"},
+                verification={
+                    **verification,
+                    "source": "human_reconciliation",
+                    "redacted_lines": redacted_lines,
+                },
                 retention=plan["task"]["retention"],
                 delete_after=(
                     time.time() + 86400.0 if plan["task"]["retention"] == "ephemeral" else None
