@@ -44,6 +44,7 @@ from .dependency_context import (
 )
 from .egress import prepare_egress, redact_secret_lines, verify_egress_approval
 from .errors import HubV2Error, public_failure, safe_unexpected_error
+from .failure_classes import classify, is_known
 from .policy import (
     apply_policy_update,
     load_policy,
@@ -1581,13 +1582,11 @@ class HubService:
                         error_code=exc.code,
                     )
                     last_error = exc
-                    if exc.code in {
-                        "provider_timeout",
-                        "provider_worker_failed",
-                        "provider_protocol_error",
-                    }:
-                        raise
-                    if not exc.retryable:
+                    # Only a demonstrably undelivered request may be handed to the
+                    # next candidate. Falling back after an ambiguous failure would
+                    # send a second copy of a request the first provider may have
+                    # already run.
+                    if classify(exc.code) != "retry_safe":
                         raise
                     continue
                 self._invalidate_provider_state(provider)
@@ -1940,11 +1939,22 @@ class HubService:
                             outcome = future.result()
                         except HubV2Error as exc:
                             errors[step_id] = exc
-                            ambiguous = exc.code in {
-                                "provider_timeout",
-                                "provider_worker_failed",
-                                "provider_protocol_error",
-                            }
+                            failure_class = classify(exc.code)
+                            ambiguous = failure_class == "ambiguous"
+                            if not is_known(exc.code):
+                                # The conservative default parks the run for
+                                # reconciliation. Say so, so the gap in the
+                                # table is visible rather than inferred from a
+                                # run that mysteriously needs a human.
+                                self.store.record_runtime_event(
+                                    run_id,
+                                    event_type="provider_failure_unclassified",
+                                    details={
+                                        "step_id": step_id,
+                                        "error_code": exc.code,
+                                        "reason_code": failure_class,
+                                    },
+                                )
                             spent = (exc.safe_details or {}).get("spent_token_usage")
                             updated = self.store.update_step(
                                 run_id,
@@ -1957,7 +1967,7 @@ class HubService:
                                     "phase": (
                                         "outcome_unknown" if ambiguous else "provider_failed"
                                     ),
-                                    "retry_safe": bool(exc.retryable and not ambiguous),
+                                    "retry_safe": failure_class == "retry_safe",
                                     "error_code": exc.code,
                                 },
                                 # A failed step still spent whatever the provider billed.
@@ -2008,13 +2018,7 @@ class HubService:
                     ambiguous_errors = [
                         errors[step["id"]]
                         for step in ready
-                        if step["id"] in errors
-                        and errors[step["id"]].code
-                        in {
-                            "provider_timeout",
-                            "provider_worker_failed",
-                            "provider_protocol_error",
-                        }
+                        if step["id"] in errors and classify(errors[step["id"]].code) == "ambiguous"
                     ]
                     if ambiguous_errors:
                         raise ambiguous_errors[0]
@@ -2037,13 +2041,20 @@ class HubService:
                     break
             final = self.store.get_run(run_id)
             completed = all(step["status"] == "completed" for step in final["steps"])
+            unresolved = any(step["status"] == "outcome_unknown" for step in final["steps"])
+            if completed:
+                status, reason = "completed", "all_steps_completed"
+            elif unresolved:
+                status, reason = "outcome_unknown", "outcome_unknown"
+            else:
+                status, reason = "paused", "wave_budget"
             self.store.finalize_claim(
                 run_id,
                 claim_token=claim_token,
                 expected_revision=current_revision,
-                status="completed" if completed else "paused",
+                status=status,
                 event_type="run_completed" if completed else "run_paused",
-                details={"reason_code": "all_steps_completed" if completed else "wave_budget"},
+                details={"reason_code": reason},
             )
         except HubV2Error as exc:
             try:
@@ -2057,15 +2068,19 @@ class HubService:
                     reason_code=exc.code,
                 )
                 current = reconciled["run"]
+                # A run cannot rest at paused while one of its steps is
+                # unresolved: prepare_reconcile only accepts an outcome_unknown
+                # run, so paused here would leave the step with no way out.
+                # Steps the wave already parked are not in this pass's list, so
+                # ask the run itself.
                 status = (
                     "outcome_unknown"
                     if reconciled["outcome_unknown_step_ids"]
-                    or exc.code
-                    in {
-                        "provider_timeout",
-                        "provider_worker_failed",
-                        "provider_protocol_error",
-                    }
+                    or classify(exc.code) == "ambiguous"
+                    or any(
+                        str(item["status"]) == "outcome_unknown"
+                        for item in current.get("steps") or []
+                    )
                     else "paused"
                 )
                 finalized = self.store.finalize_claim(
@@ -2118,7 +2133,13 @@ class HubService:
                     claim_token=claim_token,
                     expected_revision=current["revision"],
                     status=(
-                        "outcome_unknown" if reconciled["outcome_unknown_step_ids"] else "paused"
+                        "outcome_unknown"
+                        if reconciled["outcome_unknown_step_ids"]
+                        or any(
+                            str(item["status"]) == "outcome_unknown"
+                            for item in current.get("steps") or []
+                        )
+                        else "paused"
                     ),
                     event_type="run_paused",
                     details={

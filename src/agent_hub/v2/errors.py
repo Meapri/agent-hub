@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from . import failure_classes
+
 
 @dataclass
 class HubV2Error(Exception):
@@ -16,11 +18,18 @@ class HubV2Error(Exception):
     next_action: Mapping[str, Any] | None = None
 
     def public(self) -> dict[str, Any]:
+        # Callers act on this flag, so it has to agree with the taxonomy that
+        # governs the runtime's own retries. Where the table has an opinion it
+        # wins; codes outside it (setup, release, daemon) keep what they declared.
         payload: dict[str, Any] = {
             "code": self.code,
             "message": self.message,
             "scope": self.scope,
-            "retryable": self.retryable,
+            "retryable": (
+                failure_classes.is_retryable(self.code)
+                if failure_classes.is_known(self.code)
+                else self.retryable
+            ),
             "safe_details": dict(self.safe_details or {}),
         }
         if self.next_action:

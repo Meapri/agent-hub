@@ -147,7 +147,7 @@ class _FallbackWorker(_FakeWorker):
         self.__class__.invoked.append((self.provider, params.get("model")))
         if self.provider == "gpt":
             raise HubV2Error(
-                "provider_quota_exhausted",
+                "rate_limit",
                 "The fixture primary is unavailable.",
                 scope="provider",
                 retryable=True,
@@ -318,7 +318,7 @@ class _RetryOnceWorker(_FakeWorker):
             self.__class__.invocations += 1
             if self.__class__.invocations == 1:
                 raise HubV2Error(
-                    "provider_quota_exhausted",
+                    "rate_limit",
                     "The fixture is temporarily unavailable.",
                     scope="provider",
                     retryable=True,
