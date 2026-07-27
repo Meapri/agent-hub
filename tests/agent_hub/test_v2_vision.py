@@ -343,3 +343,55 @@ def test_a_chat_task_can_carry_an_image_alongside_its_prompt(service, tmp_path):
 
     assert result["success"] is True
     assert len(_CapturingWorker.last_invoke["task"]["input_images"]) == 1
+
+
+# --- the published surface ---------------------------------------------------
+
+
+def test_the_tool_schema_and_the_task_contract_agree_on_capabilities():
+    """A published schema that drifts from the validator is worse than none.
+
+    Callers reach this surface through MCP, where the tool schema is all they
+    see. If it advertises a capability the validator rejects, or hides one it
+    accepts, the caller learns by failing.
+    """
+
+    from agent_hub.v2.contracts import CAPABILITIES
+    from agent_hub.v2.tools import tool_definitions
+
+    execute = next(t for t in tool_definitions() if t["name"] == "agent_hub_execute")
+    published = execute["inputSchema"]["properties"]["task"]
+
+    assert set(published["properties"]["capability"]["enum"]) == set(CAPABILITIES)
+
+
+def test_the_tool_schema_accepts_exactly_the_task_fields_the_validator_does():
+    from agent_hub.v2.tools import tool_definitions
+
+    execute = next(t for t in tool_definitions() if t["name"] == "agent_hub_execute")
+    published = set(execute["inputSchema"]["properties"]["task"]["properties"])
+    accepted = set(
+        validate_task(
+            {
+                "schema": TASK_SCHEMA,
+                "capability": "chat",
+                "intent": "x",
+                "inline_input": "",
+            }
+        )
+    )
+
+    # The validator returns every field it normalizes, so the published schema
+    # must cover them all -- a field the caller cannot see is a field they
+    # cannot use.
+    assert accepted <= published
+
+
+def test_the_published_image_limit_matches_the_enforced_one():
+    from agent_hub.v2.contracts import MAX_TASK_IMAGES
+    from agent_hub.v2.tools import tool_definitions
+
+    execute = next(t for t in tool_definitions() if t["name"] == "agent_hub_execute")
+    published = execute["inputSchema"]["properties"]["task"]["properties"]["input_images"]
+
+    assert published["maxItems"] == MAX_TASK_IMAGES
