@@ -27,6 +27,22 @@ retry-safe checkpoint와 lease 부재를 하나의 transaction에서 다시 확�
 반환합니다. 취소는 run과 아직 완료되지 않은 step을 한 transaction에서 `cancelled`로 바꾸며,
 뒤늦게 도착한 worker 결과는 step output으로 연결하지 않습니다.
 
+`outcome_unknown` step의 조정은 `agent_hub_cancel`의 `prepare_reconcile`과 `apply_reconcile`
+두 단계입니다. 판정은 `not_delivered`, `delivered_discarded`, `delivered_recovered` 세 가지이고
+외부 재전송을 유발하는 것은 `not_delivered` 하나뿐입니다. apply는 proposal digest, run
+`expected_revision`, 준비 시점 step revision·attempt·request digest로 만든 `witness_sha256`,
+그리고 일회성 confirmation phrase를 함께 확인합니다. phrase는 재전송이면 `resend-`, 아니면
+`discard-`로 시작합니다. `agent_hub_get`의 `next_action`은 재전송하지 않는 판정만 미리 채우므로
+그대로 실행해도 외부 요청이 다시 나가지 않습니다. 한 run의 조정 횟수는 3회로 제한하며 모든
+`outcome_unknown` step을 한 번에 판정해야 합니다. `delivered_recovered`가 제공한 텍스트도 plan이
+선언한 verifier를 통과해야 하고 artifact verification에 `human_reconciliation` 출처가 남습니다.
+
+Run token 예산은 plan digest에 봉인돼 있으므로 정책을 올려도 기존 run에는 적용되지 않습니다.
+`agent_hub_continue`의 `token_budget_grant`는 plan을 바꾸지 않고 run 단위 가산값만 늘립니다.
+예산 소진은 재개 가능한 종착이며 남은 step은 `queued`로 보존됩니다. Step별 입력·출력 token은
+전용 컬럼에 시도 단위로 누적하고, provider가 usage를 보고하지 않으면 추정치로 채운 뒤
+`tokens_source`로 실측과 추정을 구분합니다. 추정치는 routing 표본에 넣지 않습니다.
+
 DB schema migration은 기존 DB integrity check, SQLite backup, migration, 사후 integrity check 순서로
 수행합니다. 실패하면 pre-migration backup으로 복구합니다. release candidate는 현재 DB의 복사본으로
 기동해 schema compatibility를 확인하며, rollback slot은 LaunchAgent와 migration 전 DB snapshot을
@@ -92,12 +108,30 @@ provider 호출 출력에만, `max_total_tokens`는 run 누적 사용량에만 �
 dependency artifact가 `fact_pack_v2` 모양이어도 현재 run에서 완료된 `local inspect` step이
 생성했다는 artifact·plan·step provenance가 모두 맞을 때만 구조화 병합합니다. Provider 출력과
 이전 run의 입력 artifact는 원문 text segment로 보존합니다.
+
+`routing_profile`은 score 가중치를 결정하며 `quality_balanced`, `latency_first`, `cost_first`만
+허용합니다. 사용자 prior는 `~/.agent-hub/routing_prior.toml`에 두고 `routing_samples`에는 절대
+기록하지 않습니다. prior는 pseudo-weight로 관측 통계와 Bayesian shrinkage 합성되며 지분은
+`w / (w + n)`이라 표본이 쌓일수록 자동 감쇠합니다. 저장소 source에는 provider 성능 수치를 넣지
+않으며 seed template은 전부 `source = "unset"`이라 가중치 0입니다. `auto` 승격은 관측 표본 하한,
+prior 지분 상한 0.5, 그리고 score 차이가 양쪽 표준편차 합을 넘는 분리 조건을 모두 만족해야
+합니다. 선택 근거는 `routing_decision_v1`의 `evidence_kind`와 `prior_weight_fraction`에
+남습니다. prior 파일이 손상돼도 routing은 prior 없이 계속 동작합니다.
+
+`agent_hub_handoff`의 `apply_update`가 성공하면 적용된 managed block을 로컬 snapshot으로
+기록합니다. snapshot은 대상별 최근 50개까지 보존하고 저장 전에 secret 후보 줄을 제외하며,
+snapshot 기록 실패가 이미 완료된 파일 쓰기를 되돌리지는 않습니다. `history`와 `diff`는 순수
+읽기이며 `diff`는 아홉 개 필수 구간 단위로 비교합니다. `target_sequence` 없이 호출하면 현재
+파일과 비교해 Agent Hub 밖에서 이뤄진 수정을 드러냅니다.
 긴 provider 호출은 content-free `provider_attempt_started`, `provider_attempt_failed`,
 `provider_attempt_completed` event로 관찰할 수 있습니다. event에는 prompt와 결과 본문을
 기록하지 않습니다.
 
-operation metric은 이름, 성공 여부, duration만 최대 20,000건·90일 보존합니다. prompt, 결과,
-credential, project path는 metric table에 저장하지 않습니다.
+operation metric은 이름, 성공 여부, duration과 실패 코드를 최대 20,000건·90일 보존하고 요약은
+최근 10,000건을 사용합니다. 실패 코드는 `^[a-z][a-z0-9_]{0,63}$`에 정확히 맞을 때만 그대로
+저장하고 그 밖의 값은 `unclassified_error`로 접습니다. 실패 row는 항상 코드를 가지므로 NULL은
+schema 10 이전 row만을 뜻합니다. prompt, 결과, credential, project path는 metric table에
+저장하지 않습니다.
 
 claim을 보유한 worker는 같은 claim token과 run revision으로 lease를 갱신합니다. 갱신은 revision을
 증가시키지 않으며 token·revision 불일치나 이미 만료된 lease는 거부합니다. artifact retention은
@@ -111,7 +145,9 @@ correlation ID가 다르면 provider protocol failure로 처리하며 외부 호
 
 ## Public surface
 
-daemon의 공개 도구는 14개로 고정합니다. provider adapter, planner backend와 저장소 구현은
-worker·daemon 내부 경계이며 별도 MCP entrypoint로 노출하지 않습니다. worker는
-`agent_hub.v2.provider_runtime`만 통해 provider를 호출하며, 이전 다중 도구 dispatch 계층이나
-호환 MCP server를 포함하지 않습니다.
+daemon의 공개 도구는 14개로 고정합니다. 새 기능은 도구를 늘리지 않고 기존 도구의 action이나
+인자로 추가합니다. provider adapter, planner backend와 저장소 구현은 worker·daemon 내부
+경계이며 별도 MCP entrypoint로 노출하지 않습니다. worker는 `agent_hub.v2.provider_runtime`만
+통해 provider를 호출합니다. provider adapter의 dispatch 계층은 in-process로 남아 있지만
+`pyproject.toml`의 console script에는 daemon·bridge·CLI·연결 GUI만 등록하므로 host가 붙을 수
+있는 MCP entrypoint는 `agent-hub-mcp` 하나뿐입니다.

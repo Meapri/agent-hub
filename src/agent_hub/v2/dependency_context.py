@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 from .context import FACT_PACK_SCHEMA
-from .contracts import MAX_INLINE_INPUT_CHARS, canonical_json
+from .contracts import MAX_INLINE_INPUT_CHARS, canonical_json, estimate_tokens_from_text
 from .errors import HubV2Error
 
 
@@ -138,7 +138,7 @@ def enforce_provider_context_budget(
     """Reject context that already exceeds the task budget before invoking a worker."""
 
     encoded_bytes = len(text.encode("utf-8"))
-    estimated_input_tokens = (encoded_bytes + 3) // 4
+    estimated_input_tokens = estimate_tokens_from_text(text)
     declared_limits = [
         int(limit)
         for limit in (requested_max_input_tokens, model_max_input_tokens)

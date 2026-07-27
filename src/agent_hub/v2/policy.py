@@ -11,7 +11,12 @@ import tempfile
 import tomllib
 from typing import Any, Mapping
 
-from .contracts import ROUTING_MODES, canonical_project_root, require_non_negative_int
+from .contracts import (
+    ROUTING_MODES,
+    ROUTING_PROFILES,
+    canonical_project_root,
+    require_non_negative_int,
+)
 from .errors import HubV2Error
 from .experimental import normalize_experimental_flags
 
@@ -113,6 +118,14 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
             "The routing mode is not supported.",
             scope="policy",
         )
+    routing_profile = str(raw.get("routing_profile") or "quality_balanced")
+    if routing_profile not in ROUTING_PROFILES:
+        raise HubV2Error(
+            "invalid_policy",
+            "The routing profile is not supported.",
+            scope="policy",
+            safe_details={"routing_profile": routing_profile[:64]},
+        )
     providers = raw.get("provider_allowlist", DEFAULT_POLICY["provider_allowlist"])
     models = raw.get("model_allowlist", [])
     if not isinstance(providers, list) or not all(isinstance(item, str) for item in providers):
@@ -169,7 +182,7 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
     normalized = {
         "schema": POLICY_SCHEMA,
         "revision": revision,
-        "routing_profile": str(raw.get("routing_profile") or "quality_balanced"),
+        "routing_profile": routing_profile,
         "routing_mode": routing_mode,
         "provider_allowlist": list(dict.fromkeys(providers)),
         "model_allowlist": list(dict.fromkeys(models)),

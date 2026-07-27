@@ -12,7 +12,8 @@ import stat
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Mapping
+from statistics import median_low
+from typing import Any, Callable, Mapping, NoReturn
 
 from agent_hub import __version__
 from agent_hub.core import handoff as handoff_state
@@ -24,11 +25,15 @@ from .contracts import (
     PLAN_SCHEMA,
     TASK_SCHEMA,
     canonical_json,
+    canonical_project_root,
+    estimate_tokens_from_text,
     input_token_limit,
+    normalize_token_usage,
     require_non_negative_int,
     safe_usage,
     total_token_limit,
     validate_plan,
+    validate_reconciliation_resolutions,
     validate_task,
 )
 from .crypto import ArtifactCipher, MacOSKeychainKeyProvider
@@ -47,6 +52,12 @@ from .policy import (
 from .provider_client import ProviderWorkerClient
 from .provider_manifests import builtin_provider_manifests, manifest_for, model_input_limit
 from .routing import route, routing_context
+from .routing_prior import (
+    apply_routing_prior_update,
+    load_routing_prior,
+    prepare_routing_prior_update,
+    safe_load_routing_prior,
+)
 from .store import HubStore
 from .tools import TOOL_NAMES, tool_definitions
 from .verifier import verify_output
@@ -55,6 +66,16 @@ MAX_PLANNER_MANIFEST_CHARS = 32_000
 MODEL_CATALOG_LIMIT_CACHE_TTL_SECONDS = 300.0
 RUN_LEASE_GRACE_SECONDS = 60.0
 MAX_RUN_LEASE_SECONDS = 3600.0
+DEFAULT_STEP_TOKEN_ESTIMATE = 8_000
+TOKEN_ESTIMATE_LOOKBACK_DAYS = 30.0
+TOKEN_ESTIMATE_MIN_SAMPLES = 3
+# Ordered weakest to strongest so a mixed wave reports its least reliable source.
+_ESTIMATE_CONFIDENCE = (
+    "default",
+    "run_history",
+    "routing_samples_capability",
+    "routing_samples_provider",
+)
 
 
 def _structured_text(result: Mapping[str, Any]) -> str:
@@ -153,10 +174,12 @@ class HubService:
         except Exception:  # noqa: BLE001
             response = safe_unexpected_error(operation=name)
         try:
+            failure = response.get("error")
             self.store.record_operation_metric(
                 operation=name,
                 success=response.get("success") is True,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                error_code=failure.get("code") if isinstance(failure, Mapping) else None,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -625,7 +648,7 @@ class HubService:
                 "project_root is required so project policy can be enforced.",
                 scope="project",
             )
-        task, _ = self._enforce_task_policy(
+        task, execute_policy = self._enforce_task_policy(
             task,
             project_root=project_root,
             provider=str(arguments.get("provider") or "") or None,
@@ -691,6 +714,8 @@ class HubService:
             models=models,
             model_limits=self._routing_model_limits(models),
             estimated_input_tokens=base_context_budget["estimated_input_tokens"],
+            routing_profile=execute_policy["routing_profile"],
+            prior=safe_load_routing_prior(),
         )
         provider = decision["selected_provider"]
         selected_model = models.get(provider) or None
@@ -1267,16 +1292,13 @@ class HubService:
             and all(statuses.get(dep) == "completed" for dep in step["depends_on"])
         ]
 
-    def _execute_ready_step(
-        self,
-        *,
-        run_id: str,
+    @staticmethod
+    def _step_source_refs(
         plan: Mapping[str, Any],
         run: Mapping[str, Any],
         step: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        started = time.monotonic()
-        source_refs = list(
+    ) -> list[str]:
+        return list(
             dict.fromkeys(
                 [
                     *plan["task"].get("input_artifacts", []),
@@ -1289,6 +1311,17 @@ class HubService:
                 ]
             )
         )
+
+    def _execute_ready_step(
+        self,
+        *,
+        run_id: str,
+        plan: Mapping[str, Any],
+        run: Mapping[str, Any],
+        step: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        source_refs = self._step_source_refs(plan, run, step)
         if step["capability"] == "inspect":
             inspection = step.get("output_contract") or {}
             source_paths = list(inspection.get("source_paths") or [])
@@ -1326,6 +1359,14 @@ class HubService:
             model = None
             media_type = "application/json"
             checkpoint: dict[str, Any] = {"retrieval": str(facts.get("retrieval") or "unknown")}
+            # A local inspect spends no provider tokens. "local" is recorded rather
+            # than "unset" so the ledger distinguishes measured-zero from unmeasured.
+            token_usage: dict[str, Any] = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "source": "local",
+            }
         else:
             input_artifacts = set(plan["task"].get("input_artifacts") or [])
             inline_consent = set(plan.get("inline_consent_artifacts") or [])
@@ -1446,6 +1487,10 @@ class HubService:
                 models=models,
                 model_limits=self._routing_model_limits(models),
                 estimated_input_tokens=base_context_budget["estimated_input_tokens"],
+                # Read from policy rather than the plan: adding a field to the plan
+                # would change digest_json and invalidate every issued plan_sha256.
+                routing_profile=load_policy(str(run["project_root"])).policy["routing_profile"],
+                prior=safe_load_routing_prior(),
             )
             eligible = {
                 str(item["provider"]) for item in decision["candidates"] if item["eligible"]
@@ -1636,10 +1681,17 @@ class HubService:
             if usage:
                 checkpoint["usage"] = usage
         if provider != "local":
-            usage = result.get("usage") if isinstance(result, Mapping) else None
+            # `context_budget` only counts assembled dependency context, so the
+            # input estimate is a floor: intent and wrapper text are not included.
+            token_usage = normalize_token_usage(
+                result.get("usage") if isinstance(result, Mapping) else None,
+                estimated_input_tokens=int(context_budget["estimated_input_tokens"]),
+                estimated_output_tokens=estimate_tokens_from_text(text),
+            )
+            # Purely estimated numbers would pollute the routing efficiency score.
             total_tokens = (
-                usage.get("total_tokens")
-                if isinstance(usage, Mapping) and isinstance(usage.get("total_tokens"), int)
+                token_usage["total_tokens"]
+                if token_usage["source"] in {"reported", "mixed"}
                 else None
             )
             self.store.record_routing_sample(
@@ -1664,6 +1716,98 @@ class HubService:
             "artifact_id": artifact["artifact_id"],
             "input_artifact_ids": source_refs,
             "checkpoint": checkpoint,
+            "token_usage": token_usage,
+        }
+
+    def _raise_token_budget_exhausted(
+        self,
+        run_id: str,
+        *,
+        run: Mapping[str, Any],
+        reason_code: str,
+    ) -> NoReturn:
+        usage = run["token_usage"]
+        raise HubV2Error(
+            "run_token_budget_exhausted",
+            "The run exhausted its token budget.",
+            scope="run",
+            # Resumable: the caller can grant more budget and continue.
+            retryable=True,
+            safe_details={
+                "reason_code": reason_code,
+                "tokens_used": usage["total_tokens"],
+                "tokens_budget": usage["max_total_tokens"],
+                "budget_used_percent": usage["budget_used_percent"],
+            },
+            next_action={
+                "type": "call_tool",
+                "tool": "agent_hub_continue",
+                "arguments": {
+                    "run_id": run_id,
+                    "expected_revision": run["revision"],
+                    "token_budget_grant": max(1, usage["max_total_tokens"]),
+                },
+            },
+        )
+
+    def _forecast_wave_tokens(
+        self,
+        run: Mapping[str, Any],
+        ready: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Estimate the next wave's token spend from observed history.
+
+        Uses routing samples rather than the assembled dependency context because
+        building that context requires decrypting artifacts, which the wave itself
+        already does once per step.
+        """
+
+        history: dict[str, list[int]] = {}
+        for step in run["steps"]:
+            spent = int(step.get("total_tokens") or 0)
+            if step["status"] == "completed" and spent > 0:
+                history.setdefault(str(step["capability"]), []).append(spent)
+        total = 0
+        sources: list[str] = []
+        # Cache per (capability, provider): a wave usually repeats the same pair,
+        # and each lookup costs one SQLite connection.
+        estimates: dict[tuple[str, str], dict[str, Any]] = {}
+        for step in ready:
+            capability = str(step["capability"])
+            if capability == "inspect":
+                continue
+            planner_provider = str(
+                (step.get("routing_requirements") or {}).get("planner_provider") or ""
+            )
+            cache_key = (capability, planner_provider)
+            estimate = estimates.get(cache_key)
+            if estimate is None:
+                estimate = self.store.capability_token_estimate(
+                    capability=capability,
+                    provider=planner_provider or None,
+                    lookback_days=TOKEN_ESTIMATE_LOOKBACK_DAYS,
+                    minimum_samples=TOKEN_ESTIMATE_MIN_SAMPLES,
+                )
+                estimates[cache_key] = estimate
+            median = estimate["median_total_tokens"]
+            if median is not None:
+                total += int(median)
+                sources.append(str(estimate["source"]))
+                continue
+            observed = history.get(capability)
+            if observed:
+                total += median_low(observed)
+                sources.append("run_history")
+                continue
+            total += DEFAULT_STEP_TOKEN_ESTIMATE
+            sources.append("default")
+        return {
+            "tokens_estimated_wave": total,
+            # Report the weakest source so the warning is not oversold.
+            "estimate_source": (
+                min(sources, key=_ESTIMATE_CONFIDENCE.index) if sources else "none"
+            ),
+            "wave_step_count": len(sources),
         }
 
     @staticmethod
@@ -1715,6 +1859,30 @@ class HubService:
                 ready = self._ready_steps(plan, run)
                 if not ready:
                     break
+                usage = run["token_usage"]
+                if usage["exhausted"]:
+                    self._raise_token_budget_exhausted(
+                        run_id,
+                        run=run,
+                        reason_code="pre_wave_gate",
+                    )
+                forecast = self._forecast_wave_tokens(run, ready)
+                if forecast["tokens_estimated_wave"] > usage["remaining_tokens"]:
+                    # Advisory only: the forecast is an estimate and must not block.
+                    self.store.record_runtime_event(
+                        run_id,
+                        event_type="run_token_budget_warning",
+                        details={
+                            "reason_code": "wave_estimate_exceeds_remaining_budget",
+                            "tokens_used": usage["total_tokens"],
+                            "tokens_budget": usage["max_total_tokens"],
+                            "tokens_remaining": usage["remaining_tokens"],
+                            "tokens_estimated_wave": forecast["tokens_estimated_wave"],
+                            "budget_used_percent": usage["budget_used_percent"],
+                            "wave_step_count": forecast["wave_step_count"],
+                            "estimate_source": forecast["estimate_source"],
+                        },
+                    )
                 for step in ready:
                     external = step["capability"] != "inspect"
                     updated = self.store.update_step(
@@ -1810,6 +1978,7 @@ class HubService:
                                 input_artifact_ids=outcome["input_artifact_ids"],
                                 output_artifact_ids=[outcome["artifact_id"]],
                                 checkpoint=outcome["checkpoint"],
+                                token_usage=outcome.get("token_usage"),
                             )
                             current_revision = updated["revision"]
                         self.store.renew_claim(
@@ -1834,16 +2003,12 @@ class HubService:
                         raise ambiguous_errors[0]
                     raise next(errors[step["id"]] for step in ready if step["id"] in errors)
                 run = self.store.get_run(run_id)
-                total_tokens = sum(
-                    int((item["checkpoint"].get("usage") or {}).get("total_tokens") or 0)
-                    for item in run["steps"]
-                )
                 elapsed_ms = self._critical_path_elapsed_ms(plan, run)
-                if total_tokens > total_token_limit(plan["task"]["constraints"]):
-                    raise HubV2Error(
-                        "run_token_budget_exhausted",
-                        "The run exhausted its token budget.",
-                        scope="run",
+                if run["token_usage"]["exhausted"]:
+                    self._raise_token_budget_exhausted(
+                        run_id,
+                        run=run,
+                        reason_code="post_wave_ledger",
                     )
                 if elapsed_ms > int(float(plan["task"]["constraints"]["timeout_seconds"]) * 1000):
                     raise HubV2Error(
@@ -2045,6 +2210,17 @@ class HubService:
                 "max_waves must be between 1 and 8.",
                 scope="run",
             )
+        token_budget_grant = arguments.get("token_budget_grant")
+        if token_budget_grant is not None:
+            # Granted before any requeue so both can arrive in one continue call.
+            granted = self.store.grant_token_budget(
+                run_id,
+                expected_revision=expected,
+                additional_tokens=require_non_negative_int(
+                    token_budget_grant, field="token_budget_grant"
+                ),
+            )
+            expected = int(granted["revision"])
         retry_failed_steps = arguments.get("retry_failed_steps")
         if retry_failed_steps is not None:
             if not isinstance(retry_failed_steps, list):
@@ -2111,13 +2287,30 @@ class HubService:
 
     def _tool_cancel(self, arguments: dict[str, Any]) -> dict[str, Any]:
         run_id = str(arguments.get("run_id") or "")
-        cancelled = self.store.cancel_run(
-            run_id,
-            expected_revision=require_non_negative_int(
-                arguments.get("expected_revision"),
-                field="expected_revision",
-            ),
+        action = str(arguments.get("action") or "cancel")
+        expected = require_non_negative_int(
+            arguments.get("expected_revision"),
+            field="expected_revision",
         )
+        if action == "prepare_reconcile":
+            normalized, _ = validate_reconciliation_resolutions(
+                arguments.get("resolutions"),
+                run_disposition=arguments.get("run_disposition"),
+            )
+            return self.store.prepare_run_reconciliation(
+                run_id,
+                expected_revision=expected,
+                resolutions=normalized,
+            )
+        if action == "apply_reconcile":
+            return self._apply_reconcile(run_id, expected_revision=expected, arguments=arguments)
+        if action != "cancel":
+            raise HubV2Error(
+                "invalid_request",
+                "cancel action is not supported.",
+                scope="run",
+            )
+        cancelled = self.store.cancel_run(run_id, expected_revision=expected)
         with self._active_lock:
             workers = list(self._active.get(run_id, []))
         for worker in workers:
@@ -2126,6 +2319,93 @@ class HubService:
             except Exception:  # noqa: BLE001 - cancellation is best effort after durable CAS
                 continue
         return cancelled
+
+    def _apply_reconcile(
+        self,
+        run_id: str,
+        *,
+        expected_revision: int,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        proposal = arguments.get("proposal")
+        if not isinstance(proposal, Mapping):
+            raise HubV2Error(
+                "invalid_request",
+                "The reviewed reconciliation proposal is required.",
+                scope="run",
+            )
+        normalized, texts = validate_reconciliation_resolutions(
+            arguments.get("resolutions"),
+            run_disposition=arguments.get("run_disposition"),
+        )
+        submitted = {
+            (str(item["step_id"]), str(item["verdict"]), str(item.get("result_sha256") or ""))
+            for item in normalized["resolutions"]
+        }
+        reviewed = {
+            (str(item["step_id"]), str(item["verdict"]), str(item.get("result_sha256") or ""))
+            for item in proposal.get("resolutions") or []
+        }
+        if submitted != reviewed or normalized["run_disposition"] != proposal.get(
+            "run_disposition"
+        ):
+            raise HubV2Error(
+                "proposal_digest_conflict",
+                "The reconciliation arguments do not match the reviewed proposal.",
+                scope="run",
+            )
+        # Cheap pre-checks before encrypting anything, so a doomed apply does not
+        # leave orphan artifacts behind.
+        run = self.store.get_run(run_id)
+        if run["status"] != "outcome_unknown" or run["revision"] != expected_revision:
+            raise HubV2Error(
+                "run_not_reconcilable",
+                "Only an unclaimed outcome_unknown run at the expected revision can be applied.",
+                scope="run",
+                safe_details={"status": str(run["status"])},
+            )
+        plan = self.store.get_plan(run_id)
+        plan_steps = {str(step["id"]): step for step in plan["steps"]}
+        recovered: dict[str, str] = {}
+        for step_id in sorted(texts):
+            plan_step = plan_steps.get(step_id)
+            if plan_step is None:
+                raise HubV2Error(
+                    "step_not_found",
+                    "A reconciled step does not exist in this plan.",
+                    scope="run",
+                    safe_details={"step_id": step_id},
+                )
+            # Human-supplied text still has to satisfy the verifier the plan declared.
+            verification = verify_output(texts[step_id], plan_step.get("verifier"))
+            encrypted = self.cipher.encrypt(
+                texts[step_id].encode("utf-8"),
+                aad=f"agent-hub-v2-step:{step_id}".encode("utf-8"),
+            )
+            artifact = self.store.put_artifact(
+                content=encrypted["payload"],
+                media_type="text/plain; charset=utf-8",
+                sensitivity="project",
+                encrypted=True,
+                run_id=run_id,
+                producer_step_id=step_id,
+                source_refs=self._step_source_refs(plan, run, plan_step),
+                verification={**verification, "source": "human_reconciliation"},
+                retention=plan["task"]["retention"],
+                delete_after=(
+                    time.time() + 86400.0 if plan["task"]["retention"] == "ephemeral" else None
+                ),
+                content_sha256=str(encrypted["content_sha256"]),
+            )
+            recovered[step_id] = str(artifact["artifact_id"])
+        return self.store.apply_run_reconciliation(
+            run_id,
+            expected_revision=expected_revision,
+            proposal=proposal,
+            proposal_sha256=str(arguments.get("proposal_sha256") or ""),
+            confirmation_phrase=str(arguments.get("confirmation_phrase") or ""),
+            recovered_artifacts=recovered,
+        )
 
     def _tool_artifact(self, arguments: dict[str, Any]) -> dict[str, Any]:
         action = str(arguments.get("action") or "")
@@ -2332,6 +2612,18 @@ class HubService:
     def _tool_policy(self, arguments: dict[str, Any]) -> dict[str, Any]:
         action = str(arguments.get("action") or "")
         project_root = str(arguments.get("project_root") or "")
+        target = str(arguments.get("target") or "policy")
+        if target not in {"policy", "routing_prior"}:
+            raise HubV2Error(
+                "invalid_request",
+                "policy target is not supported.",
+                scope="policy",
+            )
+        if target == "routing_prior":
+            # The prior is user-global, so project_root is validated but not used
+            # as part of its identity.
+            canonical_project_root(project_root)
+            return self._routing_prior_action(action, arguments)
         if action == "get":
             return load_policy(project_root).public()
         if action == "prepare_update":
@@ -2369,6 +2661,134 @@ class HubService:
             scope="policy",
         )
 
+    @staticmethod
+    def _routing_prior_action(action: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        if action == "get":
+            return load_routing_prior().public()
+        if action == "prepare_update":
+            patch = arguments.get("patch")
+            if not isinstance(patch, Mapping):
+                raise HubV2Error(
+                    "invalid_request",
+                    "routing prior patch must be an object.",
+                    scope="routing",
+                )
+            return prepare_routing_prior_update(
+                patch=patch,
+                expected_revision=require_non_negative_int(
+                    arguments.get("expected_revision"),
+                    field="expected_revision",
+                ),
+            )
+        if action == "apply_update":
+            proposal = arguments.get("proposal")
+            if not isinstance(proposal, Mapping):
+                raise HubV2Error(
+                    "invalid_request",
+                    "routing prior proposal must be an object.",
+                    scope="routing",
+                )
+            return apply_routing_prior_update(
+                proposal=proposal,
+                proposal_sha256=str(arguments.get("proposal_sha256") or ""),
+            ).public()
+        raise HubV2Error(
+            "invalid_request",
+            "policy action is not supported.",
+            scope="policy",
+        )
+
+    def _record_handoff_snapshot(
+        self,
+        applied: Mapping[str, Any],
+        content: str,
+    ) -> dict[str, Any]:
+        """Persist the applied packet. A store failure must not undo a written file."""
+
+        try:
+            body = handoff_state.managed_body(content) or ""
+            redacted, matches = redact_secret_lines(body)
+            sections = handoff_state.section_digests(redacted)
+            recorded = self.store.record_handoff_snapshot(
+                scope_identity=handoff_state.scope_identity(applied["scope_root"]),
+                scope_root=str(applied["scope_root"]),
+                target_alias=str(applied["target_alias"]),
+                project_root=str(applied["project_root"]),
+                file_sha256=str(applied["sha256"]),
+                managed_sha256=str(applied["managed_sha256"]),
+                body=redacted,
+                sections=sections,
+                next_step=handoff_state.managed_sections(redacted).get("next_step", ""),
+                previous_file_sha256=applied.get("previous_sha256"),
+                previous_managed_sha256=applied.get("previous_managed_sha256"),
+                redacted_lines=matches,
+                created=bool(applied.get("created")),
+            )
+        except Exception:  # noqa: BLE001 - the file is already written; never re-raise
+            return {"recorded": False}
+        return {"recorded": True, **recorded}
+
+    def _handoff_diff(self, project_root: str, extra: Mapping[str, Any]) -> dict[str, Any]:
+        located = handoff_state.load_managed_block(
+            project_root,
+            file=str(extra.get("file") or ""),
+            search=str(extra.get("search") or "project-only"),
+        )
+        identity = handoff_state.scope_identity(located["scope_root"])
+        alias = located["target_alias"]
+
+        def _snapshot(sequence: Any) -> dict[str, Any]:
+            found = self.store.handoff_snapshot(
+                scope_identity=identity,
+                target_alias=alias,
+                sequence=None if sequence is None else int(sequence),
+            )
+            if found is None:
+                raise HubV2Error(
+                    "handoff_snapshot_not_found",
+                    "The requested handoff snapshot does not exist.",
+                    scope="handoff",
+                    safe_details={"sequence": sequence if sequence is not None else "latest"},
+                )
+            return found
+
+        base = _snapshot(extra.get("base_sequence"))
+        target_sequence = extra.get("target_sequence")
+        if target_sequence is None:
+            # Comparing a snapshot against the live file is how out-of-band edits
+            # by another harness become visible.
+            after_body = located["body"]
+            after_ref: dict[str, Any] = {
+                "kind": "working_file",
+                "managed_sha256": located["managed_sha256"],
+                "has_managed_block": located["has_managed_block"],
+            }
+        else:
+            target = _snapshot(target_sequence)
+            after_body = str(target.get("body") or "")
+            after_ref = {
+                "kind": "snapshot",
+                "sequence": target["sequence"],
+                "managed_sha256": target["managed_sha256"],
+            }
+        return {
+            "success": True,
+            "text": "Handoff diff computed locally.",
+            "target": located["target"],
+            "before": {
+                "kind": "snapshot",
+                "sequence": base["sequence"],
+                "managed_sha256": base["managed_sha256"],
+            },
+            "after": after_ref,
+            **handoff_state.diff_managed_bodies(
+                str(base.get("body") or ""),
+                after_body,
+                include_text=bool(extra.get("include_text", True)),
+                max_lines=int(extra.get("max_lines") or handoff_state.DIFF_DEFAULT_LINES),
+            ),
+        }
+
     def _tool_handoff(self, arguments: dict[str, Any]) -> dict[str, Any]:
         action = str(arguments.get("action") or "")
         project_root = str(arguments.get("project_root") or "")
@@ -2399,11 +2819,26 @@ class HubService:
             }
             if "base_managed_sha256" in extra:
                 kwargs["base_managed_sha256"] = extra.get("base_managed_sha256")
-            return {
+            prepared = handoff_state.prepare_handoff_update(project_root, **kwargs)
+            response = {
                 "success": True,
                 "text": "Handoff update prepared; no file was changed.",
-                **handoff_state.prepare_handoff_update(project_root, **kwargs),
+                **prepared,
             }
+            if extra.get("include_diff"):
+                # Shows which sections this handoff changes before it is written.
+                located = handoff_state.load_managed_block(
+                    project_root,
+                    file=str(extra.get("file") or ""),
+                    search=str(extra.get("search") or "project-only"),
+                )
+                response["diff"] = handoff_state.diff_managed_bodies(
+                    located["body"],
+                    str(extra.get("body") or ""),
+                    include_text=bool(extra.get("include_text", True)),
+                    max_lines=int(extra.get("max_lines") or handoff_state.DIFF_DEFAULT_LINES),
+                )
+            return response
         if action == "apply_update":
             if "expected_sha256" not in extra:
                 raise HubV2Error(
@@ -2411,16 +2846,38 @@ class HubService:
                     "expected_sha256 is required for a handoff update.",
                     scope="handoff",
                 )
+            content = str(extra.get("content") or "")
+            applied = handoff_state.apply_handoff_update(
+                project_root,
+                file=str(extra.get("file") or ""),
+                content=content,
+                expected_sha256=extra.get("expected_sha256"),
+            )
             return {
                 "success": True,
                 "text": "HANDOFF.md updated atomically.",
-                **handoff_state.apply_handoff_update(
-                    project_root,
-                    file=str(extra.get("file") or ""),
-                    content=str(extra.get("content") or ""),
-                    expected_sha256=extra.get("expected_sha256"),
+                **applied,
+                "snapshot": self._record_handoff_snapshot(applied, content),
+            }
+        if action == "history":
+            located = handoff_state.load_managed_block(
+                project_root,
+                file=str(extra.get("file") or ""),
+                search=str(extra.get("search") or "project-only"),
+            )
+            return {
+                "success": True,
+                "text": "Handoff history read from the local store.",
+                "target": located["target"],
+                **self.store.handoff_history(
+                    scope_identity=handoff_state.scope_identity(located["scope_root"]),
+                    target_alias=located["target_alias"],
+                    limit=int(extra.get("limit") or 20),
+                    include_body=bool(extra.get("include_body", False)),
                 ),
             }
+        if action == "diff":
+            return self._handoff_diff(project_root, extra)
         if action == "takeover":
             run = self.store.get_run(
                 str(extra.get("run_id") or ""),
@@ -2470,9 +2927,29 @@ class HubService:
             live=bool(arguments.get("live", False)),
         )
         store_health = self.store.health()
+        prior_snapshot = safe_load_routing_prior()
+        prior_public = prior_snapshot.public()
+        if prior_snapshot.state == "invalid":
+            prior_status = "fail"
+        elif prior_snapshot.stale or prior_public["active_entry_count"] == 0:
+            prior_status = "warn"
+        else:
+            prior_status = "pass"
         repair = str(arguments.get("repair") or "none")
         repair_plan = []
         if repair == "prepare":
+            if prior_status != "pass":
+                repair_plan.append(
+                    {
+                        "action": "review_routing_prior",
+                        "automatic": False,
+                        "reason_code": (
+                            prior_snapshot.reason_code
+                            if prior_snapshot.state == "invalid"
+                            else ("prior_stale" if prior_snapshot.stale else "prior_inactive")
+                        ),
+                    }
+                )
             if not store_health["ok"]:
                 repair_plan.append(
                     {
@@ -2494,6 +2971,7 @@ class HubService:
             "schema": "agent_hub_doctor_v2",
             "store": store_health,
             "host_checks": host_checks,
+            "routing_prior": {**prior_public, "status": prior_status},
             "repair_plan": repair_plan,
             "read_only": True,
         }

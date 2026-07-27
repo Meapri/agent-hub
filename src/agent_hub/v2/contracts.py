@@ -19,6 +19,8 @@ ARTIFACT_SCHEMA = "artifact_v2"
 PROVIDER_MANIFEST_SCHEMA = "agent_hub_provider_v2"
 ROUTING_DECISION_SCHEMA = "routing_decision_v1"
 EGRESS_MANIFEST_SCHEMA = "egress_manifest_v2"
+RECONCILIATION_SCHEMA = "agent_hub_run_reconciliation_v1"
+MAX_RECONCILED_RESULT_CHARS = 200_000
 MAX_INLINE_INPUT_CHARS = 2_000_000
 DEFAULT_PROVIDER_MAX_INPUT_TOKENS = 131_072
 MAX_PROVIDER_INPUT_TOKENS = 10_000_000
@@ -50,6 +52,10 @@ RUN_STATUSES = frozenset(
     }
 )
 ROUTING_MODES = frozenset({"pinned", "shadow", "advisory", "auto"})
+ROUTING_PROFILES = frozenset({"quality_balanced", "latency_first", "cost_first"})
+# Only not_delivered can cause an external request to be sent again.
+RECONCILIATION_VERDICTS = frozenset({"not_delivered", "delivered_discarded", "delivered_recovered"})
+RECONCILIATION_DISPOSITIONS = frozenset({"resume", "fail"})
 RETENTION_MODES = frozenset({"ephemeral", "durable_private", "exportable"})
 SENSITIVITY_LEVELS = frozenset({"public", "project", "sensitive", "secret"})
 
@@ -334,6 +340,84 @@ def total_token_limit(
 ) -> int:
     value = constraints.get("max_total_tokens", constraints.get("max_tokens", default))
     return int(value)
+
+
+def validate_reconciliation_resolutions(
+    raw: Any,
+    *,
+    run_disposition: Any,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Split a reconciliation request into a digest-safe body and its plaintext.
+
+    The normalized body carries only digests, so user-supplied result text can
+    never end up inside the proposal digest or the stored proposal row.
+    """
+
+    disposition = str(run_disposition or "")
+    if disposition not in RECONCILIATION_DISPOSITIONS:
+        raise HubV2Error(
+            "invalid_request",
+            "run_disposition must be resume or fail.",
+            scope="run",
+        )
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 64:
+        raise HubV2Error(
+            "invalid_request",
+            "resolutions must contain 1..64 entries.",
+            scope="run",
+        )
+    resolutions: list[dict[str, Any]] = []
+    texts: dict[str, str] = {}
+    seen: set[str] = set()
+    for item in raw:
+        value = require_object(item, field="resolutions[]")
+        _reject_unknown_fields(
+            value,
+            allowed={"step_id", "verdict", "result_text"},
+            field="resolutions[]",
+        )
+        step_id = require_identifier(value.get("step_id"), field="resolutions[].step_id")
+        if step_id in seen:
+            raise HubV2Error(
+                "invalid_request",
+                "resolutions must not repeat a step id.",
+                scope="run",
+            )
+        seen.add(step_id)
+        verdict = str(value.get("verdict") or "")
+        if verdict not in RECONCILIATION_VERDICTS:
+            raise HubV2Error(
+                "invalid_request",
+                "The reconciliation verdict is not supported.",
+                scope="run",
+            )
+        entry: dict[str, Any] = {"step_id": step_id, "verdict": verdict}
+        if verdict == "delivered_recovered":
+            text = require_string(
+                value.get("result_text"),
+                field="resolutions[].result_text",
+                maximum=MAX_RECONCILED_RESULT_CHARS,
+            )
+            if not text.strip():
+                raise HubV2Error(
+                    "invalid_request",
+                    "delivered_recovered needs the recovered result text.",
+                    scope="run",
+                )
+            texts[step_id] = text
+            entry["result_sha256"] = sha256(text.encode("utf-8")).hexdigest()
+        elif value.get("result_text") is not None:
+            raise HubV2Error(
+                "invalid_request",
+                "result_text is only valid for delivered_recovered.",
+                scope="run",
+            )
+        resolutions.append(entry)
+    resolutions.sort(key=lambda item: item["step_id"])
+    return (
+        {"run_disposition": disposition, "resolutions": resolutions},
+        texts,
+    )
 
 
 def validate_plan(raw: Any) -> dict[str, Any]:
@@ -704,6 +788,80 @@ def safe_usage(value: Any) -> dict[str, int | float]:
         ):
             result[key] = raw_value
     return result
+
+
+MAX_STEP_TOKENS = 1_000_000_000
+STEP_TOKEN_SOURCES = frozenset({"unset", "reported", "estimated", "mixed", "local"})
+_USAGE_INPUT_KEYS = ("input_tokens", "prompt_tokens")
+_USAGE_OUTPUT_KEYS = ("output_tokens", "completion_tokens")
+
+
+def estimate_tokens_from_text(text: str) -> int:
+    """Rough byte-based token estimate used when a provider reports no usage."""
+
+    return (len(text.encode("utf-8")) + 3) // 4
+
+
+def _usage_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(float(value)) or value < 0:
+        return None
+    return min(int(value), MAX_STEP_TOKENS)
+
+
+def _first_usage_value(usage: Mapping[str, Any], keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        parsed = _usage_int(usage.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def normalize_token_usage(
+    usage: Any,
+    *,
+    estimated_input_tokens: int = 0,
+    estimated_output_tokens: int = 0,
+) -> dict[str, Any]:
+    """Normalize provider-specific usage payloads into one accounting shape.
+
+    Providers disagree on key names and some omit usage entirely, so the caller
+    supplies estimates. ``source`` records whether the result was reported by the
+    provider, estimated locally, or a mix, so that purely estimated numbers can be
+    kept out of routing statistics.
+    """
+
+    estimate_input = max(0, min(int(estimated_input_tokens), MAX_STEP_TOKENS))
+    estimate_output = max(0, min(int(estimated_output_tokens), MAX_STEP_TOKENS))
+    mapping = usage if isinstance(usage, Mapping) else {}
+    reported_input = _first_usage_value(mapping, _USAGE_INPUT_KEYS)
+    reported_output = _first_usage_value(mapping, _USAGE_OUTPUT_KEYS)
+    reported_total = _usage_int(mapping.get("total_tokens"))
+
+    if reported_input is not None and reported_output is not None:
+        input_tokens, output_tokens, source = reported_input, reported_output, "reported"
+    elif reported_total is not None and reported_total > 0:
+        # Only a total is available: attribute it without inventing extra tokens.
+        input_tokens = min(estimate_input, reported_total)
+        output_tokens = reported_total - input_tokens
+        source = "mixed"
+    elif reported_input is not None:
+        input_tokens, output_tokens, source = reported_input, estimate_output, "mixed"
+    elif reported_output is not None:
+        input_tokens, output_tokens, source = estimate_input, reported_output, "mixed"
+    else:
+        input_tokens, output_tokens, source = estimate_input, estimate_output, "estimated"
+
+    total = min(input_tokens + output_tokens, MAX_STEP_TOKENS)
+    if source == "reported" and reported_total is not None:
+        total = min(max(reported_total, 0), MAX_STEP_TOKENS)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total,
+        "source": source,
+    }
 
 
 def bounded_unique(values: Iterable[str], *, maximum: int) -> list[str]:

@@ -422,7 +422,90 @@ def test_store_summarizes_bounded_content_free_operation_metrics(tmp_path):
         "count": 4,
         "success_rate": 0.75,
         "latency_ms": {"p50": 20, "p95": 100, "max": 100},
+        "failures": {
+            "count": 1,
+            "unrecorded": 0,
+            "top_codes": [{"code": "unclassified_error", "count": 1}],
+            "distinct_codes": 1,
+        },
     }
+
+
+def test_operation_metrics_rank_failure_codes_without_free_text(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    recorded = (
+        (False, "egress_approval_required"),
+        (False, "egress_approval_required"),
+        (False, "provider_timeout"),
+        (False, "Traceback (most recent call last): secret-token"),
+        # A trailing newline must not sneak past the taxonomy check, and provider
+        # codes reach the store unvalidated, so this is a reachable input.
+        (False, "provider_timeout\n"),
+        (False, "인증실패"),
+        (False, None),
+        (True, None),
+    )
+    for success, code in recorded:
+        store.record_operation_metric(
+            operation="agent_hub_plan",
+            success=success,
+            duration_ms=5,
+            error_code=code,
+        )
+
+    failures = store.operation_metrics()["operations"]["agent_hub_plan"]["failures"]
+
+    assert failures["count"] == 7
+    assert failures["top_codes"] == [
+        {"code": "unclassified_error", "count": 4},
+        {"code": "egress_approval_required", "count": 2},
+        {"code": "provider_timeout", "count": 1},
+    ]
+    # Every failure carries a code, so NULL can only mean a pre-schema-10 row.
+    assert failures["unrecorded"] == 0
+    assert all("secret-token" not in item["code"] for item in failures["top_codes"])
+    assert all(item["code"].isascii() for item in failures["top_codes"])
+
+
+def test_operation_metrics_report_pre_schema_10_rows_as_unrecorded(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    store.record_operation_metric(
+        operation="agent_hub_plan",
+        success=False,
+        duration_ms=5,
+        error_code="provider_timeout",
+    )
+    # Simulate a row written before schema 10, which is the only way a failure
+    # row can legitimately carry a NULL code.
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.execute(
+            "INSERT INTO operation_metrics(operation, success, duration_ms, recorded_at)"
+            " VALUES('agent_hub_plan', 0, 5, 1.0)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    failures = store.operation_metrics()["operations"]["agent_hub_plan"]["failures"]
+
+    assert failures["count"] == 2
+    assert failures["unrecorded"] == 1
+    assert failures["top_codes"] == [{"code": "provider_timeout", "count": 1}]
+
+
+def test_operation_metrics_ignore_error_code_on_success(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    store.record_operation_metric(
+        operation="agent_hub_get",
+        success=True,
+        duration_ms=1,
+        error_code="provider_timeout",
+    )
+
+    failures = store.operation_metrics()["operations"]["agent_hub_get"]["failures"]
+
+    assert failures == {"count": 0, "unrecorded": 0, "top_codes": [], "distinct_codes": 0}
 
 
 def test_events_drop_prompt_and_unknown_details(tmp_path):
@@ -542,3 +625,183 @@ def test_backup_is_new_private_sqlite_file(tmp_path):
     assert backup.exists()
     assert backup.stat().st_mode & 0o777 == 0o600
     assert len(result["sha256"]) == 64
+
+
+def _budgeted_plan(max_total_tokens: int):
+    return validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Inspect the fixture.",
+                "capability": "inspect",
+                "inline_input": "fixture",
+                "constraints": {"max_total_tokens": max_total_tokens},
+            },
+            "steps": [
+                {
+                    "id": "inspect",
+                    "capability": "inspect",
+                    "instruction": "Inspect the fixture.",
+                }
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+
+
+def test_run_denormalizes_plan_token_budget_and_accumulates_step_usage(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    run = store.create_run(
+        plan=_budgeted_plan(1_000),
+        project_root=str(tmp_path),
+        idempotency_key="fixture.tokens",
+    )
+
+    assert run["token_usage"]["max_total_tokens"] == 1_000
+    assert run["token_usage"]["total_tokens"] == 0
+    assert run["token_usage"]["exhausted"] is False
+
+    claim = store.claim_run(run["run_id"], expected_revision=run["revision"])
+    updated = store.update_step(
+        run["run_id"],
+        step_id="inspect",
+        expected_run_revision=claim.revision,
+        status="running",
+        token_usage={
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+            "source": "reported",
+        },
+    )
+    # A second attempt bills again, so the ledger sums attempts instead of replacing.
+    updated = store.update_step(
+        run["run_id"],
+        step_id="inspect",
+        expected_run_revision=updated["revision"],
+        status="completed",
+        token_usage={
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "source": "reported",
+        },
+    )
+
+    step = updated["steps"][0]
+    assert (step["input_tokens"], step["output_tokens"], step["total_tokens"]) == (110, 55, 165)
+    assert step["tokens_source"] == "reported"
+    assert updated["token_usage"]["total_tokens"] == 165
+    assert updated["token_usage"]["remaining_tokens"] == 835
+
+
+def test_exhausted_run_is_resumable_through_a_token_budget_grant(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    run = store.create_run(
+        plan=_budgeted_plan(100),
+        project_root=str(tmp_path),
+        idempotency_key="fixture.grant",
+    )
+    claim = store.claim_run(run["run_id"], expected_revision=run["revision"])
+    updated = store.update_step(
+        run["run_id"],
+        step_id="inspect",
+        expected_run_revision=claim.revision,
+        status="failed",
+        checkpoint={"retry_safe": True, "error_code": "fallback_exhausted"},
+        token_usage={
+            "input_tokens": 80,
+            "output_tokens": 40,
+            "total_tokens": 120,
+            "source": "reported",
+        },
+    )
+    paused = store.finalize_claim(
+        run["run_id"],
+        claim_token=claim.claim_token,
+        expected_revision=updated["revision"],
+        status="paused",
+        event_type="run_paused",
+        details={"reason_code": "wave_budget"},
+    )
+
+    assert paused["token_usage"]["exhausted"] is True
+    action = paused["next_action"]
+    assert action["tool"] == "agent_hub_continue"
+    assert action["arguments"]["token_budget_grant"] == 100
+    assert action["arguments"]["retry_failed_steps"] == ["inspect"]
+
+    granted = store.grant_token_budget(
+        paused["run_id"],
+        expected_revision=paused["revision"],
+        additional_tokens=action["arguments"]["token_budget_grant"],
+    )
+
+    assert granted["token_usage"]["granted_tokens"] == 100
+    assert granted["token_usage"]["max_total_tokens"] == 200
+    assert granted["token_usage"]["exhausted"] is False
+    # Status stays paused so a following requeue still passes its own fencing.
+    assert granted["status"] == "paused"
+    requeued = store.requeue_failed_steps(
+        granted["run_id"],
+        expected_revision=granted["revision"],
+        step_ids=["inspect"],
+    )
+    assert requeued["status"] == "queued"
+    # Already-spent tokens survive the requeue.
+    assert requeued["token_usage"]["total_tokens"] == 120
+
+
+def test_token_budget_grant_is_revision_fenced_and_rejects_claimed_runs(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    run = store.create_run(
+        plan=_budgeted_plan(100),
+        project_root=str(tmp_path),
+        idempotency_key="fixture.grant.fence",
+    )
+
+    with pytest.raises(HubV2Error) as stale:
+        store.grant_token_budget(run["run_id"], expected_revision=99, additional_tokens=10)
+    assert stale.value.code == "revision_conflict"
+
+    with pytest.raises(HubV2Error) as zero:
+        store.grant_token_budget(
+            run["run_id"], expected_revision=run["revision"], additional_tokens=0
+        )
+    assert zero.value.code == "invalid_request"
+
+    claim = store.claim_run(run["run_id"], expected_revision=run["revision"])
+    with pytest.raises(HubV2Error) as claimed:
+        store.grant_token_budget(
+            run["run_id"], expected_revision=claim.revision, additional_tokens=10
+        )
+    assert claimed.value.code == "token_grant_not_allowed"
+
+
+def test_capability_token_estimate_needs_enough_samples(tmp_path):
+    store = HubStore(tmp_path / "state.sqlite3")
+    context = {"capability": "write", "intent_sha256": "a" * 64}
+
+    empty = store.capability_token_estimate(capability="write", provider="claude")
+    assert empty["median_total_tokens"] is None
+    assert empty["source"] == "insufficient_samples"
+
+    for total in (100, 300, 200):
+        store.record_routing_sample(
+            context=context,
+            provider="claude",
+            model="m",
+            capability="write",
+            success=True,
+            quality=None,
+            latency_ms=10,
+            total_tokens=total,
+            signal_weight=1.0,
+        )
+
+    estimate = store.capability_token_estimate(capability="write", provider="claude")
+    assert estimate["sample_count"] == 3
+    assert estimate["median_total_tokens"] == 200
+    assert estimate["source"] == "routing_samples_provider"

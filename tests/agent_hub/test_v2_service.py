@@ -8,7 +8,12 @@ import time
 
 import pytest
 
-from agent_hub.v2.contracts import PLAN_SCHEMA, TASK_SCHEMA, validate_plan
+from agent_hub.v2.contracts import (
+    PLAN_SCHEMA,
+    TASK_SCHEMA,
+    normalize_token_usage,
+    validate_plan,
+)
 from agent_hub.v2.crypto import ArtifactCipher, StaticKeyProvider
 from agent_hub.v2.dependency_context import (
     DependencyContextPart,
@@ -426,6 +431,44 @@ def _plan():
     )
 
 
+def _external_plan(*, max_total_tokens: int | None = None):
+    constraints: dict[str, object] = {"provider_allowlist": ["gpt"]}
+    if max_total_tokens is not None:
+        constraints["max_total_tokens"] = max_total_tokens
+    return validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Complete the fixture.",
+                "capability": "chat",
+                "inline_input": "private run input",
+                "constraints": constraints,
+                "retention": "durable_private",
+            },
+            "steps": [
+                {
+                    "id": "answer",
+                    "capability": "chat",
+                    "instruction": "Return the fixture result.",
+                    "routing_requirements": {"planner_provider": "gpt"},
+                }
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+
+
+def _await_settled(service: HubService, run_id: str) -> dict:
+    for _ in range(200):
+        current = service.store.get_run(run_id)
+        if current["status"] != "running":
+            return current
+        time.sleep(0.01)
+    raise AssertionError(f"run {run_id} never settled")
+
+
 def test_artifact_cipher_authenticates_digest_and_aad():
     cipher = ArtifactCipher(StaticKeyProvider(b"a" * 32))
     encrypted = cipher.encrypt(b"private", aad=b"fixture")
@@ -686,6 +729,40 @@ def test_public_run_management_tools_are_covered_through_dispatch(tmp_path):
     assert doctor["success"] is True
     assert doctor["data"]["schema"] == "agent_hub_doctor_v2"
     assert doctor["data"]["read_only"] is True
+
+
+def test_dispatch_records_failure_code_in_operation_metrics(tmp_path):
+    service = _service(tmp_path)
+
+    missing = service.dispatch("agent_hub_get", {"run_id": "0" * 16})
+    ok = service.dispatch("agent_hub_status", {})
+
+    assert missing["success"] is False
+    assert ok["success"] is True
+
+    operations = service.store.operation_metrics()["operations"]
+    failures = operations["agent_hub_get"]["failures"]
+    assert failures["count"] == 1
+    assert failures["unrecorded"] == 0
+    assert failures["top_codes"] == [{"code": missing["error"]["code"], "count": 1}]
+    assert operations["agent_hub_status"]["failures"]["count"] == 0
+
+
+def test_dispatch_records_internal_error_code_for_unexpected_failures(tmp_path):
+    service = _service(tmp_path)
+
+    def _boom(_arguments):
+        raise RuntimeError("fixture crash with sensitive text")
+
+    service._tool_status = _boom
+
+    response = service.dispatch("agent_hub_status", {})
+
+    assert response["success"] is False
+    assert response["error"]["code"] == "internal_error"
+    failures = service.store.operation_metrics()["operations"]["agent_hub_status"]["failures"]
+    assert failures["top_codes"] == [{"code": "internal_error", "count": 1}]
+    assert "sensitive" not in json.dumps(failures)
 
 
 def test_execute_allows_gemini_to_refresh_expired_access_token_on_invoke(tmp_path):
@@ -2231,3 +2308,103 @@ def test_success_without_explicit_quality_gate_does_not_invent_quality(tmp_path)
         ).fetchall()
     assert current["status"] == "completed"
     assert samples == [(1, None)]
+
+
+def test_provider_step_records_normalized_token_usage_on_the_run_ledger(tmp_path):
+    service = _service(tmp_path)
+    plan = _external_plan()
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"tokens.{secrets.token_hex(4)}",
+        },
+    )
+    run_id = started["data"]["run_id"]
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": run_id, "expected_revision": started["data"]["revision"]},
+    )
+    _await_settled(service, run_id)
+
+    run = service.dispatch("agent_hub_get", {"run_id": run_id})["data"]
+    usage = run["token_usage"]
+
+    assert usage["schema"] == "agent_hub_run_token_usage_v1"
+    assert usage["max_total_tokens"] > 0
+    # The fake worker only reports a total, so the split is attributed, not invented.
+    step = next(item for item in run["steps"] if item["capability"] != "inspect")
+    assert step["total_tokens"] == step["input_tokens"] + step["output_tokens"]
+    assert step["tokens_source"] in {"reported", "mixed"}
+    assert usage["total_tokens"] == sum(item["total_tokens"] for item in run["steps"])
+
+
+def test_normalize_token_usage_separates_reported_and_estimated_sources():
+    reported = normalize_token_usage({"input_tokens": 30, "output_tokens": 12})
+    total_only = normalize_token_usage(
+        {"total_tokens": 100}, estimated_input_tokens=70, estimated_output_tokens=999
+    )
+    alias = normalize_token_usage({"prompt_tokens": 5, "completion_tokens": 7})
+    missing = normalize_token_usage(None, estimated_input_tokens=8, estimated_output_tokens=4)
+
+    assert reported == {
+        "input_tokens": 30,
+        "output_tokens": 12,
+        "total_tokens": 42,
+        "source": "reported",
+    }
+    # A reported total is never inflated by the local estimate.
+    assert total_only["total_tokens"] == 100
+    assert total_only["input_tokens"] + total_only["output_tokens"] == 100
+    assert total_only["source"] == "mixed"
+    assert alias["source"] == "reported"
+    assert missing == {
+        "input_tokens": 8,
+        "output_tokens": 4,
+        "total_tokens": 12,
+        "source": "estimated",
+    }
+
+
+def test_token_budget_exhaustion_is_resumable_through_continue(tmp_path):
+    service = _service(tmp_path)
+    plan = _external_plan(max_total_tokens=1)
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"budget.{secrets.token_hex(4)}",
+        },
+    )
+    run_id = started["data"]["run_id"]
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": run_id, "expected_revision": started["data"]["revision"]},
+    )
+    _await_settled(service, run_id)
+
+    paused = service.dispatch("agent_hub_get", {"run_id": run_id})["data"]
+    assert paused["token_usage"]["exhausted"] is True
+    action = paused["next_action"]
+    assert action["arguments"]["token_budget_grant"] >= 1
+
+    resumed = service.dispatch(
+        "agent_hub_continue",
+        {
+            "run_id": run_id,
+            "expected_revision": paused["revision"],
+            "token_budget_grant": 100_000,
+        },
+    )
+    assert resumed["success"] is True
+
+    after = service.dispatch("agent_hub_get", {"run_id": run_id})["data"]
+    assert after["token_usage"]["granted_tokens"] == 100_000
+    assert after["token_usage"]["exhausted"] is False
+    types = [
+        event["type"]
+        for event in service.dispatch("agent_hub_events", {"run_id": run_id})["data"]["events"]
+    ]
+    assert "run_token_budget_granted" in types

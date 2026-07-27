@@ -7,17 +7,153 @@ from typing import Any, Mapping, Sequence
 from .contracts import ROUTING_MODES, validate_task
 from .errors import HubV2Error
 from .provider_manifests import builtin_provider_manifests, model_input_limit
+from .routing_prior import RoutingPriorSnapshot
 from .store import HubStore
 
 QUALITY_WEIGHT = 0.60
 RELIABILITY_WEIGHT = 0.20
 LATENCY_WEIGHT = 0.10
 TOKEN_WEIGHT = 0.10
-AUTO_MIN_SAMPLES = 20
+# quality_balanced reuses the module constants so the documented default and the
+# profile table can never drift apart.
+ROUTING_PROFILE_WEIGHTS: dict[str, dict[str, float]] = {
+    "quality_balanced": {
+        "quality": QUALITY_WEIGHT,
+        "reliability": RELIABILITY_WEIGHT,
+        "latency": LATENCY_WEIGHT,
+        "token_efficiency": TOKEN_WEIGHT,
+    },
+    "latency_first": {
+        "quality": 0.35,
+        "reliability": 0.25,
+        "latency": 0.30,
+        "token_efficiency": 0.10,
+    },
+    "cost_first": {
+        "quality": 0.35,
+        "reliability": 0.20,
+        "latency": 0.05,
+        "token_efficiency": 0.40,
+    },
+}
+AUTO_MIN_OBSERVED_SAMPLES = 5
+AUTO_MAX_PRIOR_FRACTION = 0.5
+AUTO_SEPARATION_Z = 1.0
 AUTO_MAX_QUALITY_REGRESSION = 0.03
 AUTO_MAX_FAILURE_REGRESSION = 0.02
 AUTO_MIN_QUALITY_GAIN = 0.05
 AUTO_MIN_EFFICIENCY_GAIN = 0.10
+
+
+def profile_weights(routing_profile: str) -> dict[str, float]:
+    weights = ROUTING_PROFILE_WEIGHTS.get(str(routing_profile))
+    if weights is None:
+        raise HubV2Error(
+            "invalid_routing_profile",
+            "The routing profile is not supported.",
+            scope="routing",
+            safe_details={"routing_profile": str(routing_profile)[:64]},
+        )
+    return dict(weights)
+
+
+def _blend_positive(
+    prior_value: float | None,
+    prior_weight: float,
+    observed_value: float | None,
+    observed_weight: float,
+) -> float | None:
+    if prior_value is not None and prior_weight > 0.0:
+        if observed_value is None or observed_weight <= 0.0:
+            return prior_value
+        return (prior_weight * prior_value + observed_weight * observed_value) / (
+            prior_weight + observed_weight
+        )
+    return observed_value
+
+
+def blend_statistics(
+    stats: Mapping[str, Any],
+    prior_entry: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Shrink observed statistics toward a prior with a pseudo-weight.
+
+    The prior share is ``w / (w + n)``: it decays automatically as observations
+    accumulate, and a handful of bad real outcomes overrides it immediately.
+    """
+
+    weight = float(prior_entry["effective_weight"]) if prior_entry else 0.0
+    success = float(stats.get("success_weight") or 0.0)
+    failure = float(stats.get("failure_weight") or 0.0)
+    quality_weight = float(stats.get("quality_weight") or 0.0)
+    latency_weight = float(stats.get("latency_weight") or 0.0)
+    tokens_weight = float(stats.get("tokens_weight") or 0.0)
+
+    prior_reliability = prior_entry.get("reliability") if prior_entry else None
+    if prior_reliability is not None and weight > 0.0:
+        reliability = (weight * float(prior_reliability) + success) / (weight + success + failure)
+        reliability_n = weight + success + failure
+    else:
+        reliability = float(stats["reliability"])
+        reliability_n = 2.0 + success + failure
+    reliability_sd = (reliability * (1.0 - reliability) / (reliability_n + 1.0)) ** 0.5
+
+    prior_quality = prior_entry.get("quality") if prior_entry else None
+    if prior_quality is not None and weight > 0.0:
+        if quality_weight <= 0.0:
+            quality = float(prior_quality)
+        else:
+            quality = (weight * float(prior_quality) + quality_weight * float(stats["quality"])) / (
+                weight + quality_weight
+            )
+        quality_n = weight + quality_weight
+    else:
+        quality = float(stats["quality"])
+        quality_n = quality_weight
+    # With no quality evidence the value is a placeholder shared by every
+    # candidate, so it must contribute no uncertainty either.
+    quality_sd = 0.0 if quality_n <= 0.0 else (quality * (1.0 - quality) / (quality_n + 1.0)) ** 0.5
+
+    latency_ms = _blend_positive(
+        prior_entry.get("latency_ms") if prior_entry else None,
+        weight,
+        stats["latency_ms"],
+        latency_weight,
+    )
+    total_tokens = _blend_positive(
+        prior_entry.get("total_tokens") if prior_entry else None,
+        weight,
+        stats["total_tokens"],
+        tokens_weight,
+    )
+    if prior_reliability is not None and weight > 0.0:
+        failure_rate: float | None = 1.0 - reliability
+    else:
+        failure_rate = stats["failure_rate"]
+    observed_total = success + failure
+    prior_fraction = weight / (weight + observed_total) if weight + observed_total > 0 else 0.0
+    if weight <= 0.0:
+        kind = "observed" if observed_total > 0 else "default"
+    else:
+        kind = "prior" if observed_total <= 0 else "blended"
+    return {
+        "quality": quality,
+        "reliability": reliability,
+        "latency_ms": latency_ms,
+        "total_tokens": total_tokens,
+        "failure_rate": failure_rate,
+        "evidence": {
+            "kind": kind,
+            "prior_weight": weight,
+            "prior_fraction": round(prior_fraction, 6),
+            "observed_weight": observed_total,
+            "quality_sd": quality_sd,
+            "reliability_sd": reliability_sd,
+            "quality_weight": quality_weight,
+            "latency_weight": latency_weight,
+            "tokens_weight": tokens_weight,
+        },
+    }
 
 
 def routing_context(
@@ -61,12 +197,26 @@ def _relative_reduction(candidate: float | None, baseline: float | None) -> floa
 def _auto_gate(
     recommendation: Mapping[str, Any],
     planner: Mapping[str, Any],
+    *,
+    weights: Mapping[str, float],
 ) -> tuple[bool, str]:
     if (
-        int(recommendation["sample_count"]) < AUTO_MIN_SAMPLES
-        or int(planner["sample_count"]) < AUTO_MIN_SAMPLES
+        int(recommendation["sample_count"]) < AUTO_MIN_OBSERVED_SAMPLES
+        or int(planner["sample_count"]) < AUTO_MIN_OBSERVED_SAMPLES
     ):
         return False, "cold_start_preserves_planner"
+    recommended_evidence = recommendation["evidence"]
+    planner_evidence = planner["evidence"]
+    # A heavier prior demands proportionally more real evidence before it can move
+    # a decision, so an assumption alone never promotes a provider.
+    if (
+        max(
+            float(recommended_evidence["prior_fraction"]),
+            float(planner_evidence["prior_fraction"]),
+        )
+        > AUTO_MAX_PRIOR_FRACTION
+    ):
+        return False, "prior_evidence_insufficient"
     recommended_components = recommendation["components"]
     planner_components = planner["components"]
     quality_delta = float(recommended_components["quality"]) - float(planner_components["quality"])
@@ -79,13 +229,24 @@ def _auto_gate(
         return False, "quality_guardrail"
     if failure_delta > AUTO_MAX_FAILURE_REGRESSION:
         return False, "reliability_guardrail"
-    latency_gain = _relative_reduction(
-        recommendation.get("latency_ms"),
-        planner.get("latency_ms"),
+    # An efficiency gain only counts when both sides actually measured it.
+    latency_measured = (
+        float(recommended_evidence["latency_weight"]) > 0.0
+        and float(planner_evidence["latency_weight"]) > 0.0
     )
-    token_gain = _relative_reduction(
-        recommendation.get("total_tokens"),
-        planner.get("total_tokens"),
+    tokens_measured = (
+        float(recommended_evidence["tokens_weight"]) > 0.0
+        and float(planner_evidence["tokens_weight"]) > 0.0
+    )
+    latency_gain = (
+        _relative_reduction(recommendation.get("latency_ms"), planner.get("latency_ms"))
+        if latency_measured
+        else 0.0
+    )
+    token_gain = (
+        _relative_reduction(recommendation.get("total_tokens"), planner.get("total_tokens"))
+        if tokens_measured
+        else 0.0
     )
     if not (
         quality_delta >= AUTO_MIN_QUALITY_GAIN
@@ -93,6 +254,26 @@ def _auto_gate(
         or token_gain >= AUTO_MIN_EFFICIENCY_GAIN
     ):
         return False, "no_material_gain"
+    sigma_recommended = (
+        (float(weights["quality"]) * float(recommended_evidence["quality_sd"])) ** 2
+        + (float(weights["reliability"]) * float(recommended_evidence["reliability_sd"])) ** 2
+    ) ** 0.5
+    sigma_planner = (
+        (float(weights["quality"]) * float(planner_evidence["quality_sd"])) ** 2
+        + (float(weights["reliability"]) * float(planner_evidence["reliability_sd"])) ** 2
+    ) ** 0.5
+    separation = float(recommendation["score"]) - float(planner["score"])
+    combined = (sigma_recommended**2 + sigma_planner**2) ** 0.5
+    if separation - AUTO_SEPARATION_Z * combined < 0.0:
+        return False, "scores_not_separated"
+    if (
+        max(
+            float(recommended_evidence["prior_weight"]),
+            float(planner_evidence["prior_weight"]),
+        )
+        > 0.0
+    ):
+        return True, "prior_assisted_auto"
     return True, "statistical_auto"
 
 
@@ -111,6 +292,8 @@ def route(
     run_id: str | None = None,
     step_id: str | None = None,
     policy_revision: int = 0,
+    routing_profile: str = "quality_balanced",
+    prior: RoutingPriorSnapshot | None = None,
 ) -> dict[str, Any]:
     if routing_mode not in ROUTING_MODES:
         raise HubV2Error(
@@ -118,6 +301,7 @@ def route(
             "The routing mode is not supported.",
             scope="routing",
         )
+    weights = profile_weights(routing_profile)
     normalized = validate_task(task)
     capability = normalized["capability"]
     allowlist = set(provider_allowlist)
@@ -149,11 +333,17 @@ def route(
             model=model,
         )
         stats = store.routing_statistics(context=context, provider=provider)
+        prior_entry = (
+            prior.lookup(capability=capability, provider=provider, model=model or None)
+            if prior is not None
+            else None
+        )
+        blended = blend_statistics(stats, prior_entry)
         score = (
-            QUALITY_WEIGHT * stats["quality"]
-            + RELIABILITY_WEIGHT * stats["reliability"]
-            + LATENCY_WEIGHT * _efficiency(stats["latency_ms"], target=30_000.0)
-            + TOKEN_WEIGHT * _efficiency(stats["total_tokens"], target=8_000.0)
+            weights["quality"] * blended["quality"]
+            + weights["reliability"] * blended["reliability"]
+            + weights["latency"] * _efficiency(blended["latency_ms"], target=30_000.0)
+            + weights["token_efficiency"] * _efficiency(blended["total_tokens"], target=8_000.0)
         )
         candidates.append(
             {
@@ -166,20 +356,21 @@ def route(
                 "sample_count": stats["sample_count"],
                 "score": round(score, 6),
                 "components": {
-                    "quality": stats["quality"],
-                    "reliability": stats["reliability"],
+                    "quality": blended["quality"],
+                    "reliability": blended["reliability"],
                     "latency_efficiency": _efficiency(
-                        stats["latency_ms"],
+                        blended["latency_ms"],
                         target=30_000.0,
                     ),
                     "token_efficiency": _efficiency(
-                        stats["total_tokens"],
+                        blended["total_tokens"],
                         target=8_000.0,
                     ),
                 },
-                "failure_rate": stats["failure_rate"],
-                "latency_ms": stats["latency_ms"],
-                "total_tokens": stats["total_tokens"],
+                "failure_rate": blended["failure_rate"],
+                "latency_ms": blended["latency_ms"],
+                "total_tokens": blended["total_tokens"],
+                "evidence": blended["evidence"],
             }
         )
     eligible = [item for item in candidates if item["eligible"]]
@@ -240,7 +431,7 @@ def route(
         selected = recommendation
         reason_code = "planner_provider_ineligible"
     elif routing_mode == "auto":
-        promoted, reason_code = _auto_gate(recommendation, planner_candidate)
+        promoted, reason_code = _auto_gate(recommendation, planner_candidate, weights=weights)
         selected = recommendation if promoted else planner_candidate
     else:
         selected = planner_candidate
@@ -249,6 +440,7 @@ def route(
             if routing_mode == "auto"
             else f"{routing_mode}_preserves_planner"
         )
+    evidence = selected["evidence"]
     decision = store.record_routing_decision(
         run_id=run_id,
         step_id=step_id,
@@ -259,17 +451,77 @@ def route(
         scores={item["provider"]: item["score"] for item in candidates if item["eligible"]},
         sample_count=selected["sample_count"],
         policy_revision=policy_revision,
+        reason_code=reason_code,
+        routing_profile=routing_profile,
+        evidence_kind=str(evidence["kind"]),
+        prior_sha256=prior.file_sha256 if prior is not None else None,
+        prior_revision=prior.revision if prior is not None else None,
+        prior_weight_fraction=float(evidence["prior_fraction"]),
     )
     decision.update(
         {
             "recommended_provider": recommendation["provider"],
             "reason_code": reason_code,
-            "weights": {
-                "quality": QUALITY_WEIGHT,
-                "reliability": RELIABILITY_WEIGHT,
-                "latency": LATENCY_WEIGHT,
-                "token_efficiency": TOKEN_WEIGHT,
-            },
+            "routing_profile": routing_profile,
+            "weights": weights,
+            "prior": prior.public() if prior is not None else None,
         }
     )
+    if run_id is not None and prior is not None:
+        _record_prior_event(
+            store,
+            run_id=run_id,
+            step_id=step_id,
+            prior=prior,
+            selected=selected,
+            capability=capability,
+            routing_mode=routing_mode,
+            routing_profile=routing_profile,
+            reason_code=reason_code,
+        )
     return decision
+
+
+def _record_prior_event(
+    store: HubStore,
+    *,
+    run_id: str,
+    step_id: str | None,
+    prior: RoutingPriorSnapshot,
+    selected: Mapping[str, Any],
+    capability: str,
+    routing_mode: str,
+    routing_profile: str,
+    reason_code: str,
+) -> None:
+    """Audit trail for prior-influenced routing. Never breaks the run."""
+
+    if prior.state == "invalid":
+        details: dict[str, Any] = {
+            "step_id": step_id or "",
+            "reason_code": prior.reason_code,
+            "routing_mode": routing_mode,
+            "routing_profile": routing_profile,
+        }
+        event_type = "routing_prior_unavailable"
+    elif reason_code == "prior_assisted_auto":
+        details = {
+            "step_id": step_id or "",
+            "provider": selected["provider"],
+            "model": selected["model"] or "",
+            "capability": capability,
+            "reason_code": reason_code,
+            "routing_mode": routing_mode,
+            "routing_profile": routing_profile,
+            "evidence_kind": selected["evidence"]["kind"],
+            "prior_sha256": prior.file_sha256,
+            "prior_revision": prior.revision,
+            "prior_weight_fraction": selected["evidence"]["prior_fraction"],
+        }
+        event_type = "routing_prior_applied"
+    else:
+        return
+    try:
+        store.record_runtime_event(run_id, event_type=event_type, details=details)
+    except HubV2Error:
+        pass
