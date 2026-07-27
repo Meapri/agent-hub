@@ -14,13 +14,17 @@ from typing import Any, Mapping
 
 from agent_hub import capabilities, consistency, orchestrator, provider_settings
 from agent_hub.core import limits, media
+from agent_hub.core import response as shared_response
 from claude_codex import auth as claude_auth
 from claude_codex import models as claude_models
-from claude_codex import mcp_server as claude_mcp
 from claude_codex import search as claude_search
+from claude_codex import chat as claude_chat
 from claude_codex import security as claude_security
-from google_antigravity_codex import mcp_server as google_mcp
 from google_antigravity_codex import model_prefs as google_model_prefs
+from google_antigravity_codex import chat as google_chat
+from google_antigravity_codex import grounding as google_grounding
+from google_antigravity_codex import image as google_image
+from google_antigravity_codex import models as google_models
 from google_antigravity_codex import paths as google_paths
 from google_antigravity_codex import oauth_login as google_oauth
 from google_antigravity_codex import profiles as google_profiles
@@ -32,12 +36,12 @@ from grok_codex import auth as grok_auth
 from grok_codex import image as grok_image
 from grok_codex import paths as grok_paths
 from grok_codex import models as grok_models
-from grok_codex import mcp_server as grok_mcp
 from grok_codex import search as grok_search
+from grok_codex import chat as grok_chat
 from grok_codex import security as grok_security
 from openai_codex import auth as openai_auth
 from openai_codex import models as openai_models
-from openai_codex import mcp_server as openai_mcp
+from openai_codex import chat as openai_chat
 from openai_codex import security as openai_security
 
 from .contracts import ensure_public_model_id
@@ -107,6 +111,28 @@ def _envelope(
         ),
         "data": payload,
     }
+
+
+def _call_leaf(
+    func: Any,
+    arguments: Mapping[str, Any],
+    *,
+    provider: str,
+    backend: str,
+) -> dict[str, Any]:
+    """Call a provider leaf and report a failure the way the worker expects.
+
+    This translation used to live inside each provider's dispatch_tool, which
+    made the MCP server a dependency of the v2 runtime even though the runtime
+    never speaks MCP. The failure shape itself is load-bearing --
+    provider_worker._raise_failed_payload reads `error_type` off it to classify
+    the failure -- so it moved here rather than disappearing.
+    """
+
+    try:
+        return dict(func(dict(arguments)))
+    except Exception as exc:  # noqa: BLE001 - the payload is the provider contract
+        return shared_response.failure_payload(exc, provider=provider, backend=backend)
 
 
 def _unwrap_mcp_result(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -394,7 +420,12 @@ def catalog(provider: str, *, refresh: bool = False) -> dict[str, Any]:
             listed = openai_models.list_models({"probe": refresh})
         elif provider == "gemini":
             listed = _unwrap_mcp_result(
-                google_mcp.dispatch_tool("google_antigravity_list_models", {})
+                _call_leaf(
+                    google_models.list_models,
+                    {},
+                    provider="google",
+                    backend="antigravity",
+                )
             )
         else:
             raise HubV2Error(
@@ -490,25 +521,37 @@ def chat(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         call_args.pop("reasoning_effort", None)
     call_args = _prepare_multimodal(call_args)
     call_args, provenance = consistency.prepare_provider_call(call_args)
+    basic = {key: value for key, value in call_args.items() if key in _BASIC_CHAT_KEYS}
     if provider == "claude":
-        raw = claude_mcp.dispatch_tool(
-            "claude_codex_chat",
-            {key: value for key, value in call_args.items() if key in _BASIC_CHAT_KEYS},
+        raw = _call_leaf(
+            claude_chat.run_chat,
+            basic,
+            provider="anthropic",
+            backend="anthropic-messages",
         )
     elif provider == "grok":
-        raw = grok_mcp.dispatch_tool(
-            "grok_codex_chat",
-            {key: value for key, value in call_args.items() if key in _BASIC_CHAT_KEYS},
+        raw = _call_leaf(
+            grok_chat.run_chat,
+            basic,
+            provider="xai",
+            backend="xai-chat-completions",
         )
     elif provider == "gpt":
-        raw = openai_mcp.dispatch_tool(
-            "openai_codex_chat",
-            {key: value for key, value in call_args.items() if key in _BASIC_CHAT_KEYS},
+        raw = _call_leaf(
+            openai_chat.run_chat,
+            basic,
+            provider="gpt",
+            backend="official-codex",
         )
     else:
         if call_args.get("reasoning_effort") is not None:
             call_args["thinking_level"] = call_args.pop("reasoning_effort")
-        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_antigravity_chat", call_args))
+        raw = _call_leaf(
+            google_chat.run_chat,
+            call_args,
+            provider="google",
+            backend="antigravity",
+        )
     result = dict(raw)
     existing = result.get("consistency")
     result["consistency"] = {
@@ -528,7 +571,12 @@ def search(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
     elif provider == "grok":
         raw = grok_search.run_search(call_args)
     elif provider == "gemini":
-        raw = _unwrap_mcp_result(google_mcp.dispatch_tool("google_grounded_search", call_args))
+        raw = _call_leaf(
+            google_grounding.run_grounded_search,
+            call_args,
+            provider="google",
+            backend="antigravity-grounding",
+        )
     else:
         raise HubV2Error(
             "unsupported_worker_capability",
@@ -588,8 +636,11 @@ def generate_image(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any
     if provider == "grok":
         raw = grok_image.generate_image(call_args)
     elif provider == "gemini":
-        raw = _unwrap_mcp_result(
-            google_mcp.dispatch_tool("google_antigravity_generate_image", call_args)
+        raw = _call_leaf(
+            google_image.generate_image,
+            call_args,
+            provider="google",
+            backend="antigravity-images",
         )
     else:
         raise HubV2Error(

@@ -328,7 +328,7 @@ def test_leaf_failure_does_not_expose_exception_message(monkeypatch):
 
     assert result["success"] is False
     assert result["error_type"] == "RuntimeError"
-    assert result["text"] == "GPT provider operation failed."
+    assert result["text"] == "The provider operation failed."
     assert "secret-token" not in json.dumps(result)
     assert "/private/path" not in json.dumps(result)
 

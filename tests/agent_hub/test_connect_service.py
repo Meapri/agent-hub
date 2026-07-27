@@ -756,8 +756,12 @@ def test_manager_close_cancels_refresh_before_provider_commit(monkeypatch):
 
     started = manager.start_refresh("grok")
     assert entered.wait(timeout=5)
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
     deadline = time.time() + 5
     while manager.job(started["id"])["state"] != "cancelled" and time.time() < deadline:
         time.sleep(0.01)
@@ -1411,8 +1415,12 @@ def test_duplicate_provider_login_reuses_active_job(monkeypatch):
 
     assert second["id"] == first["id"]
     assert calls["start"] == 1
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
 
 
 def test_manager_close_clears_only_pending_login_it_started(monkeypatch):
@@ -1437,10 +1445,17 @@ def test_manager_close_clears_only_pending_login_it_started(monkeypatch):
     )
 
     manager.start_login("grok")
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
     manager.close()
-    release.set()
 
+    # The second close must not clear a flow again, and -- the defect that made
+    # this test flaky in CI -- the first close must have finished its worker, so
+    # no leftover thread can reach into the next test's monkeypatched module.
     assert cleared == ["flow-grok-close"]
 
 
@@ -1500,8 +1515,12 @@ def test_manager_close_fences_gemini_token_commit(monkeypatch):
     manager.complete_login("gemini", job["id"], "callback-code")
     assert entered.wait(timeout=5)
 
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
 
     deadline = time.time() + 5
     while (
@@ -1568,8 +1587,12 @@ def test_close_during_grok_start_cleans_unregistered_flow(monkeypatch):
     worker = threading.Thread(target=start)
     worker.start()
     assert entered.wait(timeout=5)
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
     worker.join(timeout=5)
 
     assert len(errors) == 1
@@ -1630,8 +1653,12 @@ def test_close_during_gemini_start_closes_callback_and_flow(monkeypatch):
     worker = threading.Thread(target=start)
     worker.start()
     assert entered.wait(timeout=5)
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
     worker.join(timeout=5)
 
     assert len(errors) == 1
@@ -1749,8 +1776,12 @@ def test_close_during_injected_runner_keeps_cancelled_terminal_state(
 
     job = manager.start_login("gpt")
     assert entered.wait(timeout=5)
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
 
     deadline = time.time() + 5
     while manager.job(job["id"])["state"] != "cancelled" and time.time() < deadline:
@@ -2047,8 +2078,12 @@ def test_close_during_gemini_connection_test_keeps_cancelled_state(
 
     started = manager.start_test("gemini")
     assert entered.wait(timeout=1)
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
     time.sleep(0.02)
 
     job = manager.job(started["id"])
@@ -2103,8 +2138,12 @@ def test_provider_rejects_connection_test_while_login_is_active(monkeypatch):
         manager.start_test("grok")
 
     assert error.value.code == "provider_busy"
+    # close() waits for its workers now, so the fixture has to be able to make
+    # progress while it waits. Releasing from a timer keeps the thing under test
+    # -- closing while a worker is mid-flight -- without close() and the worker
+    # waiting on each other.
+    threading.Timer(0.05, release.set).start()
     manager.close()
-    release.set()
 
 
 def test_provider_rejects_disconnect_and_local_removal_while_job_is_active():
@@ -2359,3 +2398,92 @@ def test_login_job_can_only_be_claimed_once_and_terminal_state_is_stable():
     finished = manager.job(job.id)
     assert finished["state"] == "complete"
     assert finished["message"] == "done"
+
+
+def test_close_waits_for_its_workers_rather_than_leaving_them_running(monkeypatch):
+    """The defect: close() returned while workers still touched global state.
+
+    Those threads clear pending OAuth flows and write tokens. A close() that
+    returns early tells the caller the manager is finished when it is not, and
+    the leftover thread goes on mutating process-global credential state --
+    which is how one test's worker reached into the next test's monkeypatched
+    module and made CI flaky.
+    """
+
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
+    entered = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.grok_oauth.start_login",
+        lambda **_kwargs: {
+            "flow_id": "flow-grok-join",
+            "verification_uri": "https://accounts.x.ai/device",
+            "user_code": "ABCD",
+        },
+    )
+
+    def complete_login(**_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+        finished.set()
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.grok_oauth.complete_login",
+        complete_login,
+    )
+
+    manager.start_login("grok")
+    assert entered.wait(timeout=5)
+    threading.Timer(0.05, release.set).start()
+
+    manager.close()
+
+    # The worker ran to completion before close() returned, not after it.
+    assert finished.is_set() is True
+    assert not [thread for thread in manager._workers if thread.is_alive()]  # noqa: SLF001
+
+
+def test_close_gives_up_on_a_worker_that_ignores_cancellation(monkeypatch, caplog):
+    """A worker that will not stop must not make close() hang forever.
+
+    Daemon threads do not hold the process open, so returning is safe -- but a
+    caller who believes close() finished the work has to be told it did not.
+    """
+
+    manager = ConnectionManager(status_reader=_reader({"grok": _state(consent=True)}))
+    entered = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.grok_oauth.start_login",
+        lambda **_kwargs: {
+            "flow_id": "flow-grok-stuck",
+            "verification_uri": "https://accounts.x.ai/device",
+            "user_code": "ABCD",
+        },
+    )
+
+    def never_stops(**_kwargs):
+        entered.set()
+        release.wait(timeout=30)
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "agent_hub.connect_service.grok_oauth.complete_login",
+        never_stops,
+    )
+
+    manager.start_login("grok")
+    assert entered.wait(timeout=5)
+
+    started = time.monotonic()
+    with caplog.at_level("WARNING", logger="agent_hub.connect_service"):
+        manager.close(join_timeout=0.2)
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 2.0, "close() must honour its deadline"
+    assert any("still running" in record.message for record in caplog.records)

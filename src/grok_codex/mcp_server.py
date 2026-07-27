@@ -9,6 +9,7 @@ import sys
 from typing import Any, Callable, Dict, List
 
 from agent_hub.core import limits
+from agent_hub.core import response as shared_response
 
 from . import __version__, auth, chat, models, oauth_login, response, security
 
@@ -259,15 +260,11 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return table[name](arguments or {})
     except Exception as exc:  # noqa: BLE001
-        return {
-            "text": str(exc),
-            "success": False,
-            "error": str(exc),
-            "error_type": getattr(exc, "code", type(exc).__name__),
-            "provider": "xai",
-            "backend": "xai-chat-completions",
-            "warnings": [],
-        }
+        return shared_response.failure_payload(
+            exc,
+            provider="xai",
+            backend="xai-chat-completions",
+        )
 
 
 def handle_request(message: Dict[str, Any]) -> Dict[str, Any] | None:

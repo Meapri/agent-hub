@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import http.server
+import logging
 import os
 import secrets
 import shutil
@@ -58,6 +59,10 @@ _CONSENT_MODULES = {
     "gpt": openai_security,
 }
 
+LOGGER = logging.getLogger(__name__)
+# Long enough for a cancelled request to unwind, short enough that closing the
+# setup GUI never feels hung.
+CLOSE_JOIN_TIMEOUT_SECONDS = 5.0
 MAX_JOBS = 32
 JOB_TTL_SECONDS = 30 * 60
 MAX_MODELS = 150
@@ -259,7 +264,24 @@ class ConnectionManager:
         self._external_processes: Dict[str, subprocess.Popen[str]] = {}
         self._model_catalogs: Dict[str, Dict[str, Any]] = {}
         self._auth_generations: Dict[str, int] = {provider: 0 for provider in AVAILABLE_PROVIDERS}
+        self._workers: set[threading.Thread] = set()
         self._closed = False
+
+    def _spawn(self, target, *args) -> threading.Thread:
+        """Start a background worker and remember it, so close() can wait.
+
+        These threads touch process-global credential state -- clearing a
+        pending OAuth flow, writing a token. A close() that returns while one is
+        still running tells the caller the manager is finished when it is not,
+        and the thread goes on mutating that state afterwards.
+        """
+
+        thread = threading.Thread(target=target, args=args, daemon=True)
+        with self._lock:
+            self._workers = {item for item in self._workers if item.is_alive()}
+            self._workers.add(thread)
+        thread.start()
+        return thread
 
     def egress_reviews(self) -> Dict[str, Any]:
         return self._egress.reviews(use_daemon=self._use_daemon)
@@ -519,11 +541,7 @@ class ConnectionManager:
                 )
                 cancel_event = threading.Event()
                 self._cancel_events[job.id] = cancel_event
-                threading.Thread(
-                    target=self._run_refresh,
-                    args=(job.id, cancel_event),
-                    daemon=True,
-                ).start()
+                self._spawn(self._run_refresh, job.id, cancel_event)
             return job.public()
         finally:
             with self._lock:
@@ -565,11 +583,7 @@ class ConnectionManager:
             job.state = "working"
             job.message = "Google 로그인을 완료하는 중입니다."
             job.updated_at = time.time()
-            threading.Thread(
-                target=self._complete_gemini_code,
-                args=(job_id, value, flow_id, cancel_event),
-                daemon=True,
-            ).start()
+            self._spawn(self._complete_gemini_code, job_id, value, flow_id, cancel_event)
         return self._job(job_id).public()
 
     def start_test(self, provider: str) -> Dict[str, Any]:
@@ -626,11 +640,7 @@ class ConnectionManager:
                         else "모델 목록을 요청해 연결을 확인하는 중입니다."
                     ),
                 )
-                threading.Thread(
-                    target=self._run_test,
-                    args=(job.id, selected_model, auth_generation),
-                    daemon=True,
-                ).start()
+                self._spawn(self._run_test, job.id, selected_model, auth_generation)
             return job.public()
         finally:
             with self._lock:
@@ -845,14 +855,15 @@ class ConnectionManager:
     def job(self, job_id: str) -> Dict[str, Any]:
         return self._job(job_id).public()
 
-    def close(self) -> None:
-        """Stop local helpers without changing completed provider logins."""
+    def close(self, *, join_timeout: float = CLOSE_JOIN_TIMEOUT_SECONDS) -> None:
+        """Stop local helpers and wait for them, without changing completed logins."""
 
         with self._lock:
             self._closed = True
             self._model_catalogs.clear()
             cancel_events = list(self._cancel_events.values())
             callback_servers = list(self._callback_servers.values())
+            workers = [item for item in self._workers if item.is_alive()]
             pending_flows = list(self._owned_pending_flows.items())
             external_processes = list(self._external_processes.values())
             self._external_processes.clear()
@@ -873,6 +884,27 @@ class ConnectionManager:
             self._clear_owned_pending(provider, flow_id)
         for process in external_processes:
             self._terminate_external_process(process)
+        # Cancel events and closed sockets are what let a worker notice it should
+        # stop; joining is what makes "stopped" true rather than requested. The
+        # deadline is shared across all of them, so a hung worker cannot make
+        # close() take N times longer than promised.
+        deadline = time.monotonic() + max(0.0, float(join_timeout))
+        for worker in workers:
+            if worker is threading.current_thread():
+                continue
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        stuck = [worker.name for worker in workers if worker.is_alive()]
+        if stuck:
+            # Daemon threads will not keep the process alive, so this is not
+            # fatal -- but a caller that believes close() finished the work needs
+            # to be told it did not.
+            LOGGER.warning(
+                "connection manager closed with %d worker(s) still running: %s",
+                len(stuck),
+                ", ".join(sorted(stuck)),
+            )
+        with self._lock:
+            self._workers = {item for item in self._workers if item.is_alive()}
 
     def _start_grok_login(self) -> Dict[str, Any]:
         try:
@@ -918,11 +950,7 @@ class ConnectionManager:
                 self._owned_pending_flows["grok"] = flow_id
                 self._cancel_events[job.id] = cancel_event
                 self._job_flows[job.id] = flow_id
-                threading.Thread(
-                    target=self._complete_grok,
-                    args=(job.id, cancel_event, flow_id),
-                    daemon=True,
-                ).start()
+                self._spawn(self._complete_grok, job.id, cancel_event, flow_id)
         except ConnectionError:
             self._clear_pending_flow("grok", flow_id)
             raise
@@ -1165,7 +1193,7 @@ class ConnectionManager:
                 except OSError:
                     pass
 
-        threading.Thread(target=serve_callback, daemon=True).start()
+        self._spawn(serve_callback)
 
     def _complete_gemini_code(
         self,
@@ -1218,11 +1246,7 @@ class ConnectionManager:
                 message=f"{PROVIDER_LOGIN_OWNERS[provider]} 로그인 창을 여는 중입니다.",
                 fallback_command=fallback_command,
             )
-            threading.Thread(
-                target=self._run_external_login,
-                args=(job.id, command),
-                daemon=True,
-            ).start()
+            self._spawn(self._run_external_login, job.id, command)
         return job.public()
 
     def _run_external_login(self, job_id: str, command: list[str]) -> None:

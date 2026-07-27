@@ -323,8 +323,7 @@ def test_runtime_chat_calls_private_provider_adapter(monkeypatch):
     )
     captured = {}
 
-    def dispatch(tool, arguments):
-        captured["tool"] = tool
+    def run_chat(arguments):
         captured["arguments"] = arguments
         return {
             "success": True,
@@ -332,7 +331,10 @@ def test_runtime_chat_calls_private_provider_adapter(monkeypatch):
             "model": "gpt-5.6-sol",
         }
 
-    monkeypatch.setattr(provider_runtime.openai_mcp, "dispatch_tool", dispatch)
+    # The runtime calls the leaf directly now. It never spoke MCP -- it called a
+    # plain function that happened to live in an MCP server module -- so the
+    # boundary this test guards is the adapter, not the protocol.
+    monkeypatch.setattr(provider_runtime.openai_chat, "run_chat", run_chat)
 
     result = provider_runtime.chat(
         "gpt",
@@ -340,7 +342,6 @@ def test_runtime_chat_calls_private_provider_adapter(monkeypatch):
     )
 
     assert result["success"] is True
-    assert captured["tool"] == "openai_codex_chat"
     assert captured["arguments"]["prompt"] == "fixture"
     assert result["data"]["consistency"]["request_sha256"] == "a" * 64
 
