@@ -865,3 +865,80 @@ def test_capability_token_estimate_ignores_steps_that_did_not_complete(tmp_path)
 
     assert estimate["sample_count"] == 3
     assert estimate["median_total_tokens"] == 200
+
+
+def _replan_plan(two_steps=False):
+    steps = [{"id": "one", "capability": "chat", "instruction": "One."}]
+    if two_steps:
+        steps.append(
+            {
+                "id": "two",
+                "capability": "review",
+                "depends_on": ["one"],
+                "instruction": "Two.",
+            }
+        )
+    return validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Fixture.",
+                "capability": "chat",
+                "inline_input": "",
+            },
+            "steps": steps,
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+
+
+def test_replan_preserves_completed_steps_and_replaces_only_pending(tmp_path):
+    # Moved here from the sdk test file when sdk.py was deleted: this covers
+    # store.replace_pending_plan, which is live runtime code, and had nothing to
+    # do with the provider-SDK helpers it was sitting next to.
+    store = HubStore(tmp_path / "state.sqlite3")
+    run = store.create_run(
+        plan=_replan_plan(two_steps=True),
+        project_root=str(tmp_path),
+        idempotency_key="fixture.replan",
+    )
+    claim = store.claim_run(run["run_id"], expected_revision=0)
+    updated = store.update_step(
+        run["run_id"],
+        step_id="one",
+        expected_run_revision=claim.revision,
+        status="completed",
+    )
+    paused = store.finalize_claim(
+        run["run_id"],
+        claim_token=claim.claim_token,
+        expected_revision=updated["revision"],
+        status="paused",
+        event_type="run_paused",
+    )
+    candidate = _replan_plan(two_steps=True)
+    candidate["steps"][1]["instruction"] = "Replacement pending step."
+    candidate.pop("plan_sha256")
+    candidate = validate_plan(candidate)
+
+    replanned = store.replace_pending_plan(
+        run["run_id"],
+        expected_revision=paused["revision"],
+        candidate_plan=candidate,
+        reason_code="deterministic_verification_failed",
+    )
+
+    assert replanned["replan_count"] == 1
+    assert replanned["steps"][0]["status"] == "completed"
+    assert replanned["steps"][1]["status"] == "queued"
+
+    with pytest.raises(HubV2Error) as exhausted:
+        store.replace_pending_plan(
+            run["run_id"],
+            expected_revision=replanned["revision"],
+            candidate_plan=candidate,
+            reason_code="fallback_exhausted",
+        )
+    assert exhausted.value.code == "replan_budget_exhausted"

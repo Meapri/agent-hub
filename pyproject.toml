@@ -31,7 +31,6 @@ agent_hub = [
   "connect_ui/*.html",
   "connect_ui/*.css",
   "connect_ui/*.js",
-  "v2/workflows/*.json",
   "v2/schemas/*.json",
 ]
 
