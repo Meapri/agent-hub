@@ -20,9 +20,12 @@ from agent_hub.core import handoff as handoff_state
 from agent_hub.doctor import run_doctor
 
 from .context import collect_scoped_fact_pack, index_project, search_fact_pack
+from ..core.media import normalize_images
 from .contracts import (
     CAPABILITIES,
     PLAN_SCHEMA,
+    IMAGE_INPUT_CAPABILITIES,
+    MAX_TASK_IMAGE_CHARS,
     TASK_SCHEMA,
     canonical_json,
     ensure_public_model_id,
@@ -71,6 +74,59 @@ _ESTIMATE_CONFIDENCE = (
     "step_ledger_capability",
     "step_ledger_provider",
 )
+
+
+def _resolve_task_images(
+    values: Any,
+    *,
+    project_root: str,
+    policy: Mapping[str, Any],
+) -> list[str]:
+    """Turn caller-supplied image references into data URLs the worker can use.
+
+    This has to happen here, in the daemon, and cannot be pushed down to the
+    worker: the worker runs under a sandbox profile that denies reads anywhere
+    under $HOME outside a small allowlist, so it cannot open the user's file at
+    all. The daemon can, so it reads the bytes and hands down base64 instead of
+    a path.
+
+    Local images are governed by the inline_prompt egress rule rather than
+    repository_content. repository_content guards material the runtime went and
+    gathered on its own; an image named explicitly in the caller's own argument
+    is the same kind of thing as a prompt they typed -- content they chose to
+    send, one file at a time.
+    """
+
+    if not values:
+        return []
+    if str(policy.get("egress", {}).get("inline_prompt")) == "denied":
+        raise HubV2Error(
+            "egress_policy_denied",
+            "Project policy denies sending caller-supplied content to a provider.",
+            scope="policy",
+        )
+    try:
+        normalized = normalize_images(list(values), workspace_root=project_root)
+    except ValueError as exc:
+        # media.py messages name the offending path. Keep the reason, drop the
+        # path: a rejected path is often exactly the thing not to echo back.
+        raise HubV2Error(
+            "invalid_request",
+            "An image input was rejected.",
+            scope="contract",
+            safe_details={"reason": str(exc).split(":", 1)[0][:120]},
+        ) from None
+    urls = [str(item["url"]) for item in normalized]
+    total = sum(len(url) for url in urls)
+    if total > MAX_TASK_IMAGE_CHARS:
+        # One request carries every image, so the batch is what has to fit.
+        raise HubV2Error(
+            "request_too_large",
+            "The task's images exceed the size one provider request can carry.",
+            scope="contract",
+            safe_details={"image_chars": total, "maximum": MAX_TASK_IMAGE_CHARS},
+        )
+    return urls
 
 
 def _structured_text(result: Mapping[str, Any]) -> str:
@@ -362,7 +418,12 @@ class HubService:
                     if requested_limit is not None
                     else project_limit
                 )
-        normalized = validate_task({**task, "constraints": constraints})
+        images = _resolve_task_images(
+            task.get("input_images"),
+            project_root=project_root,
+            policy=policy,
+        )
+        normalized = validate_task({**task, "constraints": constraints, "input_images": images})
         return normalized, policy
 
     @staticmethod
@@ -1438,6 +1499,14 @@ class HubService:
                     "intent": step["instruction"],
                     "capability": step["capability"],
                     "inline_input": dependency_text,
+                    # The run's images belong to the run, so every step that can
+                    # look at them gets them. A step whose capability cannot take
+                    # an image gets none rather than an error it did not cause.
+                    "input_images": (
+                        plan["task"].get("input_images") or []
+                        if step["capability"] in IMAGE_INPUT_CAPABILITIES
+                        else []
+                    ),
                     "constraints": plan["task"]["constraints"],
                     "retention": "ephemeral",
                 }

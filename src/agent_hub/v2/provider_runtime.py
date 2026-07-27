@@ -578,7 +578,9 @@ def invoke(
     capability: str,
     arguments: Mapping[str, Any],
 ) -> dict[str, Any]:
-    if capability in {"chat", "review", "decide"}:
+    # vision is chat with the image as the subject. _prepare_multimodal turns
+    # the data URLs into whatever message shape this provider wants.
+    if capability in {"chat", "review", "decide", "vision"}:
         return chat(provider, arguments)
     if capability == "search":
         return search(provider, arguments)
