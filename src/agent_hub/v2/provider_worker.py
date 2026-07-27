@@ -57,12 +57,19 @@ def _raise_failed_payload(result: Mapping[str, Any]) -> None:
         if candidate and candidate.replace("_", "").replace("-", "").isalnum()
         else UNCLASSIFIED_PROVIDER_FAILURE
     )
+    details: dict[str, Any] = {"reason_code": code}
+    if code == UNCLASSIFIED_PROVIDER_FAILURE:
+        # "The provider failed and would not say why" is a dead end to debug:
+        # for agent_hub_execute there is no run, so no event carries anything
+        # else. The payload's key names say which adapter path produced it
+        # without carrying any of its content.
+        details["payload_keys"] = sorted(str(key)[:32] for key in list(result)[:16])
     raise HubV2Error(
         code,
         "The provider could not complete the requested operation.",
         scope="provider",
         retryable=is_retryable(code),
-        safe_details={"reason_code": code},
+        safe_details=details,
     )
 
 

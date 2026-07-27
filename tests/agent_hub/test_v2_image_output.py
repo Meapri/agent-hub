@@ -296,3 +296,51 @@ def test_verifying_a_binary_artifact_checks_the_digest_not_the_encoding(tmp_path
     )
 
     assert verified["success"] is True
+
+
+def test_image_generation_is_not_handed_the_providers_chat_model():
+    """The defect a real gemini call hit.
+
+    A provider reports one default_model and it is a text model. Handing it to
+    image generation asks a chat model to draw: gemini answered
+    "Unsupported Google Antigravity image model 'gemini-3.6-flash-high'", which
+    surfaced to the caller as a bare ValueError. The runtime only ever tracks
+    text_models from the catalog, so it has no image default to substitute --
+    saying nothing lets the adapter use the one it knows.
+    """
+
+    states = {"gemini": {"default_model": "gemini-3.6-flash-high"}}
+
+    for capability in ("chat", "review", "vision", "write"):
+        chosen = HubService._routing_models(
+            ["gemini"],
+            states,
+            planner_provider="gemini",
+            requested_model=None,
+            capability=capability,
+        )
+        assert chosen["gemini"] == "gemini-3.6-flash-high", capability
+
+    drawing = HubService._routing_models(
+        ["gemini"],
+        states,
+        planner_provider="gemini",
+        requested_model=None,
+        capability="image",
+    )
+
+    assert drawing["gemini"] == ""
+
+
+def test_an_explicitly_requested_image_model_is_still_honoured():
+    # The caller named it. If it is wrong for the capability, that error is
+    # theirs to see rather than ours to override.
+    chosen = HubService._routing_models(
+        ["gemini"],
+        {"gemini": {"default_model": "gemini-3.6-flash-high"}},
+        planner_provider="gemini",
+        requested_model="gemini-3.1-flash-image",
+        capability="image",
+    )
+
+    assert chosen["gemini"] == "gemini-3.1-flash-image"
