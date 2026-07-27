@@ -211,6 +211,69 @@ def _live_gpt_check(
     )
 
 
+def _bridge_matches_runtime_check(repo_root: Path) -> DoctorCheck:
+    """Is the configured bridge the same install as the process answering this?
+
+    _local_config_check asks whether the config is self-consistent -- it points
+    at a file, and that file exists. It cannot notice that the file belongs to a
+    different release than the daemon, because it takes the configured command
+    as its input and checks it against itself.
+
+    That gap is not theoretical. `agent-hub update` switches the LaunchAgent to a
+    new daemon and leaves the bridge path alone, so after an update the two are
+    routinely different releases until `agent-hub setup --runtime-root` runs.
+    The tool list is now served by the daemon, so discovery survives that; what
+    does not survive is everything else baked into the bridge, such as its
+    per-tool call timeouts.
+
+    This check runs inside the daemon, so sys.prefix is the daemon's own runtime.
+    """
+
+    configured = _configured_hub_command(repo_root)
+    if configured is None:
+        return DoctorCheck(
+            "bridge_runtime",
+            "warn",
+            "No machine-local bridge is configured, so it cannot be compared to this daemon.",
+        )
+    runtime_root = Path(sys.prefix).resolve()
+    if runtime_root.parent.name != "releases":
+        # A development checkout is not a staged release, and its venv has no
+        # reason to match the installed bridge. Comparing them would report a
+        # mismatch on every developer machine, which is how a check earns its
+        # way into being ignored.
+        return DoctorCheck(
+            "bridge_runtime",
+            "pass",
+            "This process is not a staged release, so it was not compared to the bridge.",
+            {"runtime_root": str(runtime_root)},
+        )
+    try:
+        bridge_root = configured.resolve().parent.parent
+    except OSError:
+        return DoctorCheck(
+            "bridge_runtime",
+            "warn",
+            "The configured bridge path could not be resolved.",
+        )
+    if bridge_root == runtime_root:
+        return DoctorCheck(
+            "bridge_runtime",
+            "pass",
+            "The configured bridge and this daemon are the same install.",
+            {"runtime_root": str(runtime_root)},
+        )
+    return DoctorCheck(
+        "bridge_runtime",
+        "warn",
+        (
+            "The configured bridge belongs to a different release than the running "
+            "daemon; run `agent-hub setup --runtime-root` to align them."
+        ),
+        {"bridge_root": str(bridge_root), "daemon_root": str(runtime_root)},
+    )
+
+
 def run_doctor(
     repo_root: str | os.PathLike[str],
     *,
@@ -251,6 +314,7 @@ def run_doctor(
         _package_check(find_spec),
         _local_config_check(root),
         _hub_executable_check(root),
+        _bridge_matches_runtime_check(root),
         _command_check(
             "codex",
             which=which,

@@ -44,7 +44,7 @@ def test_doctor_healthy_path_is_read_only_and_does_not_call_live_status(
     )
 
     assert result["success"] is True
-    assert result["summary"] == {"pass": 6, "warn": 0, "fail": 0}
+    assert result["summary"] == {"pass": 7, "warn": 0, "fail": 0}
     assert all(item["id"] != "gpt_live" for item in result["checks"])
     after = {path: (root / path).stat().st_mtime_ns for path in local_setup.CONFIG_PATHS}
     assert after == before

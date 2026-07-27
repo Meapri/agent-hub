@@ -904,4 +904,19 @@ def apply_switch(
             ),
         },
         "rollback_available": rollback_available,
+        # Switching the daemon does not move the machine-local bridge, which is
+        # a separate install with its own console script. The bridge asks the
+        # daemon for its tool list, so discovery stays correct across the gap --
+        # but the two are still different releases until this runs, and the
+        # bridge's own behaviour (its per-tool call timeouts) is its own.
+        "next_action": {
+            "type": "run_command",
+            "command": [
+                "agent-hub",
+                "setup",
+                "--runtime-root",
+                str(Path(proposal["proposed_executable"]).parent.parent),
+            ],
+            "reason_code": "bridge_not_switched_by_update",
+        },
     }

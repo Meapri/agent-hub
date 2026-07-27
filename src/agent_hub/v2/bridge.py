@@ -45,6 +45,38 @@ def _mcp_result(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_list(client: HubDaemonClient) -> list[dict[str, Any]]:
+    """Ask the running daemon what its tools are, rather than answering locally.
+
+    The bridge and the daemon are separate installs that can be different
+    releases: switching the daemon does not move the bridge, so a bridge
+    answering from its own copy describes a version that is not executing.
+    That is not hypothetical -- on the 2.4.1 to 3.0.0 switch the daemon accepted
+    task.input_images and artifact include_base64 while the tool list, served by
+    the older bridge, never mentioned either. A caller reading the list is
+    reading the only documentation it has.
+
+    tools/call is already forwarded to the daemon untouched, so the daemon has
+    always been the thing that decides what a call does. This makes it decide
+    what a call *is* as well.
+
+    The local copy is used only when the daemon cannot be reached. Every call
+    would fail with daemon_unavailable in that state anyway, so the list is a
+    description of what will exist once it is up, not a promise about now.
+    """
+
+    try:
+        payload = client.request("tools/list", timeout=DEFAULT_DAEMON_CALL_TIMEOUT_SECONDS)
+    except HubV2Error:
+        return tool_definitions()
+    data = payload.get("data") if isinstance(payload, Mapping) else None
+    tools = data.get("tools") if isinstance(data, Mapping) else None
+    if not isinstance(tools, list) or not tools:
+        # A daemon that answers without tools is malfunctioning, not empty.
+        return tool_definitions()
+    return [dict(item) for item in tools if isinstance(item, Mapping)]
+
+
 def handle_request(
     message: Mapping[str, Any],
     *,
@@ -71,7 +103,7 @@ def handle_request(
             }
         result = {}
     elif method == "tools/list":
-        result = {"tools": tool_definitions()}
+        result = {"tools": _tool_list(client)}
     elif method == "tools/call":
         params = message.get("params")
         if not isinstance(params, Mapping):
