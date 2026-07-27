@@ -62,13 +62,19 @@ def resolve_auth() -> Dict[str, Any]:
             "api_key": key,
             "source": API_KEY_ENV if os.getenv(API_KEY_ENV) else str(api_key_path()),
         }
-    # last resort: subscription even if prefer was api_key
+    # Last resort: subscription even though api_key was asked for. Serving the
+    # request beats failing it, but the caller asked for one lane and is getting
+    # another -- and the two lanes differ in what they are billed against and
+    # which headers go out -- so the substitution has to be visible rather than
+    # inferred later from a bill.
     sub = subscription_auth.resolve_access_token()
     if sub and sub.get("access_token"):
         return {
             "mode": "subscription_oauth",
             "access_token": sub["access_token"],
             "source": sub.get("source"),
+            "requested_mode": "api_key",
+            "lane_substituted": True,
         }
     raise RuntimeError(
         "No Anthropic credentials. For subscription: run `claude auth login --claudeai` "
@@ -110,16 +116,24 @@ def status() -> Dict[str, Any]:
         else None
     )
     key_context = _api_key_context(key)
+    preferred = "subscription_oauth" if prefer_subscription() else "api_key"
     active = (
         subscription_context or key_context
         if prefer_subscription()
         else key_context or subscription_context
     )
+    # Reporting the substituted lane as though it were the chosen one is how a
+    # user discovers the swap from a bill instead of from the tool.
+    lane_substituted = bool(active) and active.get("mode") != preferred
     credentials_present = bool(sub.get("logged_in") or key)
     ready = active is not None
     return {
         "text": (
-            f"Auth ready ({active.get('mode')})."
+            (
+                f"Auth ready ({active.get('mode')})."
+                if not lane_substituted
+                else f"Auth ready ({active.get('mode')}), not the requested {preferred}."
+            )
             if active
             else "Credentials are present but require an explicit refresh."
             if credentials_present
@@ -127,6 +141,8 @@ def status() -> Dict[str, Any]:
         ),
         "configured": credentials_present,
         "ready": ready,
+        "requested_mode": preferred,
+        "lane_substituted": lane_substituted,
         "credentials_present": credentials_present,
         "active_mode": (active or {}).get("mode"),
         "active_source": (active or {}).get("source"),

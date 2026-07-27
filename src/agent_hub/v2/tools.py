@@ -280,6 +280,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     },
                     "artifact_id": text,
                     "include_text": boolean,
+                    "include_base64": boolean,
                     "project_root": text,
                     "destination": text,
                     "proposal": {"type": "object"},
