@@ -7,6 +7,7 @@ import sys
 from typing import Any, Callable, Dict, List
 
 from agent_hub.core import limits
+from agent_hub.core import response as shared_response
 
 from . import __version__, auth, chat, models, response, security
 
@@ -260,16 +261,7 @@ def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return table[name](arguments or {})
     except Exception as exc:  # noqa: BLE001
-        failure = _safe_failure(exc)
-        return {
-            "text": failure["message"],
-            "success": False,
-            "error": failure["code"],
-            "error_type": failure["code"],
-            "provider": "gpt",
-            "backend": "official-codex",
-            "warnings": [],
-        }
+        return shared_response.failure_payload(exc, provider="gpt", backend="official-codex")
 
 
 def handle_request(message: Dict[str, Any]) -> Dict[str, Any] | None:
