@@ -12,6 +12,7 @@ import hashlib
 import http.server
 import logging
 import os
+from pathlib import Path
 import secrets
 import shutil
 import signal
@@ -21,6 +22,7 @@ import time
 from typing import Any, Callable, Collection, Dict, Mapping
 import urllib.parse
 
+from agent_hub.v2.store import DEFAULT_STATE_DIR
 from claude_codex import security as claude_security
 from claude_codex import models as claude_models
 from claude_codex import subscription_auth as claude_subscription
@@ -63,6 +65,22 @@ LOGGER = logging.getLogger(__name__)
 # Long enough for a cancelled request to unwind, short enough that closing the
 # setup GUI never feels hung.
 CLOSE_JOIN_TIMEOUT_SECONDS = 5.0
+CONNECTION_TEST_SCOPE = DEFAULT_STATE_DIR
+
+
+def _connection_test_scope() -> Path:
+    """The scope a connection test runs under, created if this is a fresh machine.
+
+    canonical_project_root resolves strictly, so a path that does not exist is
+    rejected exactly like the missing argument this replaced. On a machine that
+    has never started the daemon the state root is absent, so asking for it is
+    not enough -- it has to be made.
+    """
+
+    CONNECTION_TEST_SCOPE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return CONNECTION_TEST_SCOPE
+
+
 MAX_JOBS = 32
 JOB_TTL_SECONDS = 30 * 60
 MAX_MODELS = 150
@@ -1487,6 +1505,12 @@ class ConnectionManager:
                 {
                     "provider": provider,
                     "model": selected_model,
+                    # A connection test asks whether this machine's account can
+                    # reach the provider, not whether some project permits it.
+                    # The machine-global state root carries default policy, so a
+                    # project that denies a provider cannot make its account
+                    # look broken.
+                    "project_root": str(_connection_test_scope()),
                     "task": {
                         "schema": TASK_SCHEMA,
                         "intent": "Return a short connection acknowledgement.",
