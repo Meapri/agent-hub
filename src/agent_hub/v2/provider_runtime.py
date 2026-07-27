@@ -249,10 +249,16 @@ def status(provider: str, *, probe: bool = False) -> dict[str, Any]:
             "authenticated": authenticated,
             "ready": bool(consent.get("user_consent") and authenticated),
             "auth_mode": auth.get("active_mode"),
+            "requested_auth_mode": auth.get("requested_mode"),
             **lifecycle,
             **model_state,
             "capabilities": capabilities.provider_capabilities("claude"),
-            "warnings": _auth_warnings(authenticated, lifecycle),
+            "warnings": [
+                *_auth_warnings(authenticated, lifecycle),
+                # Two lanes bill differently and send different headers, so a
+                # substitution is a fact about this run, not a detail.
+                *(["auth_lane_substituted"] if auth.get("lane_substituted") else []),
+            ],
         }
     elif provider == "grok":
         consent = grok_security.consent_status()
