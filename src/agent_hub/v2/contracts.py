@@ -17,7 +17,6 @@ RUN_SCHEMA = "run_v3"
 EVENT_SCHEMA = "event_v2"
 ARTIFACT_SCHEMA = "artifact_v2"
 PROVIDER_MANIFEST_SCHEMA = "agent_hub_provider_v2"
-ROUTING_DECISION_SCHEMA = "routing_decision_v1"
 EGRESS_MANIFEST_SCHEMA = "egress_manifest_v2"
 RECONCILIATION_SCHEMA = "agent_hub_run_reconciliation_v1"
 MAX_RECONCILED_RESULT_CHARS = 200_000
@@ -51,8 +50,12 @@ RUN_STATUSES = frozenset(
         "outcome_unknown",
     }
 )
+# What the plan is allowed to do about its provider, not how one is scored.
+#   pinned   use the named provider or fail
+#   shadow   prefer the named provider, fall through if it is ineligible
+#   advisory same as shadow; kept so already-issued plans still validate
+#   auto     shadow, plus permission to replan itself once
 ROUTING_MODES = frozenset({"pinned", "shadow", "advisory", "auto"})
-ROUTING_PROFILES = frozenset({"quality_balanced", "latency_first", "cost_first"})
 # Only not_delivered can cause an external request to be sent again.
 RECONCILIATION_VERDICTS = frozenset({"not_delivered", "delivered_discarded", "delivered_recovered"})
 RECONCILIATION_DISPOSITIONS = frozenset({"resume", "fail"})

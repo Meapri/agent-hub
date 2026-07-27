@@ -231,8 +231,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "action": {"enum": ["get", "prepare_update", "apply_update"]},
                     "project_root": text,
                     "target": {
-                        "enum": ["policy", "routing_prior"],
-                        "description": "Defaults to the project policy. 'routing_prior' edits the user-global routing prior, whose entries stay inactive until their source moves away from 'unset'.",
+                        "enum": ["policy"],
+                        "description": "Only the project policy is editable.",
                     },
                     "patch": {"type": "object"},
                     "expected_revision": integer,

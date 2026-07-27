@@ -25,7 +25,6 @@ from .contracts import (
     PLAN_SCHEMA,
     TASK_SCHEMA,
     canonical_json,
-    canonical_project_root,
     ensure_public_model_id,
     estimate_tokens_from_text,
     input_token_limit,
@@ -52,14 +51,8 @@ from .policy import (
     prepare_policy_update,
 )
 from .provider_client import ProviderWorkerClient
+from .provider_selection import select_provider
 from .provider_manifests import builtin_provider_manifests, manifest_for, model_input_limit
-from .routing import route, routing_context
-from .routing_prior import (
-    apply_routing_prior_update,
-    load_routing_prior,
-    prepare_routing_prior_update,
-    safe_load_routing_prior,
-)
 from .store import HubStore
 from .tools import TOOL_NAMES, tool_definitions
 from .verifier import verify_output
@@ -75,8 +68,8 @@ TOKEN_ESTIMATE_MIN_SAMPLES = 3
 _ESTIMATE_CONFIDENCE = (
     "default",
     "run_history",
-    "routing_samples_capability",
-    "routing_samples_provider",
+    "step_ledger_capability",
+    "step_ledger_provider",
 )
 
 
@@ -719,11 +712,10 @@ class HubService:
             planner_provider=planner_provider,
             requested_model=str(arguments.get("model") or "") or None,
         )
-        decision = route(
-            store=self.store,
+        decision = select_provider(
             task=task,
             planner_provider=planner_provider,
-            routing_mode="pinned" if explicit else "shadow",
+            pinned=bool(explicit),
             provider_allowlist=allowed,
             readiness=readiness,
             circuit_open={
@@ -733,8 +725,6 @@ class HubService:
             models=models,
             model_limits=self._routing_model_limits(models),
             estimated_input_tokens=base_context_budget["estimated_input_tokens"],
-            routing_profile=execute_policy["routing_profile"],
-            prior=safe_load_routing_prior(),
         )
         provider = decision["selected_provider"]
         selected_model = models.get(provider) or None
@@ -1489,50 +1479,34 @@ class HubService:
                 planner_provider=planner_provider,
                 requested_model=requested_model,
             )
-            decision = route(
-                store=self.store,
+            decision = select_provider(
                 task=task,
                 planner_provider=planner_provider,
-                routing_mode=plan["routing_mode"],
+                # A plan that named its provider means it, the same way an
+                # explicit provider argument to execute does.
+                pinned=plan["routing_mode"] == "pinned",
                 provider_allowlist=routing_allowlist,
                 readiness=readiness,
                 circuit_open={
                     provider_id: self.store.provider_health(provider_id)["circuit_open"]
                     for provider_id in routing_allowlist
                 },
-                run_id=run_id,
-                step_id=step["id"],
-                policy_revision=plan["policy_revision"],
                 models=models,
                 model_limits=self._routing_model_limits(models),
                 estimated_input_tokens=base_context_budget["estimated_input_tokens"],
-                # Read from policy rather than the plan: adding a field to the plan
-                # would change digest_json and invalidate every issued plan_sha256.
-                routing_profile=load_policy(str(run["project_root"])).policy["routing_profile"],
-                prior=safe_load_routing_prior(),
             )
             eligible = {
                 str(item["provider"]) for item in decision["candidates"] if item["eligible"]
             }
             if routing_requirements.get("fallbacks") is not None:
+                # The plan declared the chain, so it decides the order.
                 provider_order = [
                     item
                     for item in dict.fromkeys([decision["selected_provider"], *declared_chain])
                     if item in eligible
                 ]
             else:
-                provider_order = [decision["selected_provider"]] + [
-                    item["provider"]
-                    for item in sorted(
-                        (
-                            item
-                            for item in decision["candidates"]
-                            if item["eligible"]
-                            and item["provider"] != decision["selected_provider"]
-                        ),
-                        key=lambda item: (-item["score"], item["provider"]),
-                    )
-                ]
+                provider_order = [decision["selected_provider"], *decision["fallbacks"]]
             result = None
             provider = provider_order[0]
             last_error: HubV2Error | None = None
@@ -1648,7 +1622,7 @@ class HubService:
                     )
             media_type = "text/plain; charset=utf-8"
             checkpoint = {
-                "routing_decision_id": decision["decision_id"],
+                "provider_selection_reason": decision["reason_code"],
                 "context_source_artifacts": dependency_stats["source_artifact_count"],
                 "context_segments": dependency_stats["context_segment_count"],
                 "context_duplicate_artifacts": dependency_stats["duplicate_artifact_count"],
@@ -1664,11 +1638,6 @@ class HubService:
                 "context_token_budget": context_budget["token_budget"],
                 "context_model_max_input_tokens": context_budget["model_max_input_tokens"],
                 "context_effective_input_limit": context_budget["effective_input_limit"],
-                # Persist the exact routing bucket this step scored against.
-                # agent_hub_feedback must record its sample into the same bucket;
-                # rebuilding it from the run-level task lands somewhere route()
-                # never queries, which silently discards every human rating.
-                "routing_context": routing_context(task, model=model),
             }
         aad = f"agent-hub-v2-step:{step['id']}".encode("utf-8")
         if provider != "local":
@@ -1686,17 +1655,6 @@ class HubService:
             verification = verify_output(text, step.get("verifier"))
         except HubV2Error as exc:
             if provider != "local":
-                self.store.record_routing_sample(
-                    context=routing_context(task, model=model),
-                    provider=provider,
-                    model=model,
-                    capability=step["capability"],
-                    success=False,
-                    quality=0.0,
-                    latency_ms=int((time.monotonic() - started) * 1000),
-                    total_tokens=None,
-                    signal_weight=3.0,
-                )
                 # Carry the spend out with the error so the wave can still bill it.
                 exc.safe_details = {
                     **dict(exc.safe_details or {}),
@@ -1729,28 +1687,6 @@ class HubService:
             usage = safe_usage(result.get("usage"))
             if usage:
                 checkpoint["usage"] = usage
-        if provider != "local":
-            # Purely estimated numbers would pollute the routing efficiency score.
-            total_tokens = (
-                token_usage["total_tokens"]
-                if token_usage["source"] in {"reported", "mixed"}
-                else None
-            )
-            self.store.record_routing_sample(
-                context=routing_context(task, model=model),
-                provider=provider,
-                model=model,
-                capability=step["capability"],
-                success=True,
-                quality=(
-                    1.0
-                    if (step.get("verifier") or {}).get("type") in {"json", "contains", "sha256"}
-                    else None
-                ),
-                latency_ms=checkpoint["elapsed_ms"],
-                total_tokens=total_tokens,
-                signal_weight=3.0,
-            )
         return {
             "step_id": step["id"],
             "provider": provider,
@@ -2675,59 +2611,18 @@ class HubService:
             outcome=str(arguments.get("outcome") or ""),
             rating=arguments.get("rating"),
         )
-        if step_id:
-            run = self.store.get_run(run_id)
-            step = next(
-                (item for item in run["steps"] if item["step_id"] == step_id),
-                None,
-            )
-            plan = self.store.get_plan(run_id)
-            if step and step.get("provider"):
-                rating = arguments.get("rating")
-                outcome = str(arguments.get("outcome") or "")
-                quality = (
-                    (int(rating) - 1) / 4
-                    if rating is not None
-                    else {"accepted": 1.0, "partial": 0.5, "rejected": 0.0}.get(outcome)
-                )
-                # Reuse the bucket the step actually scored against. The run-level
-                # task has a different capability, intent and input size, so
-                # rebuilding the context here would file the rating under a key
-                # route() never reads.
-                recorded_context = step["checkpoint"].get("routing_context")
-                context = (
-                    dict(recorded_context)
-                    if isinstance(recorded_context, Mapping)
-                    else routing_context(plan["task"], model=step.get("model"))
-                )
-                self.store.record_routing_sample(
-                    context=context,
-                    provider=step["provider"],
-                    model=step.get("model"),
-                    capability=step["capability"],
-                    success=outcome not in {"rejected", "failed"},
-                    quality=quality,
-                    latency_ms=step["checkpoint"].get("elapsed_ms"),
-                    total_tokens=None,
-                    signal_weight=feedback["signal_weight"],
-                )
         return feedback
 
     def _tool_policy(self, arguments: dict[str, Any]) -> dict[str, Any]:
         action = str(arguments.get("action") or "")
         project_root = str(arguments.get("project_root") or "")
         target = str(arguments.get("target") or "policy")
-        if target not in {"policy", "routing_prior"}:
+        if target != "policy":
             raise HubV2Error(
                 "invalid_request",
                 "policy target is not supported.",
                 scope="policy",
             )
-        if target == "routing_prior":
-            # The prior is user-global, so project_root is validated but not used
-            # as part of its identity.
-            canonical_project_root(project_root)
-            return self._routing_prior_action(action, arguments)
         if action == "get":
             return load_policy(project_root).public()
         if action == "prepare_update":
@@ -2756,43 +2651,6 @@ class HubService:
                 )
             return apply_policy_update(
                 project_root,
-                proposal=proposal,
-                proposal_sha256=str(arguments.get("proposal_sha256") or ""),
-            ).public()
-        raise HubV2Error(
-            "invalid_request",
-            "policy action is not supported.",
-            scope="policy",
-        )
-
-    @staticmethod
-    def _routing_prior_action(action: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        if action == "get":
-            return load_routing_prior().public()
-        if action == "prepare_update":
-            patch = arguments.get("patch")
-            if not isinstance(patch, Mapping):
-                raise HubV2Error(
-                    "invalid_request",
-                    "routing prior patch must be an object.",
-                    scope="routing",
-                )
-            return prepare_routing_prior_update(
-                patch=patch,
-                expected_revision=require_non_negative_int(
-                    arguments.get("expected_revision"),
-                    field="expected_revision",
-                ),
-            )
-        if action == "apply_update":
-            proposal = arguments.get("proposal")
-            if not isinstance(proposal, Mapping):
-                raise HubV2Error(
-                    "invalid_request",
-                    "routing prior proposal must be an object.",
-                    scope="routing",
-                )
-            return apply_routing_prior_update(
                 proposal=proposal,
                 proposal_sha256=str(arguments.get("proposal_sha256") or ""),
             ).public()
@@ -3031,29 +2889,9 @@ class HubService:
             live=bool(arguments.get("live", False)),
         )
         store_health = self.store.health()
-        prior_snapshot = safe_load_routing_prior()
-        prior_public = prior_snapshot.public()
-        if prior_snapshot.state == "invalid":
-            prior_status = "fail"
-        elif prior_snapshot.stale or prior_public["active_entry_count"] == 0:
-            prior_status = "warn"
-        else:
-            prior_status = "pass"
         repair = str(arguments.get("repair") or "none")
         repair_plan = []
         if repair == "prepare":
-            if prior_status != "pass":
-                repair_plan.append(
-                    {
-                        "action": "review_routing_prior",
-                        "automatic": False,
-                        "reason_code": (
-                            prior_snapshot.reason_code
-                            if prior_snapshot.state == "invalid"
-                            else ("prior_stale" if prior_snapshot.stale else "prior_inactive")
-                        ),
-                    }
-                )
             if not store_health["ok"]:
                 repair_plan.append(
                     {
@@ -3075,7 +2913,6 @@ class HubService:
             "schema": "agent_hub_doctor_v2",
             "store": store_health,
             "host_checks": host_checks,
-            "routing_prior": {**prior_public, "status": prior_status},
             "repair_plan": repair_plan,
             "read_only": True,
         }

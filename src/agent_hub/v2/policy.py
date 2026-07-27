@@ -13,7 +13,6 @@ from typing import Any, Mapping
 
 from .contracts import (
     ROUTING_MODES,
-    ROUTING_PROFILES,
     canonical_project_root,
     require_non_negative_int,
 )
@@ -27,7 +26,6 @@ MAX_POLICY_BYTES = 256 * 1024
 DEFAULT_POLICY: dict[str, Any] = {
     "schema": POLICY_SCHEMA,
     "revision": 0,
-    "routing_profile": "quality_balanced",
     "routing_mode": "shadow",
     "provider_allowlist": ["claude", "grok", "gemini", "gpt"],
     "model_allowlist": [],
@@ -118,14 +116,6 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
             "The routing mode is not supported.",
             scope="policy",
         )
-    routing_profile = str(raw.get("routing_profile") or "quality_balanced")
-    if routing_profile not in ROUTING_PROFILES:
-        raise HubV2Error(
-            "invalid_policy",
-            "The routing profile is not supported.",
-            scope="policy",
-            safe_details={"routing_profile": routing_profile[:64]},
-        )
     providers = raw.get("provider_allowlist", DEFAULT_POLICY["provider_allowlist"])
     models = raw.get("model_allowlist", [])
     if not isinstance(providers, list) or not all(isinstance(item, str) for item in providers):
@@ -182,7 +172,6 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
     normalized = {
         "schema": POLICY_SCHEMA,
         "revision": revision,
-        "routing_profile": routing_profile,
         "routing_mode": routing_mode,
         "provider_allowlist": list(dict.fromkeys(providers)),
         "model_allowlist": list(dict.fromkeys(models)),
@@ -244,7 +233,6 @@ def render_policy(policy: Mapping[str, Any]) -> bytes:
     lines = [
         f"schema = {_toml_string(value['schema'])}",
         f"revision = {value['revision']}",
-        f"routing_profile = {_toml_string(value['routing_profile'])}",
         f"routing_mode = {_toml_string(value['routing_mode'])}",
         f"provider_allowlist = {_toml_array(value['provider_allowlist'])}",
         f"model_allowlist = {_toml_array(value['model_allowlist'])}",

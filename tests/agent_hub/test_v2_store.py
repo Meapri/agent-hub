@@ -318,7 +318,6 @@ def test_store_schema_is_backed_up_and_drops_retired_import_table(tmp_path):
         )
         connection.execute("DROP TABLE artifact_exports")
         connection.execute("DROP TABLE provenance_edges")
-        connection.execute("DROP TABLE routing_daily_aggregates")
         connection.commit()
     finally:
         connection.close()

@@ -73,22 +73,6 @@ REQUIRED_SCHEMA_COLUMNS: dict[str, set[str]] = {
         "recorded_at",
         "error_code",
     },
-    "routing_decisions": {
-        "decision_id",
-        "routing_mode",
-        "selected_provider",
-        "planner_provider",
-        "candidates_json",
-        "score_json",
-        "sample_count",
-        "policy_revision",
-        "reason_code",
-        "routing_profile",
-        "evidence_kind",
-        "prior_sha256",
-        "prior_revision",
-        "prior_weight_fraction",
-    },
     "handoff_snapshots": {
         "snapshot_id",
         "scope_identity",
@@ -204,21 +188,6 @@ _PREDICATES: tuple[tuple[str, str], ...] = (
         """
         SELECT metric_id FROM operation_metrics
         WHERE success = 1 AND error_code IS NOT NULL
-        """,
-    ),
-    (
-        "feedback_samples_share_a_bucket_with_execution",
-        # A rating filed under a context key the router never reads is silently
-        # discarded. Stated generally: no sample may sit in a bucket that holds
-        # nothing else, when execution samples exist at all.
-        """
-        SELECT f.sample_id FROM routing_samples f
-        WHERE f.signal_weight > 3.0
-          AND EXISTS (SELECT 1 FROM routing_samples WHERE signal_weight <= 3.0)
-          AND NOT EXISTS (
-              SELECT 1 FROM routing_samples e
-              WHERE e.signal_weight <= 3.0 AND e.context_sha256 = f.context_sha256
-          )
         """,
     ),
     (

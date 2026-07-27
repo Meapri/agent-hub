@@ -101,7 +101,6 @@ def plan_repair(state_db: str | Path) -> dict[str, Any]:
     elif integrity == "ok":
         actions.extend(
             [
-                {"type": "aggregate_routing_history"},
                 {"type": "prune_expired_artifacts"},
             ]
         )
@@ -190,9 +189,6 @@ def apply_repair(
             shutil.copy2(backup, path)
             os.chmod(path, 0o600)
             results.append({"type": action_type, "restored": True})
-        elif action_type == "aggregate_routing_history":
-            deleted = HubStore(path).prune_routing_details()
-            results.append({"type": action_type, "detail_rows_aggregated": deleted})
         elif action_type == "prune_expired_artifacts":
             results.append({"type": action_type, **HubStore(path).prune_expired_artifacts()})
         else:
