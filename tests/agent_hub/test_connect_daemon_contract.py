@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from agent_hub import connect_service
 from agent_hub.connect_service import CONNECTION_TEST_SCOPE, ConnectionManager
 from agent_hub.v2.crypto import ArtifactCipher, StaticKeyProvider
 from agent_hub.v2.service import HubService
@@ -111,11 +112,29 @@ def test_the_scope_is_machine_global_rather_than_some_project(monkeypatch):
     # provider. Borrowing a project's policy would let that project's allowlist
     # make a working account look broken.
     captured = _capture_connection_test_arguments(monkeypatch)
-    root = captured["arguments"]["project_root"]
 
     assert CONNECTION_TEST_SCOPE.is_absolute()
-    assert CONNECTION_TEST_SCOPE.is_dir()
-    assert root == str(CONNECTION_TEST_SCOPE)
+    assert captured["arguments"]["project_root"] == str(CONNECTION_TEST_SCOPE)
+
+
+def test_the_scope_is_created_on_a_machine_that_has_never_run_the_daemon(monkeypatch, tmp_path):
+    """CI caught this: asking for the state root is not the same as having one.
+
+    canonical_project_root resolves strictly, so a scope that does not exist is
+    rejected exactly like the missing argument this fix replaced -- which would
+    have left the connection test broken on precisely the fresh installs where
+    someone reaches for it first.
+    """
+
+    fresh = tmp_path / "never-created" / ".agent-hub"
+    monkeypatch.setattr(connect_service, "CONNECTION_TEST_SCOPE", fresh)
+    assert not fresh.exists()
+
+    resolved = connect_service._connection_test_scope()  # noqa: SLF001
+
+    assert resolved == fresh
+    assert fresh.is_dir()
+    assert fresh.stat().st_mode & 0o777 == 0o700
 
 
 def test_the_arguments_survive_the_real_dispatcher(monkeypatch, tmp_path):
