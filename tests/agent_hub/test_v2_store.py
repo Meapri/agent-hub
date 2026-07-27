@@ -109,15 +109,23 @@ def test_claim_finalize_cas_and_token_fence(tmp_path):
         )
     assert wrong_token.value.code == "lease_lost"
 
+    # The wave only finalizes as completed once every step is completed, so the
+    # fixture has to reach that state too rather than jumping straight to it.
+    finished = store.update_step(
+        run["run_id"],
+        step_id="inspect",
+        expected_run_revision=claim.revision,
+        status="completed",
+    )
     completed = store.finalize_claim(
         run["run_id"],
         claim_token=claim.claim_token,
-        expected_revision=claim.revision,
+        expected_revision=finished["revision"],
         status="completed",
         event_type="run_completed",
     )
     assert completed["status"] == "completed"
-    assert completed["revision"] == 2
+    assert completed["revision"] == finished["revision"] + 1
 
 
 def test_step_failure_preserves_request_checkpoint_and_provider_identity(tmp_path):
