@@ -38,6 +38,80 @@ def _object(
     return schema
 
 
+def _task_schema() -> dict[str, Any]:
+    """What a task looks like, stated where a caller can actually see it.
+
+    This surface is consumed by other agents through MCP, which shows them the
+    tool schema and nothing else. Declaring `task` as a bare object left every
+    caller guessing at the capability names and unable to discover that images
+    can be sent at all.
+    """
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["capability", "intent"],
+        "properties": {
+            "schema": {"const": "task_v2"},
+            "capability": {
+                "enum": [
+                    "chat",
+                    "search",
+                    "vision",
+                    "write",
+                    "image",
+                    "inspect",
+                    "review",
+                    "decide",
+                ],
+                "description": (
+                    "vision reads images and answers in text; image generates one. "
+                    "inspect runs locally and never calls a provider."
+                ),
+            },
+            "intent": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What to do. This is the prompt.",
+            },
+            "inline_input": {
+                "type": "string",
+                "description": "Material to work on, treated as untrusted data rather than instructions.",
+            },
+            "input_images": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {"type": "string"},
+                "description": (
+                    "For vision, chat, review, or decide. Each item is a path to a "
+                    "file inside project_root, or a base64 data:image URL. png, "
+                    "jpeg, gif and webp only; about 2 MB total per request."
+                ),
+            },
+            "input_artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Artifact ids from an earlier run. Requires egress approval through agent_hub_plan.",
+            },
+            "constraints": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "provider_allowlist": {"type": "array", "items": {"type": "string"}},
+                    "max_input_tokens": {"type": "integer", "minimum": 0},
+                    "max_output_tokens": {"type": "integer", "minimum": 0},
+                    "max_total_tokens": {"type": "integer", "minimum": 0},
+                    "max_leaf_calls": {"type": "integer", "minimum": 0},
+                    "max_tokens": {"type": "integer", "minimum": 0, "deprecated": True},
+                    "timeout_seconds": {"type": "number", "minimum": 0.1},
+                },
+            },
+            "output_contract": {"type": "object"},
+            "retention": {"enum": ["ephemeral", "durable_private", "exportable"]},
+        },
+    }
+
+
 def tool_definitions() -> list[dict[str, Any]]:
     text = {"type": "string"}
     integer = {"type": "integer", "minimum": 0}
@@ -62,10 +136,15 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_execute",
-            "Execute one short task without creating a durable run by default.",
+            (
+                "Call one model once and get the answer back inline. No run, no "
+                "plan, no stored artifact. Use this for a single question, a "
+                "review, or reading an image; use agent_hub_start when the work "
+                "needs several steps or has to survive a restart."
+            ),
             _object(
                 {
-                    "task": {"type": "object"},
+                    "task": _task_schema(),
                     "provider": text,
                     "model": text,
                     "record": boolean,
@@ -80,7 +159,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             _object(
                 {
                     "mode": {"enum": ["prepare", "apply"]},
-                    "task": {"type": "object"},
+                    "task": _task_schema(),
                     "project_root": text,
                     "provider": text,
                     "model": text,
@@ -231,8 +310,8 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "action": {"enum": ["get", "prepare_update", "apply_update"]},
                     "project_root": text,
                     "target": {
-                        "enum": ["policy", "routing_prior"],
-                        "description": "Defaults to the project policy. 'routing_prior' edits the user-global routing prior, whose entries stay inactive until their source moves away from 'unset'.",
+                        "enum": ["policy"],
+                        "description": "Only the project policy is editable.",
                     },
                     "patch": {"type": "object"},
                     "expected_revision": integer,

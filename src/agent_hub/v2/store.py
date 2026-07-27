@@ -26,8 +26,6 @@ from .contracts import (
     EVENT_SCHEMA,
     MAX_STEP_TOKENS,
     RECONCILIATION_SCHEMA,
-    ROUTING_DECISION_SCHEMA,
-    ROUTING_PROFILES,
     RUN_SCHEMA,
     RUN_STATUSES,
     STEP_TOKEN_SOURCES,
@@ -43,7 +41,7 @@ from .errors import HubV2Error
 from .invariants import InvariantViolation, assert_required_schema
 from .metrics import summarize_operation_metrics
 
-STORE_SCHEMA_VERSION = 10
+STORE_SCHEMA_VERSION = 11
 DEFAULT_STATE_DIR = Path("~/.agent-hub").expanduser()
 DEFAULT_DB_NAME = "state.sqlite3"
 MAX_EVENT_LIMIT = 100
@@ -113,11 +111,6 @@ _SAFE_EVENT_FIELDS = frozenset(
         "budget_used_percent",
         "wave_step_count",
         "estimate_source",
-        "evidence_kind",
-        "routing_profile",
-        "prior_sha256",
-        "prior_revision",
-        "prior_weight_fraction",
         "reconciliation_id",
         "verdict",
         "run_disposition",
@@ -503,64 +496,10 @@ class HubStore:
                     UNIQUE(run_id, step_id, expected_revision, outcome)
                 );
 
-                CREATE TABLE IF NOT EXISTS routing_decisions (
-                    decision_id TEXT PRIMARY KEY,
-                    schema_name TEXT NOT NULL,
-                    run_id TEXT REFERENCES runs(run_id) ON DELETE SET NULL,
-                    step_id TEXT,
-                    routing_mode TEXT NOT NULL,
-                    selected_provider TEXT,
-                    planner_provider TEXT,
-                    candidates_json TEXT NOT NULL,
-                    score_json TEXT NOT NULL,
-                    sample_count INTEGER NOT NULL CHECK (sample_count >= 0),
-                    policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
-                    reason_code TEXT NOT NULL DEFAULT '',
-                    routing_profile TEXT NOT NULL DEFAULT 'quality_balanced',
-                    evidence_kind TEXT NOT NULL DEFAULT 'observed',
-                    prior_sha256 TEXT,
-                    prior_revision INTEGER,
-                    prior_weight_fraction REAL,
-                    created_at REAL NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS routing_samples (
-                    sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    context_sha256 TEXT NOT NULL,
-                    context_json TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT,
-                    capability TEXT NOT NULL,
-                    success INTEGER NOT NULL CHECK (success IN (0, 1)),
-                    quality REAL,
-                    latency_ms INTEGER CHECK (latency_ms IS NULL OR latency_ms >= 0),
-                    total_tokens INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0),
-                    signal_weight REAL NOT NULL CHECK (signal_weight > 0),
-                    recorded_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS routing_samples_context_provider
-                    ON routing_samples(context_sha256, provider, recorded_at);
-                CREATE INDEX IF NOT EXISTS routing_samples_capability_provider
-                    ON routing_samples(capability, provider, recorded_at);
-
-                CREATE TABLE IF NOT EXISTS routing_daily_aggregates (
-                    day INTEGER NOT NULL,
-                    context_sha256 TEXT NOT NULL,
-                    context_json TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT NOT NULL DEFAULT '',
-                    capability TEXT NOT NULL,
-                    sample_count INTEGER NOT NULL CHECK (sample_count >= 0),
-                    success_weight REAL NOT NULL,
-                    failure_weight REAL NOT NULL,
-                    quality_total REAL NOT NULL,
-                    quality_weight REAL NOT NULL,
-                    latency_total REAL NOT NULL,
-                    latency_weight REAL NOT NULL,
-                    tokens_total REAL NOT NULL,
-                    tokens_weight REAL NOT NULL,
-                    PRIMARY KEY(day, context_sha256, provider, model)
-                );
+                -- Covers capability_token_estimate, which forecasts a wave's
+                -- spend from what completed steps actually cost.
+                CREATE INDEX IF NOT EXISTS steps_capability_provider_updated
+                    ON steps(capability, provider, updated_at);
 
                 CREATE TABLE IF NOT EXISTS context_documents (
                     document_id TEXT PRIMARY KEY,
@@ -788,22 +727,6 @@ class HubStore:
                         "DEFAULT 'unset' CHECK (tokens_source IN "
                         "('unset', 'reported', 'estimated', 'mixed', 'local'))"
                     )
-                decision_columns = {
-                    str(row["name"])
-                    for row in connection.execute("PRAGMA table_info(routing_decisions)").fetchall()
-                }
-                for column, ddl in (
-                    ("reason_code", "TEXT NOT NULL DEFAULT ''"),
-                    ("routing_profile", "TEXT NOT NULL DEFAULT 'quality_balanced'"),
-                    ("evidence_kind", "TEXT NOT NULL DEFAULT 'observed'"),
-                    ("prior_sha256", "TEXT"),
-                    ("prior_revision", "INTEGER"),
-                    ("prior_weight_fraction", "REAL"),
-                ):
-                    if column not in decision_columns:
-                        connection.execute(
-                            f"ALTER TABLE routing_decisions ADD COLUMN {column} {ddl}"
-                        )
                 # Sentinel backfill: a run with a zero budget is meaningless, so the
                 # zero value is a safe idempotent marker for "not yet derived".
                 for row in connection.execute(
@@ -813,6 +736,16 @@ class HubStore:
                         "UPDATE runs SET token_budget_limit = ? WHERE run_id = ?",
                         (_plan_token_budget(_json_object(row["plan_json"])), row["run_id"]),
                     )
+                # Schema 11 removed the routing learning layer. Drop its tables
+                # rather than leaving them: they only ever held scores nothing
+                # reads now, and a stale table invites a future reader to trust
+                # numbers that stopped being maintained.
+                for table in (
+                    "routing_decisions",
+                    "routing_samples",
+                    "routing_daily_aggregates",
+                ):
+                    connection.execute(f"DROP TABLE IF EXISTS {table}")
                 connection.execute(
                     "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                     (str(STORE_SCHEMA_VERSION),),
@@ -2492,7 +2425,14 @@ class HubStore:
         lookback_days: float = 30.0,
         minimum_samples: int = 3,
     ) -> dict[str, Any]:
-        """Median observed token spend for a capability, for pre-wave forecasting."""
+        """Median observed token spend for a capability, for pre-wave forecasting.
+
+        Read from the step ledger rather than a parallel observation table. A
+        completed step already records what the provider billed, under the
+        capability and provider that produced it, and it is the same number the
+        budget gate spends against -- so forecasting from anywhere else invites
+        the forecast and the ledger to disagree.
+        """
 
         cutoff = self._clock() - max(0.0, float(lookback_days)) * 86400.0
         connection = self._connect()
@@ -2500,9 +2440,9 @@ class HubStore:
 
             def _totals(with_provider: bool) -> list[int]:
                 sql = (
-                    "SELECT total_tokens FROM routing_samples "
-                    "WHERE capability = ? AND success = 1 AND total_tokens IS NOT NULL "
-                    "AND total_tokens > 0 AND recorded_at >= ?"
+                    "SELECT total_tokens FROM steps "
+                    "WHERE capability = ? AND status = 'completed' "
+                    "AND total_tokens > 0 AND updated_at >= ?"
                 )
                 params: list[Any] = [str(capability), cutoff]
                 if with_provider:
@@ -2516,11 +2456,11 @@ class HubStore:
             if provider:
                 candidate = _totals(True)
                 if len(candidate) >= minimum_samples:
-                    totals, source = candidate, "routing_samples_provider"
+                    totals, source = candidate, "step_ledger_provider"
             if not totals:
                 candidate = _totals(False)
                 if len(candidate) >= minimum_samples:
-                    totals, source = candidate, "routing_samples_capability"
+                    totals, source = candidate, "step_ledger_capability"
         finally:
             connection.close()
         return {
@@ -3073,330 +3013,6 @@ class HubStore:
             "signal_weight": weight,
             "created_at": now,
         }
-
-    def record_routing_decision(
-        self,
-        *,
-        run_id: str | None,
-        step_id: str | None,
-        routing_mode: str,
-        selected_provider: str | None,
-        planner_provider: str | None,
-        candidates: list[Mapping[str, Any]],
-        scores: Mapping[str, Any],
-        sample_count: int,
-        policy_revision: int,
-        reason_code: str = "",
-        routing_profile: str = "quality_balanced",
-        evidence_kind: str = "observed",
-        prior_sha256: str | None = None,
-        prior_revision: int | None = None,
-        prior_weight_fraction: float | None = None,
-    ) -> dict[str, Any]:
-        if (
-            evidence_kind not in {"observed", "prior", "blended", "default"}
-            or routing_profile not in ROUTING_PROFILES
-            or (
-                prior_sha256 is not None
-                and (
-                    len(prior_sha256) != 64
-                    or any(char not in "0123456789abcdef" for char in prior_sha256)
-                )
-            )
-            or (
-                prior_revision is not None
-                and (isinstance(prior_revision, bool) or int(prior_revision) < 0)
-            )
-            or (
-                prior_weight_fraction is not None and not 0.0 <= float(prior_weight_fraction) <= 1.0
-            )
-        ):
-            raise HubV2Error(
-                "invalid_routing_decision",
-                "The routing decision metadata is not supported.",
-                scope="routing",
-            )
-        decision_id = f"route_{secrets.token_hex(12)}"
-        now = self._clock()
-        with self._transaction() as connection:
-            if run_id is not None:
-                self._load_run(connection, run_id)
-            connection.execute(
-                """
-                INSERT INTO routing_decisions(
-                    decision_id, schema_name, run_id, step_id, routing_mode,
-                    selected_provider, planner_provider, candidates_json,
-                    score_json, sample_count, policy_revision, reason_code,
-                    routing_profile, evidence_kind, prior_sha256, prior_revision,
-                    prior_weight_fraction, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    decision_id,
-                    ROUTING_DECISION_SCHEMA,
-                    run_id,
-                    step_id,
-                    routing_mode,
-                    selected_provider,
-                    planner_provider,
-                    canonical_json(candidates),
-                    canonical_json(scores),
-                    sample_count,
-                    policy_revision,
-                    str(reason_code)[:64],
-                    routing_profile,
-                    evidence_kind,
-                    prior_sha256,
-                    None if prior_revision is None else int(prior_revision),
-                    None if prior_weight_fraction is None else float(prior_weight_fraction),
-                    now,
-                ),
-            )
-        return {
-            "schema": ROUTING_DECISION_SCHEMA,
-            "decision_id": decision_id,
-            "run_id": run_id,
-            "step_id": step_id,
-            "routing_mode": routing_mode,
-            "selected_provider": selected_provider,
-            "planner_provider": planner_provider,
-            "candidates": list(candidates),
-            "scores": dict(scores),
-            "sample_count": sample_count,
-            "policy_revision": policy_revision,
-            "evidence_kind": evidence_kind,
-            "prior_sha256": prior_sha256,
-            "prior_revision": prior_revision,
-            "prior_weight_fraction": prior_weight_fraction,
-            "created_at": now,
-        }
-
-    def record_routing_sample(
-        self,
-        *,
-        context: Mapping[str, Any],
-        provider: str,
-        model: str | None,
-        capability: str,
-        success: bool,
-        quality: float | None,
-        latency_ms: int | None,
-        total_tokens: int | None,
-        signal_weight: float,
-    ) -> dict[str, Any]:
-        if quality is not None and not 0.0 <= quality <= 1.0:
-            raise HubV2Error(
-                "invalid_routing_sample",
-                "quality must be between 0 and 1.",
-                scope="routing",
-            )
-        for field, value in (("latency_ms", latency_ms), ("total_tokens", total_tokens)):
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
-                raise HubV2Error(
-                    "invalid_routing_sample",
-                    f"{field} must be a non-negative integer.",
-                    scope="routing",
-                )
-        if signal_weight <= 0:
-            raise HubV2Error(
-                "invalid_routing_sample",
-                "signal_weight must be positive.",
-                scope="routing",
-            )
-        context_json = canonical_json(context)
-        context_sha = sha256(context_json.encode("utf-8")).hexdigest()
-        now = self._clock()
-        with self._transaction() as connection:
-            sample_id = connection.execute(
-                """
-                INSERT INTO routing_samples(
-                    context_sha256, context_json, provider, model, capability,
-                    success, quality, latency_ms, total_tokens, signal_weight,
-                    recorded_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    context_sha,
-                    context_json,
-                    provider,
-                    model,
-                    capability,
-                    int(success),
-                    quality,
-                    latency_ms,
-                    total_tokens,
-                    signal_weight,
-                    now,
-                ),
-            ).lastrowid
-        return {
-            "schema": "agent_hub_routing_sample_v1",
-            "sample_id": int(sample_id),
-            "context_sha256": context_sha,
-            "provider": provider,
-            "model": model,
-            "capability": capability,
-            "recorded_at": now,
-        }
-
-    def routing_statistics(
-        self,
-        *,
-        context: Mapping[str, Any],
-        provider: str,
-        half_life_days: float = 30.0,
-        detail_days: float = 90.0,
-    ) -> dict[str, Any]:
-        context_json = canonical_json(context)
-        context_sha = sha256(context_json.encode("utf-8")).hexdigest()
-        now = self._clock()
-        cutoff = now - detail_days * 86400.0
-        connection = self._connect()
-        try:
-            rows = connection.execute(
-                """
-                SELECT * FROM routing_samples
-                WHERE context_sha256 = ? AND provider = ? AND recorded_at >= ?
-                ORDER BY recorded_at
-                """,
-                (context_sha, provider, cutoff),
-            ).fetchall()
-            aggregate_rows = connection.execute(
-                """
-                SELECT * FROM routing_daily_aggregates
-                WHERE context_sha256 = ? AND provider = ?
-                  AND day >= ? AND day < ?
-                ORDER BY day
-                """,
-                (
-                    context_sha,
-                    provider,
-                    int((now - 365.0 * 86400.0) // 86400),
-                    int(cutoff // 86400),
-                ),
-            ).fetchall()
-        finally:
-            connection.close()
-        half_life_seconds = max(1.0, half_life_days * 86400.0)
-        weighted_success = 1.0
-        weighted_failure = 1.0
-        quality_total = 0.0
-        quality_weight = 0.0
-        latency_total = 0.0
-        latency_weight = 0.0
-        tokens_total = 0.0
-        tokens_weight = 0.0
-        sample_count = 0
-        for row in rows:
-            age = max(0.0, now - float(row["recorded_at"]))
-            decay = 0.5 ** (age / half_life_seconds)
-            weight = float(row["signal_weight"]) * decay
-            if row["success"]:
-                weighted_success += weight
-            else:
-                weighted_failure += weight
-            if row["quality"] is not None:
-                quality_total += float(row["quality"]) * weight
-                quality_weight += weight
-            if row["latency_ms"] is not None:
-                latency_total += float(row["latency_ms"]) * weight
-                latency_weight += weight
-            if row["total_tokens"] is not None:
-                tokens_total += float(row["total_tokens"]) * weight
-                tokens_weight += weight
-            sample_count += 1
-        for row in aggregate_rows:
-            recorded_at = (int(row["day"]) + 0.5) * 86400.0
-            age = max(0.0, now - recorded_at)
-            decay = 0.5 ** (age / half_life_seconds)
-            weighted_success += float(row["success_weight"]) * decay
-            weighted_failure += float(row["failure_weight"]) * decay
-            quality_total += float(row["quality_total"]) * decay
-            quality_weight += float(row["quality_weight"]) * decay
-            latency_total += float(row["latency_total"]) * decay
-            latency_weight += float(row["latency_weight"]) * decay
-            tokens_total += float(row["tokens_total"]) * decay
-            tokens_weight += float(row["tokens_weight"]) * decay
-            sample_count += int(row["sample_count"])
-        observed_total = max(0.0, weighted_success + weighted_failure - 2.0)
-        observed_failure = max(0.0, weighted_failure - 1.0)
-        return {
-            "schema": "agent_hub_routing_statistics_v1",
-            "context_sha256": context_sha,
-            "provider": provider,
-            "sample_count": sample_count,
-            "reliability": weighted_success / (weighted_success + weighted_failure),
-            "failure_rate": (observed_failure / observed_total if observed_total else None),
-            "quality": quality_total / quality_weight if quality_weight else 0.5,
-            "latency_ms": latency_total / latency_weight if latency_weight else None,
-            "total_tokens": tokens_total / tokens_weight if tokens_weight else None,
-            # Laplace seeds (1.0 each) are removed so callers can blend a prior
-            # against the real observed weight. Aggregate rows carry no seed.
-            "success_weight": max(0.0, weighted_success - 1.0),
-            "failure_weight": max(0.0, weighted_failure - 1.0),
-            "observed_weight": observed_total,
-            "quality_weight": quality_weight,
-            "latency_weight": latency_weight,
-            "tokens_weight": tokens_weight,
-        }
-
-    def prune_routing_details(self, *, retention_days: float = 90.0) -> int:
-        now = self._clock()
-        cutoff = now - retention_days * 86400.0
-        aggregate_cutoff_day = int((now - 365.0 * 86400.0) // 86400)
-        with self._transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO routing_daily_aggregates(
-                    day, context_sha256, context_json, provider, model, capability,
-                    sample_count, success_weight, failure_weight,
-                    quality_total, quality_weight, latency_total, latency_weight,
-                    tokens_total, tokens_weight
-                )
-                SELECT
-                    CAST(recorded_at / 86400 AS INTEGER),
-                    context_sha256, context_json, provider, COALESCE(model, ''),
-                    capability, COUNT(*),
-                    SUM(CASE WHEN success = 1 THEN signal_weight ELSE 0 END),
-                    SUM(CASE WHEN success = 0 THEN signal_weight ELSE 0 END),
-                    SUM(CASE WHEN quality IS NOT NULL
-                        THEN quality * signal_weight ELSE 0 END),
-                    SUM(CASE WHEN quality IS NOT NULL THEN signal_weight ELSE 0 END),
-                    SUM(CASE WHEN latency_ms IS NOT NULL
-                        THEN latency_ms * signal_weight ELSE 0 END),
-                    SUM(CASE WHEN latency_ms IS NOT NULL THEN signal_weight ELSE 0 END),
-                    SUM(CASE WHEN total_tokens IS NOT NULL
-                        THEN total_tokens * signal_weight ELSE 0 END),
-                    SUM(CASE WHEN total_tokens IS NOT NULL THEN signal_weight ELSE 0 END)
-                FROM routing_samples
-                WHERE recorded_at < ?
-                GROUP BY CAST(recorded_at / 86400 AS INTEGER),
-                    context_sha256, context_json, provider, COALESCE(model, ''),
-                    capability
-                ON CONFLICT(day, context_sha256, provider, model) DO UPDATE SET
-                    sample_count = sample_count + excluded.sample_count,
-                    success_weight = success_weight + excluded.success_weight,
-                    failure_weight = failure_weight + excluded.failure_weight,
-                    quality_total = quality_total + excluded.quality_total,
-                    quality_weight = quality_weight + excluded.quality_weight,
-                    latency_total = latency_total + excluded.latency_total,
-                    latency_weight = latency_weight + excluded.latency_weight,
-                    tokens_total = tokens_total + excluded.tokens_total,
-                    tokens_weight = tokens_weight + excluded.tokens_weight
-                """,
-                (cutoff,),
-            )
-            cursor = connection.execute(
-                "DELETE FROM routing_samples WHERE recorded_at < ?",
-                (cutoff,),
-            )
-            connection.execute(
-                "DELETE FROM routing_daily_aggregates WHERE day < ?",
-                (aggregate_cutoff_day,),
-            )
-            return max(0, int(cursor.rowcount))
 
     def index_context_document(
         self,

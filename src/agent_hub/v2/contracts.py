@@ -17,11 +17,18 @@ RUN_SCHEMA = "run_v3"
 EVENT_SCHEMA = "event_v2"
 ARTIFACT_SCHEMA = "artifact_v2"
 PROVIDER_MANIFEST_SCHEMA = "agent_hub_provider_v2"
-ROUTING_DECISION_SCHEMA = "routing_decision_v1"
 EGRESS_MANIFEST_SCHEMA = "egress_manifest_v2"
 RECONCILIATION_SCHEMA = "agent_hub_run_reconciliation_v1"
 MAX_RECONCILED_RESULT_CHARS = 200_000
 MAX_INLINE_INPUT_CHARS = 2_000_000
+# Images do not travel as prompt text, so they are not bounded by the input
+# token window. What bounds them is the worker's stdin line cap
+# (provider_worker.MAX_REQUEST_CHARS = 4,000,000): every image arrives as a
+# base64 data URL inside one JSON request. Reserving a quarter of that line for
+# the prompt and envelope leaves this for the images themselves -- about 2.2 MB
+# of raw image once base64's 4/3 expansion is paid.
+MAX_TASK_IMAGE_CHARS = 3_000_000
+MAX_TASK_IMAGES = 8
 DEFAULT_PROVIDER_MAX_INPUT_TOKENS = 131_072
 MAX_PROVIDER_INPUT_TOKENS = 10_000_000
 
@@ -37,6 +44,10 @@ CAPABILITIES = frozenset(
         "decide",
     }
 )
+# Capabilities that can be handed an image. vision is image-in/text-out; chat,
+# review and decide accept an image alongside a prompt. image is generation --
+# image out, not in -- so it is deliberately absent.
+IMAGE_INPUT_CAPABILITIES = frozenset({"vision", "chat", "review", "decide"})
 RUN_STATUSES = frozenset(
     {
         "prepared",
@@ -51,8 +62,12 @@ RUN_STATUSES = frozenset(
         "outcome_unknown",
     }
 )
+# What the plan is allowed to do about its provider, not how one is scored.
+#   pinned   use the named provider or fail
+#   shadow   prefer the named provider, fall through if it is ineligible
+#   advisory same as shadow; kept so already-issued plans still validate
+#   auto     shadow, plus permission to replan itself once
 ROUTING_MODES = frozenset({"pinned", "shadow", "advisory", "auto"})
-ROUTING_PROFILES = frozenset({"quality_balanced", "latency_first", "cost_first"})
 # Only not_delivered can cause an external request to be sent again.
 RECONCILIATION_VERDICTS = frozenset({"not_delivered", "delivered_discarded", "delivered_recovered"})
 RECONCILIATION_DISPOSITIONS = frozenset({"resume", "fail"})
@@ -224,6 +239,7 @@ def validate_task(raw: Any) -> dict[str, Any]:
             "intent",
             "capability",
             "inline_input",
+            "input_images",
             "input_artifacts",
             "constraints",
             "output_contract",
@@ -250,6 +266,28 @@ def validate_task(raw: Any) -> dict[str, Any]:
             field="inline_input",
             maximum=MAX_INLINE_INPUT_CHARS,
             allow_empty=True,
+        )
+    input_images = _string_list(
+        value.get("input_images"),
+        field="input_images",
+        maximum_items=MAX_TASK_IMAGES,
+        # A data URL is the whole image, so the per-item cap is the batch cap.
+        item_maximum=MAX_TASK_IMAGE_CHARS,
+    )
+    if input_images and capability not in IMAGE_INPUT_CAPABILITIES:
+        raise HubV2Error(
+            "unsupported_capability",
+            "This capability does not accept image input.",
+            scope="contract",
+            safe_details={"capability": capability},
+        )
+    if capability == "vision" and not input_images:
+        # Asking a vision model to look at nothing is a mistake worth naming at
+        # the boundary rather than discovering as an empty answer.
+        raise HubV2Error(
+            "invalid_request",
+            "A vision task requires at least one image in input_images.",
+            scope="contract",
         )
     input_artifacts = _string_list(
         value.get("input_artifacts"),
@@ -309,6 +347,7 @@ def validate_task(raw: Any) -> dict[str, Any]:
         "intent": intent,
         "capability": capability,
         "inline_input": inline_input,
+        "input_images": input_images,
         "input_artifacts": input_artifacts,
         "constraints": {
             "provider_allowlist": provider_allowlist,

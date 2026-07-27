@@ -11,21 +11,23 @@
   정본 원칙: 모든 상태는 Git에 커밋되는 파일에 산다. 도구는 소모품이다.
 
 <!-- agent-hub:handoff:v1:start -->
-- **원래 목표**: Agent Hub를 "선택적 control plane"으로 재정의하기 전에, 실패 분류를 단일 표로 통합하고 provider가 거짓을 말할 때의 봉쇄를 종류별로 검증합니다. 4주 계획의 2주차입니다.
-- **현재 단계**: 2주차 두 항목을 모두 끝냈습니다. `week2/failure-classification` 브랜치에 커밋 2건(`d0c1046`, `6546669`)이 있고 push 전입니다.
+- **원래 목표**: 라우팅 학습 층을 걸어내 선택을 결정론적으로 만들고, 오케스트레이션과 별개로 단일 모델 호출과 비전(이미지 입력)을 1급 경로로 지원합니다. 4주 계획의 3주차입니다.
+- **현재 단계**: 3주차 세 항목(라우팅 수술, 단일 호출 경로, 비전 입력)을 모두 끝냈습니다. `week3/routing-surgery` 브랜치에 커밋 4건(`d2c1264`, `0a50bbe`, `1006b05`, `19eddf0`)이 있고 push 전입니다.
 - **완료**:
-  - 실패 분류를 결정하던 8개 사이트를 `src/agent_hub/v2/failure_classes.py`의 `FAILURE_CLASSES` 단일 표로 통합했습니다. provider_runtime의 기본 error type, provider_worker의 payload 승격 기본값과 retryable 집합, fallback 루프의 ambiguous 집합, wave의 오류 선택과 checkpoint 파생 불리언, store의 `fallback_exhausted` 특수 케이스, finalize 3경로의 status 선택이 각각 독립적으로 판단하며 서로 어긋나 있었습니다.
-  - 분류 기준을 "실패했는가"가 아니라 "응답을 받았는가"로 잡았습니다. 미발송이거나 provider가 작업을 거절한 것은 retry_safe, 보냈는데 응답이 없는 것은 ambiguous, 응답을 받고 내용상 거절된 것은 terminal입니다. 표에 없는 코드는 항상 ambiguous로 떨어지며 절대 retry_safe가 되지 않습니다.
-  - 막혀 있던 3건과 동형인 실패(이름 없는 payload 실패)가 `outcome_unknown`이 되고 `prepare_reconcile`/`apply_reconcile`로 종결되는 것을 end-to-end 테스트로 확인했습니다. 2-1의 완료 기준을 충족합니다.
-  - 통합 과정에서 provider_worker가 이름 없는 payload 실패에 `provider_operation_failed`를 붙여 "내용상 거절됨"으로 단정하던 결함을 찾아 고쳤습니다. 그게 막힌 run 3건의 정확한 형태입니다.
-  - run이 paused인데 step은 outcome_unknown인 상태를 찾아 고쳤습니다. `prepare_reconcile`은 run이 outcome_unknown일 때만 받으므로 그 step은 재시도도 조정도 불가능했습니다. 불변식 `unresolved_steps_keep_their_run_reconcilable`을 추가해 재발을 막습니다.
-  - `HubV2Error.public()`이 표가 아는 코드에 대해 표의 판정을 보고하도록 했습니다. `provider_timeout`이 wire에 `retryable=true`로 나가 이를 읽는 에이전트가 이미 전달됐을 수 있는 요청을 재전송하는 경로를 막았습니다.
-  - 거짓말 15종을 파라미터화한 fault injection 스위트를 추가했습니다. 종류마다 봉쇄를 확인하고, 공통으로 모든 run이 공개 도구로 진행 가능한 상태에 도달하는지 검사합니다.
-  - 스위트가 결함 3건을 드러냈고 모두 고쳤습니다. `_structured_text`가 text 없는 응답을 `json.dumps(envelope)`로 바꿔 검증을 통과시키고 step을 완료 처리하던 laundering, 진행 수단이 없는 run이 paused로 남아 존재하지 않는 재개 가능성을 주장하던 문제, provider 응답의 model 문자열이 `ensure_public_model_id`를 우회해 내부·placeholder id가 step 기록과 라우팅 버킷에 들어가던 누출입니다.
-- **미완**: 3주차의 라우팅 층 삭제와 self-scored quality 폐쇄 루프 차단, 4주차의 provider MCP 중복층·sdk·workflows 삭제와 claude API 키 lane 실험이 남았습니다. 브랜치를 아직 push하지 않았습니다.
-- **변경 파일**: 신규 `src/agent_hub/v2/failure_classes.py`, `tests/agent_hub/test_v2_failure_classes.py`, `tests/agent_hub/test_v2_fault_injection.py`. 수정 `src/agent_hub/v2/service.py`, `src/agent_hub/v2/provider_worker.py`, `src/agent_hub/v2/provider_runtime.py`, `src/agent_hub/v2/errors.py`, `src/agent_hub/v2/store.py`, `src/agent_hub/v2/invariants.py`, `tests/agent_hub/test_v2_service.py`, `tests/agent_hub/test_v2_provider_runtime.py`.
-- **검증 실행 결과**: 전체 pytest `731 passed, 2 skipped`; `ruff check` 통과; `ruff format --check` 180 files already formatted; `./scripts/check-sync.sh` 통과입니다. 1주차 종료 시점 678건 대비 테스트 53건이 늘었습니다.
-- **현재 리스크**: 동작 변경 3건이 기존 계약을 바꿉니다. `codex_process_error`와 `codex_timeout`이 retryable에서 ambiguous로 바뀌어 CLI subprocess가 죽으면 자동 재시도 대신 사람의 조정을 기다립니다. 진행 수단이 없는 run이 paused 대신 failed로 종결됩니다. text 없는 응답이 완료가 아니라 `deterministic_verification_failed`로 떨어집니다. 배포된 2.4.1 릴리스에는 1·2주차 변경이 모두 미반영입니다. 사용자 DB의 막힌 run 5건은 지시대로 손대지 않았고 이번 변경은 신규 run에만 적용됩니다.
-- **Do-Not-Repeat**: 표에 없는 코드의 기본값을 retry_safe 쪽으로 바꾸지 마세요. 이미 전달됐을 수 있는 요청을 자동 재전송하는 것이 이 표가 막으려는 유일한 실수입니다. fallback 루프가 retry_safe 이외의 실패에서 다음 provider로 넘어가게 만들지 마세요. 그러면 `fallback_exhausted`의 retry_safe 분류가 즉시 거짓이 됩니다. `_structured_text`에 envelope 직렬화 fallback을 되살리지 마세요. 답변이 아닌 것을 답변으로 만듭니다. 진행 수단이 없는 run을 paused로 되돌리지 마세요. 공개 도구 14개에 replan이 없어 재개가 불가능합니다.
-- **다음 한 걸음**: `src/agent_hub/v2/service.py` 707행의 `routing_mode="pinned" if explicit else "shadow"`를 읽고 라우팅 층 삭제 범위를 확정하세요.
+  - 조사 결과 3주차 계획을 수정했습니다. 라우팅 층을 통째로 지우면 라우팅이 아닌 기능 9개가 같이 깨집니다(provider 자격 필터링, fallback 순서, context limit 강제, model 결정, wave 토큰 예측, auto 리플랜 게이트, egress·model 정책 검증, plan/policy 계약 필드, 불변식과 수리 액션). 게이트 B가 무너뜨린 것은 학습·점수 계산이지 선택 로직이 아니므로 범위를 좁혔습니다.
+  - `capability_token_estimate`를 `routing_samples`에서 떼어내 step 원장을 읽도록 바꿨습니다. 완료된 step이 이미 provider가 청구한 수치를 가지고 있고, 그게 예산 게이트가 차감하는 바로 그 숫자입니다. 커버링 인덱스도 같이 옮겼습니다.
+  - `src/agent_hub/v2/provider_selection.py`의 `select_provider()`로 교체했습니다. 인자만의 순수 함수라 같은 입력은 항상 같은 답을 주고, 실패한 run을 입력만으로 설명할 수 있습니다. 자격 있는 provider를 호출자의 allowlist 순서로 시도하고, pinned provider가 불가하면 조용히 대체하지 않고 오류를 냅니다.
+  - 자기 채점 폐쇄 루프를 끊었습니다. 결정론적 검증기를 통과한 step이 자기 품질을 1.0으로 기록하고 그 숫자가 다음 provider 선택 순위에 들어가고 있었습니다.
+  - routing_profile, routing_prior 정책 타깃, doctor의 routing_prior 블록과 수리 액션, feedback의 라우팅 샘플 기록을 지웠습니다. 스키마 11에서 테이블 3개를 DROP합니다. 순 2,129줄 감소입니다.
+  - 비전 입력을 지원합니다. provider 어댑터 4개는 이미 이미지 입력 코드가 있었고 manifest도 vision을 광고했지만, task 계약에 이미지 필드가 없어 vision은 worker에서 항상 거부됐습니다. `input_images` 필드를 추가하고, 샌드박스 밖의 daemon이 파일을 읽어 base64로 바꿔 내려보냅니다. worker는 경로를 보지 않으며 테스트가 그것을 검증합니다.
+  - 이미지는 `inline_input`이 아닌 별도 필드로 나릅니다. inline_input은 프롬프트 텍스트라 모델 입력 토큰 창에 계산되고, 그리로 보내면 약 384KiB에서 막힙니다. 별도 필드에서는 worker stdin 상한이 진짜 제약이고, `MAX_TASK_IMAGE_CHARS`를 그 상한에서 유도했습니다(원본 약 2.2MB).
+  - durable run이 step task를 다시 만들 때 이미지를 물려주지 않아 계획된 vision step이 invalid_request로 죽는 결함을 테스트가 잡아 고쳤습니다.
+  - `agent_hub_execute`와 `agent_hub_plan`의 `task` 인자가 `{"type": "object"}`로만 노출돼 있던 것을 실제 스키마로 바꿨습니다. MCP 호출자는 도구 스키마만 보므로 capability 이름도 input_images 존재도 알 수 없었습니다. 발행 스키마와 validator가 갈라지지 않는지 검사하는 테스트 3건도 넣었습니다.
+  - execute의 비밀값 redaction 누락 의심을 검증해 결함이 아님을 확인했습니다. redaction은 `inline_consent` artifact를 의도적으로 제외하며, 호출자가 직접 쓴 프롬프트는 durable 경로에서도 건드리지 않습니다. 두 경로가 일치합니다.
+- **미완**: 4주차의 provider MCP 중복층·sdk·workflows 삭제와 claude API 키 lane 실험이 남았습니다. 브랜치를 아직 push하지 않았습니다. 이미지 생성(capability=image)은 여전히 provider 캐시 디렉터리의 파일 경로 문자열만 artifact에 text로 저장하고 실제 바이트는 저장소에 들어오지 않습니다. artifacts.content는 BLOB이라 바이너리를 담을 수 있지만 `_artifact_text`가 UTF-8 디코딩을 강제해 모든 소비 경로가 텍스트 전용입니다.
+- **변경 파일**: 신규 `src/agent_hub/v2/provider_selection.py`, `tests/agent_hub/test_v2_provider_selection.py`, `tests/agent_hub/test_v2_vision.py`. 삭제 `src/agent_hub/v2/routing.py`, `src/agent_hub/v2/routing_prior.py`, `tests/agent_hub/test_v2_routing.py`, `tests/agent_hub/test_v2_routing_prior.py`. 수정 `src/agent_hub/v2/service.py`, `store.py`, `contracts.py`, `policy.py`, `tools.py`, `repair.py`, `invariants.py`, `provider_worker.py`, `provider_runtime.py`, `__init__.py`, `schemas/contracts.json`.
+- **검증 실행 결과**: 전체 pytest `738 passed, 2 skipped`; `ruff check` 통과; `ruff format --check` 통과; `./scripts/check-sync.sh` 통과; 공개 도구 14개 불변식 유지(`len(TOOL_NAMES)==14`, `len(tool_definitions())==14`) 확인했습니다.
+- **현재 리스크**: 스키마 11 마이그레이션이 기존 DB의 라우팅 테이블 3개를 DROP하므로 그 안의 과거 점수·샘플은 되돌릴 수 없습니다. `agent_hub_policy`의 `target="routing_prior"`와 응답의 `routing_decision`·`routing_prior` 필드가 사라졌으니 그걸 읽던 호출자는 깨집니다. 배포된 2.4.1 릴리스에는 1·2·3주차 변경이 모두 미반영입니다. `tests/agent_hub/test_connect_service.py::test_manager_close_clears_only_pending_login_it_started`가 CI에서 간헐적으로 실패합니다 — `ConnectionManager.close()`가 워커 스레드를 join하지 않아 생긴 기존 결함이며 1·2·3주차와 무관하고 별도 과제로 분리해 두었습니다.
+- **Do-Not-Repeat**: `select_provider()`에 store나 과거 통계를 다시 넣지 마세요. 같은 입력이 같은 답을 준다는 성질이 이 교체의 유일한 이익입니다. 시스템이 자기 출력을 채점해 그 점수로 다음 행동을 정하는 루프를 다시 만들지 마세요. 이미지를 `inline_input`으로 나르지 마세요. 프롬프트 토큰 창에 계산돼 사진 한 장도 못 보냅니다. worker에 파일 경로를 넘기지 마세요. 샌드박스가 $HOME 아래 읽기를 막아 열 수 없습니다. 도구 스키마에 `{"type": "object"}`로 인자를 다시 숨기지 마세요. MCP 호출자에겐 그게 유일한 문서입니다.
+- **다음 한 걸음**: `git push -u origin week3/routing-surgery`를 실행해 3주차 브랜치를 원격에 올리세요.
 <!-- agent-hub:handoff:v1:end -->

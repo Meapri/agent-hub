@@ -35,6 +35,14 @@
         "inline_input": {
           "type": "string"
         },
+        "input_images": {
+          "type": "array",
+          "description": "Images for a vision, chat, review, or decide task. Each item is either a path to a file inside project_root or a base64 data:image URL. Local paths are read by the daemon and sent as base64, because the provider worker is sandboxed out of the user's files. Allowed types: png, jpeg, gif, webp.",
+          "maxItems": 8,
+          "items": {
+            "type": "string"
+          }
+        },
         "input_artifacts": {
           "type": "array",
           "items": {
