@@ -1760,10 +1760,8 @@ def test_independent_ready_steps_execute_in_parallel(tmp_path):
                 "intent": "Parallel fixture.",
                 "capability": "chat",
                 "inline_input": "",
-                "constraints": {
-                    "provider_allowlist": ["gpt"],
-                    "timeout_seconds": 0.15,
-                },
+                # Generous budget: this test is about overlap, not machine speed.
+                "constraints": {"provider_allowlist": ["gpt"], "timeout_seconds": 30},
             },
             "steps": [
                 {
@@ -1783,32 +1781,45 @@ def test_independent_ready_steps_execute_in_parallel(tmp_path):
             "policy_revision": 0,
         }
     )
-    _FakeWorker.invoke_delay = 0.12
-    try:
-        started = service.dispatch(
-            "agent_hub_start",
-            {
-                "plan": plan,
-                "project_root": str(tmp_path),
-                "idempotency_key": f"parallel.{secrets.token_hex(4)}",
-            },
-        )
-        begin = time.monotonic()
-        service.dispatch(
-            "agent_hub_continue",
-            {"run_id": started["data"]["run_id"], "expected_revision": 0},
-        )
-        for _ in range(100):
-            current = service.store.get_run(started["data"]["run_id"])
-            if current["status"] == "completed":
-                break
-            time.sleep(0.01)
-        elapsed = time.monotonic() - begin
-    finally:
-        _FakeWorker.invoke_delay = 0.0
+    # Record when each invocation is in flight so overlap is observed directly
+    # rather than inferred from total wall-clock, which depends on the machine.
+    spans: list[tuple[float, float]] = []
+    spans_lock = threading.Lock()
+
+    class _SpanWorker(_FakeWorker):
+        def request(self, method, params=None, timeout=30.0, request_id=None):
+            if method != "invoke":
+                return super().request(method, params, timeout, request_id)
+            entered = time.monotonic()
+            time.sleep(0.12)
+            with spans_lock:
+                spans.append((entered, time.monotonic()))
+            return super().request(method, params, timeout, request_id)
+
+    service = HubService(
+        HubStore(tmp_path / "state.sqlite3"),
+        worker_factory=_SpanWorker,
+        cipher=ArtifactCipher(StaticKeyProvider(b"k" * 32)),
+    )
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"parallel.{secrets.token_hex(4)}",
+        },
+    )
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": started["data"]["run_id"], "expected_revision": 0},
+    )
+    current = _await_settled(service, started["data"]["run_id"])
 
     assert current["status"] == "completed"
-    assert elapsed < 0.22
+    assert len(spans) == 2
+    (first_start, first_end), (second_start, second_end) = sorted(spans)
+    # Serial execution would put the second invocation entirely after the first.
+    assert second_start < first_end
 
 
 def test_parallel_wave_checkpoints_each_completed_provider_immediately(tmp_path):

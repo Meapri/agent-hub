@@ -8,7 +8,7 @@ macOS용 멀티 모델 실행 환경입니다.
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
 - 현재 버전: `2.3.0`
-- Python: 3.10 이상
+- Python: 3.11 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
 
@@ -64,7 +64,7 @@ cd agent-hub
 ./scripts/bootstrap.sh
 ```
 
-`bootstrap.sh`는 Python 3.10 이상을 찾아 `.venv`를 만들고 개발 의존성을 설치합니다.
+`bootstrap.sh`는 Python 3.11 이상을 찾아 `.venv`를 만들고 개발 의존성을 설치합니다.
 특정 Python을 사용하려면 경로를 지정할 수 있습니다.
 
 ```bash
