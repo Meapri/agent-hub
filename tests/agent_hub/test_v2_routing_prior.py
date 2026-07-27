@@ -6,6 +6,7 @@ from agent_hub.v2.errors import HubV2Error
 from agent_hub.v2.routing import (
     AUTO_MAX_PRIOR_FRACTION,
     ROUTING_PROFILE_WEIGHTS,
+    RUNTIME_SAMPLE_WEIGHT,
     blend_statistics,
     profile_weights,
 )
@@ -114,12 +115,52 @@ def test_a_few_bad_observations_override_an_optimistic_prior():
     assert blended["failure_rate"] == pytest.approx(1.0 - blended["reliability"], rel=1e-6)
 
 
-def test_prior_dominated_evidence_exceeds_the_auto_guard_fraction():
-    prior = _entry()
+def test_prior_guard_binds_at_the_default_prior_weight():
+    # Must use PRIOR_DEFAULT_WEIGHT, not the maximum. An earlier version of this
+    # test pinned 30.0, which made the guard trip for reasons a real default
+    # configuration would never reproduce.
+    prior = _entry(effective_weight=PRIOR_DEFAULT_WEIGHT)
+    sample = RUNTIME_SAMPLE_WEIGHT
 
-    thin = blend_statistics(_stats(success_weight=1.0), prior)
+    thin = blend_statistics(_stats(success_weight=5 * sample), prior)
+    thick = blend_statistics(_stats(success_weight=8 * sample), prior)
 
     assert thin["evidence"]["prior_fraction"] > AUTO_MAX_PRIOR_FRACTION
+    assert thick["evidence"]["prior_fraction"] <= AUTO_MAX_PRIOR_FRACTION
+
+
+def test_standard_error_uses_effective_samples_not_raw_weight():
+    # Five observed samples weigh 15.0. Treating that weight as a sample count
+    # understates the standard error by sqrt(RUNTIME_SAMPLE_WEIGHT).
+    blended = blend_statistics(
+        _stats(
+            success_weight=5 * RUNTIME_SAMPLE_WEIGHT,
+            quality_weight=5 * RUNTIME_SAMPLE_WEIGHT,
+            quality=0.9,
+        ),
+        None,
+    )
+    naive = (0.9 * 0.1 / (5 * RUNTIME_SAMPLE_WEIGHT + 1.0)) ** 0.5
+
+    assert blended["evidence"]["quality_sd"] > naive
+    assert blended["evidence"]["quality_sd"] == pytest.approx(
+        (0.9 * 0.1 / (5 + 1.0)) ** 0.5, rel=1e-6
+    )
+
+
+def test_identical_outcomes_never_report_zero_uncertainty():
+    perfect = blend_statistics(
+        _stats(
+            success_weight=20 * RUNTIME_SAMPLE_WEIGHT,
+            quality_weight=20 * RUNTIME_SAMPLE_WEIGHT,
+            quality=1.0,
+        ),
+        None,
+    )
+
+    # p exactly 1.0 would otherwise make the separation test trivially passable.
+    assert perfect["evidence"]["quality_sd"] > 0.0
+    assert perfect["evidence"]["reliability_sd"] > 0.0
 
 
 def test_quality_placeholder_contributes_no_uncertainty():

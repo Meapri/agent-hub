@@ -2797,6 +2797,19 @@ class HubStore:
                         "A replan cannot alter completed steps.",
                         scope="planner",
                     )
+            spent_tokens = {
+                str(row["step_id"]): (
+                    int(row["input_tokens"]),
+                    int(row["output_tokens"]),
+                    int(row["total_tokens"]),
+                    str(row["tokens_source"] or "unset"),
+                )
+                for row in connection.execute(
+                    "SELECT step_id, input_tokens, output_tokens, total_tokens, tokens_source "
+                    "FROM steps WHERE run_id = ? AND status != 'completed'",
+                    (run_id,),
+                ).fetchall()
+            }
             connection.execute(
                 "DELETE FROM steps WHERE run_id = ? AND status != 'completed'",
                 (run_id,),
@@ -2807,10 +2820,20 @@ class HubStore:
                 connection.execute(
                     """
                     INSERT INTO steps(
-                        run_id, step_id, capability, status, revision, updated_at
-                    ) VALUES(?, ?, ?, 'queued', 0, ?)
+                        run_id, step_id, capability, status, revision, updated_at,
+                        input_tokens, output_tokens, total_tokens, tokens_source
+                    ) VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
                     """,
-                    (run_id, step["id"], step["capability"], now),
+                    (
+                        run_id,
+                        step["id"],
+                        step["capability"],
+                        now,
+                        # Carry the spend across the replan. A replanned step is a
+                        # new attempt, not a refund: dropping these to 0 would let
+                        # auto-replan reset the budget ledger while keeping the limit.
+                        *spent_tokens.get(str(step["id"]), (0, 0, 0, "unset")),
+                    ),
                 )
             next_revision = expected + 1
             plan_sha = str(candidate_plan.get("plan_sha256") or digest_json(candidate_plan))

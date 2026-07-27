@@ -489,3 +489,103 @@ def test_events_record_the_reconciliation_without_user_text(tmp_path):
     assert "reconciliation_prepared" in types
     assert "run_reconciled" in types
     assert "sensitive result" not in str(page)
+
+
+def _deny_inline_prompt(tmp_path):
+    policy_dir = tmp_path / ".agent-hub"
+    policy_dir.mkdir(exist_ok=True)
+    (policy_dir / "project.toml").write_text(
+        'schema = "agent_hub_project_policy_v2"\n'
+        "revision = 0\n\n"
+        "[egress]\n"
+        'inline_prompt = "denied"\n',
+        encoding="utf-8",
+    )
+
+
+def test_recovered_text_obeys_the_project_egress_gate(tmp_path):
+    service = _service(tmp_path)
+    stuck = _stuck_run(service, tmp_path)
+    _deny_inline_prompt(tmp_path)
+    resolutions = [
+        {"step_id": "draft", "verdict": "delivered_recovered", "result_text": "human text"}
+    ]
+    proposal = service.dispatch(
+        "agent_hub_cancel",
+        {
+            "action": "prepare_reconcile",
+            "run_id": stuck["run_id"],
+            "expected_revision": stuck["revision"],
+            "resolutions": resolutions,
+            "run_disposition": "resume",
+        },
+    )["data"]
+
+    denied = service.dispatch(
+        "agent_hub_cancel",
+        {
+            "action": "apply_reconcile",
+            "run_id": stuck["run_id"],
+            "expected_revision": stuck["revision"],
+            "resolutions": resolutions,
+            "run_disposition": "resume",
+            "proposal": {
+                key: value
+                for key, value in proposal.items()
+                if key not in {"confirmation_phrase", "confirmation_prompt"}
+            },
+            "proposal_sha256": proposal["proposal_sha256"],
+            "confirmation_phrase": proposal["confirmation_phrase"],
+        },
+    )
+
+    # Recovered text reaches a provider through the next step, so a project that
+    # forbids inline prompts must not be bypassed by the reconciliation path.
+    assert denied["success"] is False
+    assert denied["error"]["code"] == "egress_denied"
+    assert service.store.get_run(stuck["run_id"])["status"] == "outcome_unknown"
+
+
+def test_recovered_text_is_redacted_before_it_becomes_an_artifact(tmp_path):
+    service = _service(tmp_path)
+    stuck = _stuck_run(service, tmp_path)
+    leaky = 'api_key = "sk-live-abcdefghijklmnopqrstuvwx"\nkeep this line'
+    resolutions = [{"step_id": "draft", "verdict": "delivered_recovered", "result_text": leaky}]
+    proposal = service.dispatch(
+        "agent_hub_cancel",
+        {
+            "action": "prepare_reconcile",
+            "run_id": stuck["run_id"],
+            "expected_revision": stuck["revision"],
+            "resolutions": resolutions,
+            "run_disposition": "resume",
+        },
+    )["data"]
+    applied = service.dispatch(
+        "agent_hub_cancel",
+        {
+            "action": "apply_reconcile",
+            "run_id": stuck["run_id"],
+            "expected_revision": stuck["revision"],
+            "resolutions": resolutions,
+            "run_disposition": "resume",
+            "proposal": {
+                key: value
+                for key, value in proposal.items()
+                if key not in {"confirmation_phrase", "confirmation_prompt"}
+            },
+            "proposal_sha256": proposal["proposal_sha256"],
+            "confirmation_phrase": proposal["confirmation_phrase"],
+        },
+    )["data"]
+
+    draft = next(step for step in applied["steps"] if step["step_id"] == "draft")
+    artifact_id = draft["output_artifact_ids"][0]
+    text = service._artifact_text(artifact_id)
+
+    assert "sk-live-abcdefghijklmnopqrstuvwx" not in text
+    assert "keep this line" in text
+    artifact = service.dispatch(
+        "agent_hub_artifact", {"action": "get", "artifact_id": artifact_id}
+    )["data"]
+    assert artifact["verification"]["redacted_lines"] >= 1
