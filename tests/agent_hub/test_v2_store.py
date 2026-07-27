@@ -788,28 +788,81 @@ def test_token_budget_grant_is_revision_fenced_and_rejects_claimed_runs(tmp_path
     assert claimed.value.code == "token_grant_not_allowed"
 
 
-def test_capability_token_estimate_needs_enough_samples(tmp_path):
+def _seed_completed_write_steps(store, *, provider, totals, status="completed"):
+    """Drive real steps to a terminal state so the ledger holds real numbers."""
+
+    plan = validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "Write the fixture.",
+                "capability": "write",
+                "inline_input": "fixture",
+            },
+            "steps": [
+                {"id": f"write{index}", "capability": "write", "instruction": "Write."}
+                for index in range(len(totals))
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+    run = store.create_run(
+        plan=plan,
+        project_root=str(store.path.parent),
+        idempotency_key=f"estimate.{status}.{provider}.{sum(totals)}",
+    )
+    claim = store.claim_run(run["run_id"], expected_revision=0)
+    revision = claim.revision
+    for index, total in enumerate(totals):
+        updated = store.update_step(
+            run["run_id"],
+            step_id=f"write{index}",
+            expected_run_revision=revision,
+            status=status,
+            provider=provider,
+            model="m",
+            token_usage={
+                "input_tokens": 0,
+                "output_tokens": total,
+                "total_tokens": total,
+                "source": "reported",
+            },
+        )
+        revision = updated["revision"]
+    return run["run_id"]
+
+
+def test_capability_token_estimate_reads_what_completed_steps_actually_cost(tmp_path):
     store = HubStore(tmp_path / "state.sqlite3")
-    context = {"capability": "write", "intent_sha256": "a" * 64}
 
     empty = store.capability_token_estimate(capability="write", provider="claude")
     assert empty["median_total_tokens"] is None
     assert empty["source"] == "insufficient_samples"
 
-    for total in (100, 300, 200):
-        store.record_routing_sample(
-            context=context,
-            provider="claude",
-            model="m",
-            capability="write",
-            success=True,
-            quality=None,
-            latency_ms=10,
-            total_tokens=total,
-            signal_weight=1.0,
-        )
+    _seed_completed_write_steps(store, provider="claude", totals=(100, 300, 200))
 
     estimate = store.capability_token_estimate(capability="write", provider="claude")
     assert estimate["sample_count"] == 3
     assert estimate["median_total_tokens"] == 200
-    assert estimate["source"] == "routing_samples_provider"
+    assert estimate["source"] == "step_ledger_provider"
+
+
+def test_capability_token_estimate_ignores_steps_that_did_not_complete(tmp_path):
+    # A failed or abandoned step billed something, but it is not evidence of
+    # what the capability costs when it works, which is what a wave forecast is
+    # asking about.
+    store = HubStore(tmp_path / "state.sqlite3")
+    _seed_completed_write_steps(store, provider="claude", totals=(100, 300, 200))
+    _seed_completed_write_steps(
+        store,
+        provider="claude",
+        totals=(999_000, 999_000, 999_000),
+        status="failed",
+    )
+
+    estimate = store.capability_token_estimate(capability="write", provider="claude")
+
+    assert estimate["sample_count"] == 3
+    assert estimate["median_total_tokens"] == 200

@@ -540,8 +540,10 @@ class HubStore:
                 );
                 CREATE INDEX IF NOT EXISTS routing_samples_context_provider
                     ON routing_samples(context_sha256, provider, recorded_at);
-                CREATE INDEX IF NOT EXISTS routing_samples_capability_provider
-                    ON routing_samples(capability, provider, recorded_at);
+                -- Covers capability_token_estimate, which forecasts a wave's
+                -- spend from what completed steps actually cost.
+                CREATE INDEX IF NOT EXISTS steps_capability_provider_updated
+                    ON steps(capability, provider, updated_at);
 
                 CREATE TABLE IF NOT EXISTS routing_daily_aggregates (
                     day INTEGER NOT NULL,
@@ -2492,7 +2494,14 @@ class HubStore:
         lookback_days: float = 30.0,
         minimum_samples: int = 3,
     ) -> dict[str, Any]:
-        """Median observed token spend for a capability, for pre-wave forecasting."""
+        """Median observed token spend for a capability, for pre-wave forecasting.
+
+        Read from the step ledger rather than a parallel observation table. A
+        completed step already records what the provider billed, under the
+        capability and provider that produced it, and it is the same number the
+        budget gate spends against -- so forecasting from anywhere else invites
+        the forecast and the ledger to disagree.
+        """
 
         cutoff = self._clock() - max(0.0, float(lookback_days)) * 86400.0
         connection = self._connect()
@@ -2500,9 +2509,9 @@ class HubStore:
 
             def _totals(with_provider: bool) -> list[int]:
                 sql = (
-                    "SELECT total_tokens FROM routing_samples "
-                    "WHERE capability = ? AND success = 1 AND total_tokens IS NOT NULL "
-                    "AND total_tokens > 0 AND recorded_at >= ?"
+                    "SELECT total_tokens FROM steps "
+                    "WHERE capability = ? AND status = 'completed' "
+                    "AND total_tokens > 0 AND updated_at >= ?"
                 )
                 params: list[Any] = [str(capability), cutoff]
                 if with_provider:
@@ -2516,11 +2525,11 @@ class HubStore:
             if provider:
                 candidate = _totals(True)
                 if len(candidate) >= minimum_samples:
-                    totals, source = candidate, "routing_samples_provider"
+                    totals, source = candidate, "step_ledger_provider"
             if not totals:
                 candidate = _totals(False)
                 if len(candidate) >= minimum_samples:
-                    totals, source = candidate, "routing_samples_capability"
+                    totals, source = candidate, "step_ledger_capability"
         finally:
             connection.close()
         return {
