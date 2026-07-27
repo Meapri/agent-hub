@@ -386,6 +386,15 @@ class HubService:
             safe_details={
                 "provider": provider,
                 "reason_code": error.code,
+                # Carry the one diagnostic the worker adds for a failure the
+                # provider refused to name. Everything else in safe_details is
+                # dropped, because it came from the provider.
+                **(
+                    {"payload_keys": error.safe_details["payload_keys"]}
+                    if isinstance(error.safe_details, Mapping)
+                    and isinstance(error.safe_details.get("payload_keys"), list)
+                    else {}
+                ),
             },
         )
 

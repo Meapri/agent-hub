@@ -23,7 +23,7 @@ from agent_hub.v2.failure_classes import (
     UNCLASSIFIED_PROVIDER_FAILURE,
     classify,
 )
-from agent_hub.v2.provider_worker import handle_request
+from agent_hub.v2.provider_worker import _raise_failed_payload, handle_request
 from agent_hub.v2.service import HubService
 from agent_hub.v2.store import HubStore
 
@@ -270,3 +270,31 @@ def test_a_declined_request_stays_retryable_without_an_operator(tmp_path):
     assert step["checkpoint"]["error_code"] == "fallback_exhausted"
     assert step["checkpoint"]["retry_safe"] is True
     assert settled["retryable_failed_steps"] == ["answer"]
+
+
+def test_an_unnamed_failure_records_which_payload_shape_produced_it():
+    """The dead end this closes.
+
+    provider_unclassified_failure says the provider failed and would not say
+    why. For agent_hub_execute there is no run, so no event carries anything
+    else, and the reason is simply gone. The payload's key names identify which
+    adapter path produced it while carrying none of its content.
+    """
+
+    with pytest.raises(HubV2Error) as unnamed:
+        _raise_failed_payload(
+            {"success": False, "text": "upstream blew up", "model": "m", "warnings": []}
+        )
+
+    details = unnamed.value.safe_details
+    assert details["reason_code"] == UNCLASSIFIED_PROVIDER_FAILURE
+    assert details["payload_keys"] == ["model", "success", "text", "warnings"]
+    # The values are the provider's; only the shape crosses the boundary.
+    assert "upstream blew up" not in str(details)
+
+
+def test_a_named_failure_does_not_carry_the_payload_shape():
+    with pytest.raises(HubV2Error) as named:
+        _raise_failed_payload({"success": False, "error": {"type": "rate_limit"}})
+
+    assert "payload_keys" not in named.value.safe_details

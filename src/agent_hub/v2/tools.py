@@ -114,6 +114,17 @@ def _task_schema() -> dict[str, Any]:
 
 def tool_definitions() -> list[dict[str, Any]]:
     text = {"type": "string"}
+    # Every tool that takes project_root requires an absolute path to a
+    # directory that already exists -- canonical_project_root resolves it
+    # strictly. Leaving it as a bare string meant a caller passing "." got
+    # invalid_project_root with no way to know what the tool wanted.
+    project_root = {
+        "type": "string",
+        "description": (
+            "Absolute path to an existing directory. This is the project whose "
+            'policy applies; a relative path such as "." is rejected.'
+        ),
+    }
     integer = {"type": "integer", "minimum": 0}
     boolean = {"type": "boolean"}
     definitions = [
@@ -148,7 +159,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "provider": text,
                     "model": text,
                     "record": boolean,
-                    "project_root": text,
+                    "project_root": project_root,
                 },
                 required=["task", "project_root"],
             ),
@@ -160,7 +171,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                 {
                     "mode": {"enum": ["prepare", "apply"]},
                     "task": _task_schema(),
-                    "project_root": text,
+                    "project_root": project_root,
                     "provider": text,
                     "model": text,
                     "source_paths": {"type": "array", "items": text},
@@ -178,7 +189,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             _object(
                 {
                     "plan": {"type": "object"},
-                    "project_root": text,
+                    "project_root": project_root,
                     "idempotency_key": text,
                 },
                 required=["plan", "project_root", "idempotency_key"],
@@ -210,7 +221,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         (
             "agent_hub_get",
             "Read a durable run and its step checkpoints.",
-            _object({"run_id": text, "project_root": text}, required=["run_id"]),
+            _object({"run_id": text, "project_root": project_root}, required=["run_id"]),
         ),
         (
             "agent_hub_events",
@@ -220,7 +231,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "run_id": text,
                     "after_cursor": integer,
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-                    "project_root": text,
+                    "project_root": project_root,
                 },
                 required=["run_id"],
             ),
@@ -281,7 +292,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "artifact_id": text,
                     "include_text": boolean,
                     "include_base64": boolean,
-                    "project_root": text,
+                    "project_root": project_root,
                     "destination": text,
                     "proposal": {"type": "object"},
                     "proposal_sha256": text,
@@ -309,7 +320,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             _object(
                 {
                     "action": {"enum": ["get", "prepare_update", "apply_update"]},
-                    "project_root": text,
+                    "project_root": project_root,
                     "target": {
                         "enum": ["policy"],
                         "description": "Only the project policy is editable.",
@@ -338,7 +349,7 @@ def tool_definitions() -> list[dict[str, Any]]:
                         ],
                         "description": "history and diff are read-only. diff without target_sequence compares a snapshot against the working file, which reveals edits made outside Agent Hub.",
                     },
-                    "project_root": text,
+                    "project_root": project_root,
                     "arguments": {"type": "object"},
                 },
                 required=["action", "project_root"],
@@ -349,7 +360,7 @@ def tool_definitions() -> list[dict[str, Any]]:
             "Run read-only v2 diagnostics and return a repair plan when requested.",
             _object(
                 {
-                    "project_root": text,
+                    "project_root": project_root,
                     "live": boolean,
                     "repair": {"enum": ["none", "prepare"]},
                 },
