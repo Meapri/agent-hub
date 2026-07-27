@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable, Collection, Dict, Mapping
 import urllib.parse
 
+from agent_hub.v2.store import DEFAULT_STATE_DIR
 from claude_codex import security as claude_security
 from claude_codex import models as claude_models
 from claude_codex import subscription_auth as claude_subscription
@@ -63,6 +64,7 @@ LOGGER = logging.getLogger(__name__)
 # Long enough for a cancelled request to unwind, short enough that closing the
 # setup GUI never feels hung.
 CLOSE_JOIN_TIMEOUT_SECONDS = 5.0
+CONNECTION_TEST_SCOPE = DEFAULT_STATE_DIR
 MAX_JOBS = 32
 JOB_TTL_SECONDS = 30 * 60
 MAX_MODELS = 150
@@ -1487,6 +1489,12 @@ class ConnectionManager:
                 {
                     "provider": provider,
                     "model": selected_model,
+                    # A connection test asks whether this machine's account can
+                    # reach the provider, not whether some project permits it.
+                    # The machine-global state root always exists and carries
+                    # default policy, so a project that denies a provider cannot
+                    # make its account look broken.
+                    "project_root": str(CONNECTION_TEST_SCOPE),
                     "task": {
                         "schema": TASK_SCHEMA,
                         "intent": "Return a short connection acknowledgement.",
