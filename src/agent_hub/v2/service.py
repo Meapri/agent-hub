@@ -1636,11 +1636,27 @@ class HubService:
                 "context_token_budget": context_budget["token_budget"],
                 "context_model_max_input_tokens": context_budget["model_max_input_tokens"],
                 "context_effective_input_limit": context_budget["effective_input_limit"],
+                # Persist the exact routing bucket this step scored against.
+                # agent_hub_feedback must record its sample into the same bucket;
+                # rebuilding it from the run-level task lands somewhere route()
+                # never queries, which silently discards every human rating.
+                "routing_context": routing_context(task, model=model),
             }
         aad = f"agent-hub-v2-step:{step['id']}".encode("utf-8")
+        if provider != "local":
+            # Settle the token spend before anything downstream can raise. The
+            # provider call already happened, so those tokens are billed whether
+            # or not the verifier accepts the output.
+            # `context_budget` only counts assembled dependency context, so the
+            # input estimate is a floor: intent and wrapper text are not included.
+            token_usage = normalize_token_usage(
+                result.get("usage") if isinstance(result, Mapping) else None,
+                estimated_input_tokens=int(context_budget["estimated_input_tokens"]),
+                estimated_output_tokens=estimate_tokens_from_text(text),
+            )
         try:
             verification = verify_output(text, step.get("verifier"))
-        except HubV2Error:
+        except HubV2Error as exc:
             if provider != "local":
                 self.store.record_routing_sample(
                     context=routing_context(task, model=model),
@@ -1653,6 +1669,11 @@ class HubService:
                     total_tokens=None,
                     signal_weight=3.0,
                 )
+                # Carry the spend out with the error so the wave can still bill it.
+                exc.safe_details = {
+                    **dict(exc.safe_details or {}),
+                    "spent_token_usage": token_usage,
+                }
             raise
         encrypted = self.cipher.encrypt(text.encode("utf-8"), aad=aad)
         artifact = self.store.put_artifact(
@@ -1681,13 +1702,6 @@ class HubService:
             if usage:
                 checkpoint["usage"] = usage
         if provider != "local":
-            # `context_budget` only counts assembled dependency context, so the
-            # input estimate is a floor: intent and wrapper text are not included.
-            token_usage = normalize_token_usage(
-                result.get("usage") if isinstance(result, Mapping) else None,
-                estimated_input_tokens=int(context_budget["estimated_input_tokens"]),
-                estimated_output_tokens=estimate_tokens_from_text(text),
-            )
             # Purely estimated numbers would pollute the routing efficiency score.
             total_tokens = (
                 token_usage["total_tokens"]
@@ -1931,6 +1945,7 @@ class HubService:
                                 "provider_worker_failed",
                                 "provider_protocol_error",
                             }
+                            spent = (exc.safe_details or {}).get("spent_token_usage")
                             updated = self.store.update_step(
                                 run_id,
                                 step_id=step_id,
@@ -1945,6 +1960,8 @@ class HubService:
                                     "retry_safe": bool(exc.retryable and not ambiguous),
                                     "error_code": exc.code,
                                 },
+                                # A failed step still spent whatever the provider billed.
+                                token_usage=spent if isinstance(spent, Mapping) else None,
                             )
                             current_revision = updated["revision"]
                         except Exception:  # noqa: BLE001 - isolate one failed wave future
@@ -2596,8 +2613,18 @@ class HubService:
                     if rating is not None
                     else {"accepted": 1.0, "partial": 0.5, "rejected": 0.0}.get(outcome)
                 )
+                # Reuse the bucket the step actually scored against. The run-level
+                # task has a different capability, intent and input size, so
+                # rebuilding the context here would file the rating under a key
+                # route() never reads.
+                recorded_context = step["checkpoint"].get("routing_context")
+                context = (
+                    dict(recorded_context)
+                    if isinstance(recorded_context, Mapping)
+                    else routing_context(plan["task"], model=step.get("model"))
+                )
                 self.store.record_routing_sample(
-                    context=routing_context(plan["task"], model=step.get("model")),
+                    context=context,
                     provider=step["provider"],
                     model=step.get("model"),
                     capability=step["capability"],

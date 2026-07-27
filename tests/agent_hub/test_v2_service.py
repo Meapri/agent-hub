@@ -2419,3 +2419,76 @@ def test_token_budget_exhaustion_is_resumable_through_continue(tmp_path):
         for event in service.dispatch("agent_hub_events", {"run_id": run_id})["data"]["events"]
     ]
     assert "run_token_budget_granted" in types
+
+
+def test_feedback_lands_in_the_bucket_the_step_actually_scored_against(tmp_path):
+    service = _service(tmp_path)
+    # The run-level task deliberately differs from the step in capability,
+    # intent language and input size, which is what used to split the buckets.
+    plan = validate_plan(
+        {
+            "schema": PLAN_SCHEMA,
+            "task": {
+                "schema": TASK_SCHEMA,
+                "intent": "런 수준 의도는 스텝과 다릅니다.",
+                "capability": "chat",
+                "inline_input": "x" * 9000,
+                "constraints": {"provider_allowlist": ["gpt"]},
+            },
+            "steps": [
+                {
+                    "id": "answer",
+                    "capability": "review",
+                    "instruction": "Review it.",
+                    "routing_requirements": {"planner_provider": "gpt"},
+                }
+            ],
+            "routing_mode": "shadow",
+            "policy_revision": 0,
+        }
+    )
+    started = service.dispatch(
+        "agent_hub_start",
+        {
+            "plan": plan,
+            "project_root": str(tmp_path),
+            "idempotency_key": f"bucket.{secrets.token_hex(4)}",
+        },
+    )["data"]
+    service.dispatch(
+        "agent_hub_continue",
+        {"run_id": started["run_id"], "expected_revision": started["revision"]},
+    )
+    run = _await_settled(service, started["run_id"])
+
+    service.dispatch(
+        "agent_hub_feedback",
+        {
+            "run_id": started["run_id"],
+            "expected_revision": run["revision"],
+            "step_id": "answer",
+            "outcome": "accepted",
+            "rating": 5,
+        },
+    )
+
+    connection = sqlite3.connect(service.store.path)
+    try:
+        execution = {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT context_sha256 FROM routing_samples WHERE signal_weight = 3.0"
+            )
+        }
+        feedback = {
+            row[0]
+            for row in connection.execute(
+                "SELECT DISTINCT context_sha256 FROM routing_samples WHERE signal_weight > 3.0"
+            )
+        }
+    finally:
+        connection.close()
+
+    assert execution and feedback
+    # A human rating that lands in a bucket route() never reads is silently lost.
+    assert execution & feedback

@@ -37,8 +37,18 @@ ROUTING_PROFILE_WEIGHTS: dict[str, dict[str, float]] = {
     },
 }
 AUTO_MIN_OBSERVED_SAMPLES = 5
-AUTO_MAX_PRIOR_FRACTION = 0.5
-AUTO_SEPARATION_Z = 1.0
+# One runtime routing sample contributes this much weight, so a weight divided
+# by it is an effective sample count.
+RUNTIME_SAMPLE_WEIGHT = 3.0
+MIN_PROPORTION_VARIANCE = 0.01
+# A prior may inform a promotion but must never be the bulk of the evidence.
+# At the default prior weight this needs roughly six observed samples, which is
+# above AUTO_MIN_OBSERVED_SAMPLES rather than below it.
+AUTO_MAX_PRIOR_FRACTION = 0.25
+# One-sided ~98%. z=1 promoted indistinguishable providers far too often, and
+# every wave compares several candidates without any multiple-comparison
+# correction, so the bar has to absorb that too.
+AUTO_SEPARATION_Z = 2.0
 AUTO_MAX_QUALITY_REGRESSION = 0.03
 AUTO_MAX_FAILURE_REGRESSION = 0.02
 AUTO_MIN_QUALITY_GAIN = 0.05
@@ -55,6 +65,21 @@ def profile_weights(routing_profile: str) -> dict[str, float]:
             safe_details={"routing_profile": str(routing_profile)[:64]},
         )
     return dict(weights)
+
+
+def _binomial_sd(proportion: float, weight: float) -> float:
+    """Standard error from an *effective sample count*, not a raw weight.
+
+    Routing weights are not counts: one runtime sample carries
+    RUNTIME_SAMPLE_WEIGHT. Feeding the weight straight into sqrt(p(1-p)/n)
+    understates the error by sqrt(RUNTIME_SAMPLE_WEIGHT). A floor on the
+    variance also keeps a run of identical outcomes (p exactly 0 or 1) from
+    reporting zero uncertainty.
+    """
+
+    effective_n = max(0.0, float(weight)) / RUNTIME_SAMPLE_WEIGHT
+    spread = max(proportion * (1.0 - proportion), MIN_PROPORTION_VARIANCE)
+    return (spread / (effective_n + 1.0)) ** 0.5
 
 
 def _blend_positive(
@@ -96,7 +121,7 @@ def blend_statistics(
     else:
         reliability = float(stats["reliability"])
         reliability_n = 2.0 + success + failure
-    reliability_sd = (reliability * (1.0 - reliability) / (reliability_n + 1.0)) ** 0.5
+    reliability_sd = _binomial_sd(reliability, reliability_n)
 
     prior_quality = prior_entry.get("quality") if prior_entry else None
     if prior_quality is not None and weight > 0.0:
@@ -112,7 +137,7 @@ def blend_statistics(
         quality_n = quality_weight
     # With no quality evidence the value is a placeholder shared by every
     # candidate, so it must contribute no uncertainty either.
-    quality_sd = 0.0 if quality_n <= 0.0 else (quality * (1.0 - quality) / (quality_n + 1.0)) ** 0.5
+    quality_sd = 0.0 if quality_n <= 0.0 else _binomial_sd(quality, quality_n)
 
     latency_ms = _blend_positive(
         prior_entry.get("latency_ms") if prior_entry else None,
