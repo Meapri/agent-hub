@@ -26,6 +26,7 @@ from .contracts import (
     TASK_SCHEMA,
     canonical_json,
     canonical_project_root,
+    ensure_public_model_id,
     estimate_tokens_from_text,
     input_token_limit,
     normalize_token_usage,
@@ -44,6 +45,7 @@ from .dependency_context import (
 )
 from .egress import prepare_egress, redact_secret_lines, verify_egress_approval
 from .errors import HubV2Error, public_failure, safe_unexpected_error
+from .failure_classes import classify, is_known
 from .policy import (
     apply_policy_update,
     load_policy,
@@ -85,7 +87,24 @@ def _structured_text(result: Mapping[str, Any]) -> str:
     data = result.get("data")
     if isinstance(data, Mapping) and isinstance(data.get("text"), str):
         return data["text"]
-    return json.dumps(result, ensure_ascii=False)
+    # A response carrying no readable answer is not an answer. Serialising the
+    # envelope here used to manufacture one: `{"success": true, ...}` is
+    # non-empty, so verification accepted it and the step completed on text the
+    # provider never wrote. Returning nothing lets the verifier reject it.
+    return ""
+
+
+def _resumable(run: Mapping[str, Any]) -> bool:
+    """Whether some public tool call can still move this run forward."""
+
+    if run["token_usage"]["exhausted"]:
+        # A budget grant through agent_hub_continue reopens the run.
+        return True
+    return any(
+        step["status"] in {"queued", "running"}
+        or (step["status"] == "failed" and step["checkpoint"].get("retry_safe") is True)
+        for step in run["steps"]
+    )
 
 
 def _planner_manifest_summary(manifest: Mapping[str, Any]) -> str:
@@ -1581,13 +1600,11 @@ class HubService:
                         error_code=exc.code,
                     )
                     last_error = exc
-                    if exc.code in {
-                        "provider_timeout",
-                        "provider_worker_failed",
-                        "provider_protocol_error",
-                    }:
-                        raise
-                    if not exc.retryable:
+                    # Only a demonstrably undelivered request may be handed to the
+                    # next candidate. Falling back after an ambiguous failure would
+                    # send a second copy of a request the first provider may have
+                    # already run.
+                    if classify(exc.code) != "retry_safe":
                         raise
                     continue
                 self._invalidate_provider_state(provider)
@@ -1613,11 +1630,22 @@ class HubService:
                     safe_details={"last_error_code": last_error.code if last_error else "unknown"},
                 )
             text = _structured_text(result)
-            model = (
-                result.get("model")
-                if isinstance(result.get("model"), str)
-                else models.get(provider) or None
-            )
+            # The response's model string is provider-controlled and reaches the
+            # step record and the routing bucket. ensure_public_model_id is what
+            # keeps internal and placeholder ids off public surfaces, so it has
+            # to apply here too; an id that fails it falls back to the one we
+            # asked for rather than failing the step over a label.
+            model = models.get(provider) or None
+            reported = result.get("model")
+            if isinstance(reported, str):
+                try:
+                    model = ensure_public_model_id(reported)
+                except HubV2Error:
+                    self.store.record_runtime_event(
+                        run_id,
+                        event_type="provider_model_id_rejected",
+                        details={"step_id": str(step["id"]), "provider": provider},
+                    )
             media_type = "text/plain; charset=utf-8"
             checkpoint = {
                 "routing_decision_id": decision["decision_id"],
@@ -1940,11 +1968,22 @@ class HubService:
                             outcome = future.result()
                         except HubV2Error as exc:
                             errors[step_id] = exc
-                            ambiguous = exc.code in {
-                                "provider_timeout",
-                                "provider_worker_failed",
-                                "provider_protocol_error",
-                            }
+                            failure_class = classify(exc.code)
+                            ambiguous = failure_class == "ambiguous"
+                            if not is_known(exc.code):
+                                # The conservative default parks the run for
+                                # reconciliation. Say so, so the gap in the
+                                # table is visible rather than inferred from a
+                                # run that mysteriously needs a human.
+                                self.store.record_runtime_event(
+                                    run_id,
+                                    event_type="provider_failure_unclassified",
+                                    details={
+                                        "step_id": step_id,
+                                        "error_code": exc.code,
+                                        "reason_code": failure_class,
+                                    },
+                                )
                             spent = (exc.safe_details or {}).get("spent_token_usage")
                             updated = self.store.update_step(
                                 run_id,
@@ -1957,7 +1996,7 @@ class HubService:
                                     "phase": (
                                         "outcome_unknown" if ambiguous else "provider_failed"
                                     ),
-                                    "retry_safe": bool(exc.retryable and not ambiguous),
+                                    "retry_safe": failure_class == "retry_safe",
                                     "error_code": exc.code,
                                 },
                                 # A failed step still spent whatever the provider billed.
@@ -2008,13 +2047,7 @@ class HubService:
                     ambiguous_errors = [
                         errors[step["id"]]
                         for step in ready
-                        if step["id"] in errors
-                        and errors[step["id"]].code
-                        in {
-                            "provider_timeout",
-                            "provider_worker_failed",
-                            "provider_protocol_error",
-                        }
+                        if step["id"] in errors and classify(errors[step["id"]].code) == "ambiguous"
                     ]
                     if ambiguous_errors:
                         raise ambiguous_errors[0]
@@ -2037,13 +2070,26 @@ class HubService:
                     break
             final = self.store.get_run(run_id)
             completed = all(step["status"] == "completed" for step in final["steps"])
+            unresolved = any(step["status"] == "outcome_unknown" for step in final["steps"])
+            if completed:
+                status, reason = "completed", "all_steps_completed"
+            elif unresolved:
+                status, reason = "outcome_unknown", "outcome_unknown"
+            elif _resumable(final):
+                status, reason = "paused", "wave_budget"
+            else:
+                # Nothing can advance this run: no step is waiting, none is safe
+                # to retry, none can be adjudicated, and replanning is reachable
+                # only from the automatic path. Calling that paused would promise
+                # a resumption that no public tool can perform.
+                status, reason = "failed", "no_remaining_action"
             self.store.finalize_claim(
                 run_id,
                 claim_token=claim_token,
                 expected_revision=current_revision,
-                status="completed" if completed else "paused",
+                status=status,
                 event_type="run_completed" if completed else "run_paused",
-                details={"reason_code": "all_steps_completed" if completed else "wave_budget"},
+                details={"reason_code": reason},
             )
         except HubV2Error as exc:
             try:
@@ -2057,17 +2103,22 @@ class HubService:
                     reason_code=exc.code,
                 )
                 current = reconciled["run"]
-                status = (
-                    "outcome_unknown"
-                    if reconciled["outcome_unknown_step_ids"]
-                    or exc.code
-                    in {
-                        "provider_timeout",
-                        "provider_worker_failed",
-                        "provider_protocol_error",
-                    }
-                    else "paused"
-                )
+                # A run cannot rest at paused while one of its steps is
+                # unresolved: prepare_reconcile only accepts an outcome_unknown
+                # run, so paused here would leave the step with no way out.
+                # Steps the wave already parked are not in this pass's list, so
+                # ask the run itself.
+                if (
+                    reconciled["outcome_unknown_step_ids"]
+                    or classify(exc.code) == "ambiguous"
+                    or any(
+                        str(item["status"]) == "outcome_unknown"
+                        for item in current.get("steps") or []
+                    )
+                ):
+                    status = "outcome_unknown"
+                else:
+                    status = "paused" if _resumable(current) else "failed"
                 finalized = self.store.finalize_claim(
                     run_id,
                     claim_token=claim_token,
@@ -2118,7 +2169,13 @@ class HubService:
                     claim_token=claim_token,
                     expected_revision=current["revision"],
                     status=(
-                        "outcome_unknown" if reconciled["outcome_unknown_step_ids"] else "paused"
+                        "outcome_unknown"
+                        if reconciled["outcome_unknown_step_ids"]
+                        or any(
+                            str(item["status"]) == "outcome_unknown"
+                            for item in current.get("steps") or []
+                        )
+                        else "paused"
                     ),
                     event_type="run_paused",
                     details={

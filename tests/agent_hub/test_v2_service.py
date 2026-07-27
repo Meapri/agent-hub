@@ -147,7 +147,7 @@ class _FallbackWorker(_FakeWorker):
         self.__class__.invoked.append((self.provider, params.get("model")))
         if self.provider == "gpt":
             raise HubV2Error(
-                "provider_quota_exhausted",
+                "rate_limit",
                 "The fixture primary is unavailable.",
                 scope="provider",
                 retryable=True,
@@ -318,7 +318,7 @@ class _RetryOnceWorker(_FakeWorker):
             self.__class__.invocations += 1
             if self.__class__.invocations == 1:
                 raise HubV2Error(
-                    "provider_quota_exhausted",
+                    "rate_limit",
                     "The fixture is temporarily unavailable.",
                     scope="provider",
                     retryable=True,
@@ -2008,7 +2008,9 @@ def test_unexpected_worker_exception_releases_run_claim_safely(tmp_path):
             break
         time.sleep(0.01)
 
-    assert current["status"] == "paused"
+    # An internal error is terminal and leaves nothing to retry, so the run
+    # settles as failed rather than claiming to be resumable.
+    assert current["status"] == "failed"
     assert current["lease_active"] is False
     events = service.store.events(started["data"]["run_id"])["events"]
     assert events[-1]["details"]["error_code"] == "run_internal_error"
@@ -2067,7 +2069,9 @@ def test_unexpected_parallel_step_exception_preserves_completed_sibling(tmp_path
             break
         time.sleep(0.01)
 
-    assert current["status"] == "paused"
+    # The sibling's output survives, but nothing remains that a public tool can
+    # advance, so the run is failed rather than paused.
+    assert current["status"] == "failed"
     steps = {step["step_id"]: step for step in current["steps"]}
     assert steps["crash"]["status"] == "failed"
     assert steps["crash"]["checkpoint"]["error_code"] == "run_internal_error"
@@ -2173,7 +2177,9 @@ def test_explicit_retry_rejects_ambiguous_or_internal_failure(tmp_path):
     )
 
     assert result["success"] is False
-    assert result["error"]["code"] == "step_not_retryable"
+    # Neither an ambiguous nor an internal failure is safe to re-send, so the
+    # run never reaches the paused state that retry requires.
+    assert result["error"]["code"] == "run_not_retryable"
 
 
 def test_live_catalog_context_limit_is_revisioned_cached_and_used_for_routing(tmp_path):

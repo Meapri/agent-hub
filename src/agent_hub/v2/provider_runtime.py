@@ -39,6 +39,7 @@ from openai_codex import security as openai_security
 
 from .contracts import ensure_public_model_id
 from .errors import HubV2Error
+from .failure_classes import UNCLASSIFIED_PROVIDER_FAILURE
 
 PROVIDERS = ("claude", "grok", "gemini", "gpt")
 PLANNER_REPAIR_LIMIT = limits.MAX_PLANNER_REPAIRS
@@ -83,7 +84,7 @@ def _envelope(
     error = payload.get("error")
     if not ok and not isinstance(error, Mapping):
         error = {
-            "type": str(payload.get("error_type") or "operation_failed"),
+            "type": str(payload.get("error_type") or UNCLASSIFIED_PROVIDER_FAILURE),
             "message": text,
         }
     return {

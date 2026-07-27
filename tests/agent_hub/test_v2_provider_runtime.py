@@ -284,7 +284,9 @@ def test_worker_promotes_provider_payload_failure_to_protocol_failure(monkeypatc
 
     assert result["success"] is False
     assert result["error"]["code"] == "codex_process_error"
-    assert result["error"]["retryable"] is True
+    # A dead CLI subprocess does not tell us whether the request reached the
+    # model, so the runtime must not re-dispatch it on its own.
+    assert result["error"]["retryable"] is False
     assert "private upstream" not in str(result)
 
 

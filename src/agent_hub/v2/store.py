@@ -1806,11 +1806,7 @@ class HubStore:
             for identifier in identifiers:
                 step = selected_by_id[identifier]
                 checkpoint = _json_object(step["checkpoint_state"])
-                retry_safe = (
-                    checkpoint.get("retry_safe") is True
-                    or checkpoint.get("error_code") == "fallback_exhausted"
-                )
-                if step["status"] != "failed" or not retry_safe:
+                if step["status"] != "failed" or checkpoint.get("retry_safe") is not True:
                     raise HubV2Error(
                         "step_not_retryable",
                         "A requested step is not safe to retry.",

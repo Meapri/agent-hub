@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from .contracts import ensure_public_model_id, output_token_limit, require_object, validate_task
 from .errors import HubV2Error, public_failure, safe_unexpected_error
+from .failure_classes import UNCLASSIFIED_PROVIDER_FAILURE, is_retryable
 from .provider_manifests import manifest_for
 from . import provider_runtime
 
@@ -40,24 +41,20 @@ def _raise_failed_payload(result: Mapping[str, Any]) -> None:
         candidate = error
     if not candidate:
         candidate = str(result.get("error_type") or "")
+    # An unnamed or unusable error tells us the call failed but not whether the
+    # provider ran it, so it must not inherit the "answered on the merits"
+    # reading that a named code carries.
     code = (
         candidate[:64]
-        if candidate.replace("_", "").replace("-", "").isalnum()
-        else "provider_operation_failed"
+        if candidate and candidate.replace("_", "").replace("-", "").isalnum()
+        else UNCLASSIFIED_PROVIDER_FAILURE
     )
     raise HubV2Error(
-        code or "provider_operation_failed",
+        code,
         "The provider could not complete the requested operation.",
         scope="provider",
-        retryable=code
-        in {
-            "codex_process_error",
-            "codex_timeout",
-            "provider_timeout",
-            "rate_limit",
-            "temporary_unavailable",
-        },
-        safe_details={"reason_code": code or "provider_operation_failed"},
+        retryable=is_retryable(code),
+        safe_details={"reason_code": code},
     )
 
 

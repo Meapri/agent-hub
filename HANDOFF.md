@@ -11,19 +11,21 @@
   정본 원칙: 모든 상태는 Git에 커밋되는 파일에 산다. 도구는 소모품이다.
 
 <!-- agent-hub:handoff:v1:start -->
-- **원래 목표**: Agent Hub를 "선택적 control plane"으로 재정의하기 전에, 실행 경로에서 모델에게 거짓 근거를 주입하는 코드를 지우고 라우팅 층의 실효성을 판정합니다. 4주 계획의 1주차입니다.
-- **현재 단계**: 1주차 네 항목을 모두 끝내고 게이트 A·B 판정을 기록했습니다. `week1/remove-false-evidence` 브랜치에 커밋 2건이 있고 push 전입니다.
+- **원래 목표**: Agent Hub를 "선택적 control plane"으로 재정의하기 전에, 실패 분류를 단일 표로 통합하고 provider가 거짓을 말할 때의 봉쇄를 종류별로 검증합니다. 4주 계획의 2주차입니다.
+- **현재 단계**: 2주차 두 항목을 모두 끝냈습니다. `week2/failure-classification` 브랜치에 커밋 2건(`d0c1046`, `6546669`)이 있고 push 전입니다.
 - **완료**:
-  - write 경로가 만들던 거짓 fact pack을 제거했습니다. provider worker는 project_root를 넘기지 않고 cwd가 빈 샌드박스 디렉터리라, 모든 write step이 "Skills/MCP tools/Install commands: [none detected], manifest complete: True (0/0)"를 권위 있는 근거로 받고 있었습니다. writing.py의 수집 함수 4개와 전용 git 헬퍼, doc_facts.py, gather.py를 지웠고 validate_project_root만 core/repository_facts.py로 이관했습니다. writing.py는 이제 subprocess와 pathlib을 import하지 않습니다.
-  - 삭제 전 실패하고 삭제 후 통과하는 경계 테스트 3개를 먼저 작성해 red에서 green 전이를 확인했습니다.
-  - store 불변식 12개와 모든 테스트 teardown에서 자동 검사하는 conftest를 추가했습니다. _REQUIRED_SCHEMA_COLUMNS와 PRAGMA 루프를 store 오픈 경로에서 invariants로 옮겨 마이그레이션과 검사기가 어긋날 수 없게 했습니다.
-  - 게이트 A를 판정했습니다. 사전 기준은 808b46c가 고친 결함 3건 중 2건 이상 소급 검출이었고 결과는 1건이라 미달입니다. 통과로 기록하지 않았습니다.
-  - 게이트 B를 판정했습니다. 정책 routing_mode=auto로 durable run 10건을 돌리고 planner를 번갈아 지정해 두 provider가 각각 5회 실행되게 했는데도 provider 변경은 0건이고 전부 cold_start_preserves_planner였습니다.
-  - handoff 스냅샷 0행의 원인이 고장이 아니라 미실행임을 배포된 daemon에서 확인했습니다. apply_update가 snapshot.recorded=true를 반환하고 DB에 1행이 기록됩니다.
-- **미완**: 2주차의 실패 분류표 통합과 fault injection 스위트, 3주차의 라우팅 층 삭제, 4주차의 provider MCP 중복층·sdk·workflows 삭제와 claude API 키 lane 실험이 남았습니다. 브랜치를 아직 push하지 않았습니다.
-- **변경 파일**: `src/google_antigravity_codex/writing.py`, 삭제된 `src/google_antigravity_codex/doc_facts.py`와 `src/orchestrate_codex/gather.py`, `src/agent_hub/core/repository_facts.py`, `src/agent_hub/core/handoff.py`, 신규 `src/agent_hub/v2/invariants.py`와 `tests/conftest.py`, `src/agent_hub/v2/store.py`, 관련 테스트 4개를 바꿨습니다.
-- **검증 실행 결과**: 전체 pytest `678 passed, 2 skipped`; `ruff check`와 `ruff format --check`(177 files); `./scripts/check-sync.sh`; `./scripts/check-hub-plugins.sh`; sdist/wheel build를 통과했습니다. main 대비 12 files changed, 480 insertions, 713 deletions로 순 233줄 감소입니다.
-- **현재 리스크**: 게이트 A 미달로 불변식은 실패 경로 안전망이 아니라 상태 오염 조기경보로만 신뢰합니다. 실패 경로 검증은 2주차 fault injection이 담당해야 합니다. 배포된 2.4.1 릴리스에는 1주차 변경이 아직 반영되지 않았습니다.
-- **Do-Not-Repeat**: 샌드박스 worker에 project_root를 넘겨 fact pack 수집을 되살리지 마세요. worker는 사용자 프로젝트를 볼 정당한 경로가 없습니다. 불변식 술어를 특정 결함에 맞춰 쓰지 마세요. 그런 술어는 구성상 통과하며 아무것도 증명하지 않습니다. routing_context에서 model을 제거하지 않은 채 auto 게이트의 표본 하한만 낮추지 마세요. 버킷이 provider별로 고립되어 있어 하한을 낮춰도 게이트는 열리지 않습니다.
-- **다음 한 걸음**: `src/agent_hub/v2/provider_runtime.py`에 `FAILURE_CLASSES: dict[str, str]` 표를 추가하고 86행의 `"operation_failed"` 기본값을 그 표를 통한 조회로 바꾸세요.
+  - 실패 분류를 결정하던 8개 사이트를 `src/agent_hub/v2/failure_classes.py`의 `FAILURE_CLASSES` 단일 표로 통합했습니다. provider_runtime의 기본 error type, provider_worker의 payload 승격 기본값과 retryable 집합, fallback 루프의 ambiguous 집합, wave의 오류 선택과 checkpoint 파생 불리언, store의 `fallback_exhausted` 특수 케이스, finalize 3경로의 status 선택이 각각 독립적으로 판단하며 서로 어긋나 있었습니다.
+  - 분류 기준을 "실패했는가"가 아니라 "응답을 받았는가"로 잡았습니다. 미발송이거나 provider가 작업을 거절한 것은 retry_safe, 보냈는데 응답이 없는 것은 ambiguous, 응답을 받고 내용상 거절된 것은 terminal입니다. 표에 없는 코드는 항상 ambiguous로 떨어지며 절대 retry_safe가 되지 않습니다.
+  - 막혀 있던 3건과 동형인 실패(이름 없는 payload 실패)가 `outcome_unknown`이 되고 `prepare_reconcile`/`apply_reconcile`로 종결되는 것을 end-to-end 테스트로 확인했습니다. 2-1의 완료 기준을 충족합니다.
+  - 통합 과정에서 provider_worker가 이름 없는 payload 실패에 `provider_operation_failed`를 붙여 "내용상 거절됨"으로 단정하던 결함을 찾아 고쳤습니다. 그게 막힌 run 3건의 정확한 형태입니다.
+  - run이 paused인데 step은 outcome_unknown인 상태를 찾아 고쳤습니다. `prepare_reconcile`은 run이 outcome_unknown일 때만 받으므로 그 step은 재시도도 조정도 불가능했습니다. 불변식 `unresolved_steps_keep_their_run_reconcilable`을 추가해 재발을 막습니다.
+  - `HubV2Error.public()`이 표가 아는 코드에 대해 표의 판정을 보고하도록 했습니다. `provider_timeout`이 wire에 `retryable=true`로 나가 이를 읽는 에이전트가 이미 전달됐을 수 있는 요청을 재전송하는 경로를 막았습니다.
+  - 거짓말 15종을 파라미터화한 fault injection 스위트를 추가했습니다. 종류마다 봉쇄를 확인하고, 공통으로 모든 run이 공개 도구로 진행 가능한 상태에 도달하는지 검사합니다.
+  - 스위트가 결함 3건을 드러냈고 모두 고쳤습니다. `_structured_text`가 text 없는 응답을 `json.dumps(envelope)`로 바꿔 검증을 통과시키고 step을 완료 처리하던 laundering, 진행 수단이 없는 run이 paused로 남아 존재하지 않는 재개 가능성을 주장하던 문제, provider 응답의 model 문자열이 `ensure_public_model_id`를 우회해 내부·placeholder id가 step 기록과 라우팅 버킷에 들어가던 누출입니다.
+- **미완**: 3주차의 라우팅 층 삭제와 self-scored quality 폐쇄 루프 차단, 4주차의 provider MCP 중복층·sdk·workflows 삭제와 claude API 키 lane 실험이 남았습니다. 브랜치를 아직 push하지 않았습니다.
+- **변경 파일**: 신규 `src/agent_hub/v2/failure_classes.py`, `tests/agent_hub/test_v2_failure_classes.py`, `tests/agent_hub/test_v2_fault_injection.py`. 수정 `src/agent_hub/v2/service.py`, `src/agent_hub/v2/provider_worker.py`, `src/agent_hub/v2/provider_runtime.py`, `src/agent_hub/v2/errors.py`, `src/agent_hub/v2/store.py`, `src/agent_hub/v2/invariants.py`, `tests/agent_hub/test_v2_service.py`, `tests/agent_hub/test_v2_provider_runtime.py`.
+- **검증 실행 결과**: 전체 pytest `731 passed, 2 skipped`; `ruff check` 통과; `ruff format --check` 180 files already formatted; `./scripts/check-sync.sh` 통과입니다. 1주차 종료 시점 678건 대비 테스트 53건이 늘었습니다.
+- **현재 리스크**: 동작 변경 3건이 기존 계약을 바꿉니다. `codex_process_error`와 `codex_timeout`이 retryable에서 ambiguous로 바뀌어 CLI subprocess가 죽으면 자동 재시도 대신 사람의 조정을 기다립니다. 진행 수단이 없는 run이 paused 대신 failed로 종결됩니다. text 없는 응답이 완료가 아니라 `deterministic_verification_failed`로 떨어집니다. 배포된 2.4.1 릴리스에는 1·2주차 변경이 모두 미반영입니다. 사용자 DB의 막힌 run 5건은 지시대로 손대지 않았고 이번 변경은 신규 run에만 적용됩니다.
+- **Do-Not-Repeat**: 표에 없는 코드의 기본값을 retry_safe 쪽으로 바꾸지 마세요. 이미 전달됐을 수 있는 요청을 자동 재전송하는 것이 이 표가 막으려는 유일한 실수입니다. fallback 루프가 retry_safe 이외의 실패에서 다음 provider로 넘어가게 만들지 마세요. 그러면 `fallback_exhausted`의 retry_safe 분류가 즉시 거짓이 됩니다. `_structured_text`에 envelope 직렬화 fallback을 되살리지 마세요. 답변이 아닌 것을 답변으로 만듭니다. 진행 수단이 없는 run을 paused로 되돌리지 마세요. 공개 도구 14개에 replan이 없어 재개가 불가능합니다.
+- **다음 한 걸음**: `src/agent_hub/v2/service.py` 707행의 `routing_mode="pinned" if explicit else "shadow"`를 읽고 라우팅 층 삭제 범위를 확정하세요.
 <!-- agent-hub:handoff:v1:end -->

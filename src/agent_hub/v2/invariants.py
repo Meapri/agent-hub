@@ -222,6 +222,21 @@ _PREDICATES: tuple[tuple[str, str], ...] = (
         """,
     ),
     (
+        "unresolved_steps_keep_their_run_reconcilable",
+        # prepare_reconcile only accepts an outcome_unknown run. A run that
+        # settles anywhere else while a step is still outcome_unknown has
+        # stranded that step: nothing can retry it and nothing can adjudicate it.
+        """
+        SELECT run_id FROM runs
+        WHERE status != 'outcome_unknown'
+          AND status NOT IN ('running', 'prepared', 'cancelled')
+          AND EXISTS (
+              SELECT 1 FROM steps s
+              WHERE s.run_id = runs.run_id AND s.status = 'outcome_unknown'
+          )
+        """,
+    ),
+    (
         "reconciliation_grants_stay_within_their_run",
         """
         SELECT reconciliation_id FROM run_reconciliations r
