@@ -633,9 +633,24 @@ class ConnectionManager:
             self._starting_tests.add(provider)
         try:
             state = self.status(provider)["providers"][provider]
-            if not state["consent"] or not (state["login_ready"] or state["invocation_ready"]):
+            if not state["consent"]:
                 raise ConnectionError(
-                    "동의와 로그인을 모두 완료한 뒤 연결을 테스트할 수 있습니다.",
+                    "이 제공자의 사용 동의를 먼저 완료해 주세요.",
+                    code="consent_required",
+                )
+            if not (state["login_ready"] or state["invocation_ready"]):
+                # An access token that aged out is not a logout: the refresh
+                # token is still there. Telling someone to log in again when one
+                # refresh would do it is how a six-hour token starts to feel
+                # like an account that keeps signing itself out.
+                if state.get("refreshable"):
+                    raise ConnectionError(
+                        f"{PROVIDER_LABELS[provider]} 로그인 갱신이 필요합니다. "
+                        "갱신한 뒤 다시 테스트해 주세요.",
+                        code="refresh_required",
+                    )
+                raise ConnectionError(
+                    f"{PROVIDER_LABELS[provider]} 로그인을 완료한 뒤 연결을 테스트할 수 있습니다.",
                     code="provider_not_ready",
                 )
             selected_model = _public_model_id(state.get("default_model"))
