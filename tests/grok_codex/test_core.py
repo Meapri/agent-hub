@@ -138,7 +138,7 @@ def test_chat_builds_and_parses(monkeypatch, tmp_path):
     assert seen["max_tokens"] == chat.DEFAULT_MAX_TOKENS == 131072
 
 
-def test_chat_marks_length_response_incomplete(monkeypatch, tmp_path):
+def test_chat_keeps_a_truncated_length_answer(monkeypatch, tmp_path):
     monkeypatch.setenv("GROK_CODEX_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setenv("GROK_CODEX_USER_CONSENT", "1")
     monkeypatch.setenv(auth.API_KEY_ENV, "test-key-not-real")
@@ -148,7 +148,12 @@ def test_chat_marks_length_response_incomplete(monkeypatch, tmp_path):
     with patch.object(chat.api, "http_json", return_value=payload):
         result = chat.run_chat({"prompt": "hello"})
 
-    assert result["success"] is False
+    # Truncation is an answer that ran out of room, not a failure: the text is
+    # real and the warning plus finish_reason say what happened. Reporting it as
+    # failed threw the text away and, carrying no error_type, surfaced as
+    # provider_unclassified_failure.
+    assert result["success"] is True
+    assert result["text"]
     assert "incomplete_finish_reason:length" in result["warnings"]
 
 

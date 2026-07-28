@@ -134,8 +134,18 @@ def _resolve_task_images(
             "Project policy denies sending caller-supplied content to a provider.",
             scope="policy",
         )
+    # media.normalize_image resolves a relative path against the process cwd,
+    # which for the daemon is its release directory -- so "shot.png" was
+    # rejected as outside the workspace even when it sat in project_root, which
+    # is exactly where the tool schema says to put it. Anchor it here instead.
+    anchored = [
+        str(Path(project_root) / item)
+        if isinstance(item, str) and not item.startswith("data:") and not Path(item).is_absolute()
+        else item
+        for item in values
+    ]
     try:
-        normalized = normalize_images(list(values), workspace_root=project_root)
+        normalized = normalize_images(anchored, workspace_root=project_root)
     except ValueError as exc:
         # media.py messages name the offending path. Keep the reason, drop the
         # path: a rejected path is often exactly the thing not to echo back.

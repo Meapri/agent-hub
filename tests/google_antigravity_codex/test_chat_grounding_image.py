@@ -112,7 +112,7 @@ def test_chat_clamps_output_to_gemini_limit():
     assert "max_tokens_clamped_for_model:131072->65536" in result["warnings"]
 
 
-def test_chat_marks_max_token_response_incomplete():
+def test_chat_keeps_a_truncated_max_tokens_answer():
     payload = {
         "response": {
             "candidates": [
@@ -127,7 +127,12 @@ def test_chat_marks_max_token_response_incomplete():
     ):
         result = chat.run_chat({"prompt": "long document"})
 
-    assert result["success"] is False
+    # Truncation is an answer that ran out of room, not a failure: the text is
+    # real and the warning plus finish_reason say what happened. Reporting it as
+    # failed threw the text away and, carrying no error_type, surfaced as
+    # provider_unclassified_failure.
+    assert result["success"] is True
+    assert result["text"]
     assert "incomplete_finish_reason:max_tokens" in result["warnings"]
 
 
