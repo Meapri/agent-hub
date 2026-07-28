@@ -47,6 +47,7 @@ from openai_codex import security as openai_security
 from .contracts import ensure_public_model_id
 from .errors import HubV2Error
 from .failure_classes import UNCLASSIFIED_PROVIDER_FAILURE
+from .provider_manifests import manifest_for
 
 PROVIDERS = ("claude", "grok", "gemini", "gpt")
 PLANNER_REPAIR_LIMIT = limits.MAX_PLANNER_REPAIRS
@@ -71,6 +72,31 @@ _BASIC_CHAT_KEYS = {
     "tools",
     "reasoning_effort",
 }
+
+
+def may_auto_refresh(provider: str, state: Mapping[str, Any]) -> bool:
+    """Whether Agent Hub may mint a new access token for this provider itself.
+
+    It may, for a credential it owns. It must not, for one that belongs to
+    another application: claude's lives in Claude Code's keychain entry and
+    gpt's in Codex's. Those owners keep them fresh and the adapters read
+    whichever copy is fresher -- claude_codex.subscription_auth.read_credentials
+    compares the keychain against ~/.claude/.credentials.json and takes the
+    later one -- so refreshing underneath a running client would be both
+    unnecessary and rude.
+
+    This was written as `provider == "gemini"`, which gave the right answer for
+    gemini and the wrong one for grok: same owner, same refresh support,
+    excluded for no stated reason. grok's login therefore looked expired every
+    six hours when a refresh it was entitled to would have fixed it silently.
+    """
+
+    return bool(
+        manifest_for(provider)["auth_owner"] == "agent-hub"
+        and state.get("consent")
+        and state.get("configured")
+        and state.get("refreshable")
+    )
 
 
 def _envelope(
@@ -386,12 +412,7 @@ def status(provider: str, *, probe: bool = False) -> dict[str, Any]:
                 or [str(provider_state.get("error_type") or "provider_not_ready")]
             ),
         }
-    auto_refresh_on_invoke = bool(
-        provider == "gemini"
-        and state.get("consent")
-        and state.get("configured")
-        and state.get("refreshable")
-    )
+    auto_refresh_on_invoke = may_auto_refresh(provider, state)
     state["auto_refresh_on_invoke"] = auto_refresh_on_invoke
     state["invocation_ready"] = bool(state.get("ready") or auto_refresh_on_invoke)
     if state.get("settings_error"):
