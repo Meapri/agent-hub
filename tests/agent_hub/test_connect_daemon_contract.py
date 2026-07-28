@@ -202,3 +202,43 @@ def test_every_provider_takes_the_same_path(monkeypatch, provider):
     manager.close()
 
     assert captured.get("project_root") == str(CONNECTION_TEST_SCOPE)
+
+
+@pytest.mark.parametrize(
+    ("provider", "label"),
+    [("claude", "Claude"), ("grok", "Grok"), ("gemini", "Gemini"), ("gpt", "GPT")],
+)
+def test_the_result_message_names_the_provider_that_was_tested(monkeypatch, provider, label):
+    """Every provider's success message said "Gemini".
+
+    The message chain had two branches guarded by the same condition, so the
+    hardcoded one always won and the provider-labelled one below it was
+    unreachable. Testing all four providers against their own label is what
+    makes a single hardcoded name impossible to leave in.
+    """
+
+    manager = ConnectionManager(status_reader=_reader({provider: _state()}))
+    manager._use_daemon = True  # noqa: SLF001
+    monkeypatch.setattr(
+        manager,
+        "_daemon_call",
+        lambda name, arguments: {
+            "success": True,
+            "provider": provider,
+            "data": {"provider": provider, "result": {"text": "AGENT_HUB_CONNECTION_OK"}},
+        },
+    )
+
+    started = manager.start_test(provider)
+    deadline = time.time() + 5
+    job = manager.job(started["id"])
+    while job["state"] == "working" and time.time() < deadline:
+        time.sleep(0.01)
+        job = manager.job(started["id"])
+    manager.close()
+
+    assert job["state"] == "complete", job
+    assert job["message"].startswith(label)
+    for other in ("Claude", "Grok", "Gemini", "GPT"):
+        if other != label:
+            assert other not in job["message"]

@@ -85,11 +85,10 @@ MAX_JOBS = 32
 JOB_TTL_SECONDS = 30 * 60
 MAX_MODELS = 150
 MODEL_CATALOG_TTL_SECONDS = 10 * 60
-GEMINI_CONNECTION_TEST_MAX_TOKENS = 512
-GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS = 30
-GEMINI_CONNECTION_TEST_PROMPT = (
-    "This is a connection check. Reply with exactly AGENT_HUB_CONNECTION_OK."
-)
+# Named for gemini when only gemini ran a real request; every provider does now.
+CONNECTION_TEST_MAX_TOKENS = 512
+CONNECTION_TEST_TIMEOUT_SECONDS = 30
+CONNECTION_TEST_PROMPT = "This is a connection check. Reply with exactly AGENT_HUB_CONNECTION_OK."
 ACTIVE_JOB_STATES = frozenset({"pending", "working", "waiting"})
 
 
@@ -640,9 +639,12 @@ class ConnectionManager:
                     code="provider_not_ready",
                 )
             selected_model = _public_model_id(state.get("default_model"))
-            if provider == "gemini" and not selected_model:
+            if not selected_model:
+                # The test sends a real request, so it needs a model for every
+                # provider -- not only for gemini, which is the one this check
+                # used to name.
                 raise ConnectionError(
-                    "테스트할 Gemini 모델을 확인하지 못했습니다.",
+                    f"테스트할 {PROVIDER_LABELS[provider]} 모델을 확인하지 못했습니다.",
                     code="model_unavailable",
                 )
             with self._lock:
@@ -653,9 +655,8 @@ class ConnectionManager:
                     kind="test",
                     state="working",
                     message=(
-                        "선택한 Gemini 모델에 짧은 실제 요청을 보내는 중입니다."
-                        if provider == "gemini"
-                        else "모델 목록을 요청해 연결을 확인하는 중입니다."
+                        f"선택한 {PROVIDER_LABELS[provider]} 모델에 "
+                        "짧은 실제 요청을 보내는 중입니다."
                     ),
                 )
                 self._spawn(self._run_test, job.id, selected_model, auth_generation)
@@ -1515,11 +1516,11 @@ class ConnectionManager:
                         "schema": TASK_SCHEMA,
                         "intent": "Return a short connection acknowledgement.",
                         "capability": "chat",
-                        "inline_input": GEMINI_CONNECTION_TEST_PROMPT,
+                        "inline_input": CONNECTION_TEST_PROMPT,
                         "constraints": {
                             "provider_allowlist": [provider],
-                            "max_tokens": GEMINI_CONNECTION_TEST_MAX_TOKENS,
-                            "timeout_seconds": GEMINI_CONNECTION_TEST_TIMEOUT_SECONDS,
+                            "max_tokens": CONNECTION_TEST_MAX_TOKENS,
+                            "timeout_seconds": CONNECTION_TEST_TIMEOUT_SECONDS,
                         },
                         "retention": "ephemeral",
                     },
@@ -1555,16 +1556,17 @@ class ConnectionManager:
             self._update_job(
                 job_id,
                 state="complete" if success else "failed",
+                # Every provider goes through the same real generation now, so
+                # the message says which provider it was. The branch that did
+                # was unreachable: an identical condition above it returned a
+                # hardcoded "Gemini" first, so every provider's success message
+                # named Gemini.
                 message=(
                     "연결 상태가 바뀌어 테스트를 다시 실행해야 합니다."
                     if auth_changed
-                    else "Gemini 선택 모델의 실제 응답까지 정상입니다."
-                    if success and generated
                     else f"{PROVIDER_LABELS[provider]} 선택 모델의 실제 응답까지 정상입니다."
                     if success and generated
-                    else "Gemini 선택 모델의 실제 응답을 확인하지 못했습니다."
-                    if provider == "gemini"
-                    else f"{PROVIDER_LABELS[provider]} 모델 목록을 확인하지 못했습니다."
+                    else f"{PROVIDER_LABELS[provider]} 선택 모델의 실제 응답을 확인하지 못했습니다."
                 ),
             )
 
