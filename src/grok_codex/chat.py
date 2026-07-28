@@ -236,21 +236,27 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         auth_ctx = {}
     if api_mode in {"responses", "response"}:
         finish_reason = str(payload.get("status") or "completed").lower()
-        incomplete = finish_reason == "incomplete"
+        truncated = finish_reason == "incomplete"
     else:
         choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
         first = choices[0] if choices and isinstance(choices[0], dict) else {}
         finish_reason = str(first.get("finish_reason") or "stop").lower()
-        incomplete = finish_reason == "length"
-    warnings = [f"incomplete_finish_reason:{finish_reason}"] if incomplete else []
+        truncated = finish_reason == "length"
+    warnings = [f"incomplete_finish_reason:{finish_reason}"] if truncated else []
     return {
         "text": text,
         "finish_reason": finish_reason,
         "session_id": session_id,
         "auth_mode": auth_ctx.get("mode"),
         "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
+        # A truncated answer is an answer. The model produced text and ran out of
+        # room, which the finish_reason and the warning both already say. Reporting
+        # it as a failure discarded that text and, because no error_type came with
+        # it, reached the caller as provider_unclassified_failure -- a dead end that
+        # names neither the cause nor the fix. Vision hit this constantly: an image
+        # costs ~1000 prompt tokens and its answers are long.
         **response.standard_fields(
-            success=not incomplete,
+            success=True,
             provider="xai",
             backend=backend + ("-oauth" if auth_ctx.get("mode") == "subscription_oauth" else ""),
             model=str(payload.get("model") or model),

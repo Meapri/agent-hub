@@ -633,8 +633,8 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         requested = diagnostics.get("requested_model") or model
         warnings.append(f"capacity_fallback:{requested}->{used}")
     finish_reason = str(extracted.get("finish_reason") or "stop").lower()
-    incomplete = finish_reason in {"max_tokens", "length"}
-    if incomplete:
+    truncated = finish_reason in {"max_tokens", "length"}
+    if truncated:
         warnings.append(f"incomplete_finish_reason:{finish_reason}")
     text_out = extracted["text"]
     if diagnostics.get("capacity_fallback") and text_out:
@@ -654,8 +654,14 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         "streamed": bool(diagnostics.get("streamed")),
         "capacity_fallback": bool(diagnostics.get("capacity_fallback")),
         "used_model": diagnostics.get("used_model") or model,
+        # A truncated answer is an answer. The model produced text and ran out of
+        # room, which the finish_reason and the warning both already say. Reporting
+        # it as a failure discarded that text and, because no error_type came with
+        # it, reached the caller as provider_unclassified_failure -- a dead end that
+        # names neither the cause nor the fix. Vision hit this constantly: an image
+        # costs ~1000 prompt tokens and its answers are long.
         **response_schema.standard_fields(
-            success=not incomplete,
+            success=True,
             model=model,
             usage=extracted.get("usage", {}),
             warnings=warnings,
