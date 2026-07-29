@@ -593,9 +593,23 @@ def search(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         key: value for key, value in arguments.items() if key != "provider" and value is not None
     }
     if provider == "claude":
-        raw = claude_search.run_search(call_args)
+        # Wrapped like gemini below. Unwrapped, a provider refusal arrived as a
+        # bare RuntimeError and reached the caller as internal_error, which named
+        # neither the provider nor the reason -- diagnosing the max_tokens
+        # rejection took a live run rather than a look at the step record.
+        raw = _call_leaf(
+            claude_search.run_search,
+            call_args,
+            provider="claude",
+            backend="anthropic-web-search",
+        )
     elif provider == "grok":
-        raw = grok_search.run_search(call_args)
+        raw = _call_leaf(
+            grok_search.run_search,
+            call_args,
+            provider="grok",
+            backend="grok-live-search",
+        )
     elif provider == "gemini":
         raw = _call_leaf(
             google_grounding.run_grounded_search,
