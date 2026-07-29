@@ -7,7 +7,7 @@ macOS용 멀티 모델 실행 환경입니다.
 인계 기록을 로컬에서 함께 관리합니다. Codex나 Claude Code가 종료되어도 실행 상태가 남기
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
-- 현재 버전: `3.2.1`
+- 현재 버전: `3.2.2`
 - Python: 3.11 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -331,7 +331,13 @@ max_total_tokens = 131072
 ```
 
 `max_output_tokens`는 provider 한 번의 최대 출력, `max_total_tokens`는 run 전체 누적 사용량을
-제한합니다. 선택 사항인 `max_input_tokens`는 model이 받을 context를 더 작게 제한할 때만
+제한합니다. 둘은 성격이 다릅니다. 총량을 다 쓰면 run이 멈추고 남은 단계가 보존되지만,
+한 번의 출력 상한에 닿으면 그 답변이 그 자리에서 잘립니다. 짧은 답을 원한다면 상한을 낮추지
+말고 요청에 그렇게 쓰세요. 그래서 호출자가 task마다 지정하는 값이 아니라 이렇게 프로젝트
+정책에 두는 값입니다. 잘린 단계는 `agent_hub_events`에 `step_output_truncated`로 남고
+어떤 상한이 잘랐는지 함께 기록합니다.
+
+선택 사항인 `max_input_tokens`는 model이 받을 context를 더 작게 제한할 때만
 사용합니다. 이전 설정의 `max_tokens`는 output과 total의 호환 별칭으로 읽으며 input limit으로
 사용하지 않습니다. Provider와 model 허용 목록, 외부 전송 규칙, 최대 실행 시간, provider
 호출 횟수, token과 결과물 보관 방식을 프로젝트마다 다르게 설정할 수 있습니다.

@@ -209,17 +209,48 @@ def test_a_normal_stop_is_not_a_truncation():
     assert "output_truncated" not in _completion_state({"finish_reason": "stop"})
 
 
-# --- and the cap is discoverable before it bites ----------------------------
+# --- and the cap stops being something a caller guesses at ------------------
 
 
-def test_the_schema_says_the_cap_is_per_call(tmp_path):
+def _constraints_schema():
     execute = next(item for item in tool_definitions() if item["name"] == "agent_hub_execute")
-    constraints = execute["inputSchema"]["properties"]["task"]["properties"]["constraints"]
+    return execute["inputSchema"]["properties"]["task"]["properties"]["constraints"]
 
-    described = constraints["properties"]["max_output_tokens"]["description"]
-    assert "not per run" in described
-    assert "every step" in described
-    assert "max_total_tokens" in described
+
+@pytest.mark.parametrize("name", ["max_output_tokens", "max_tokens"])
+def test_the_per_call_cap_is_not_offered_to_callers(name):
+    """An undescribed integer knob invites a guess, and the guess then caps
+    every step in the run. The observed values -- 4000, 5000, 7000 -- are what
+    that looks like."""
+
+    assert name not in _constraints_schema()["properties"]
+
+
+def test_the_budget_that_is_offered_says_it_is_the_one_to_set():
+    described = _constraints_schema()["properties"]["max_total_tokens"]["description"]
+
+    assert "pauses" in described
+    assert "cutting an answer short" in described
+
+
+def test_the_runtime_still_honours_it_for_the_connection_probe(tmp_path):
+    """The GUI probe wants a cheap reply and does not care that it is cut off,
+    so the runtime accepts the cap even though the schema stops advertising it."""
+
+    from agent_hub.connect_service import CONNECTION_TEST_MAX_TOKENS
+    from agent_hub.v2.contracts import output_token_limit, validate_task
+
+    task = validate_task(
+        {
+            "schema": TASK_SCHEMA,
+            "intent": "Return a short connection acknowledgement.",
+            "capability": "chat",
+            "inline_input": "ping",
+            "constraints": {"max_tokens": CONNECTION_TEST_MAX_TOKENS},
+        }
+    )
+
+    assert output_token_limit(task["constraints"]) == CONNECTION_TEST_MAX_TOKENS
 
 
 # --- the planner is machinery, not an answer --------------------------------
