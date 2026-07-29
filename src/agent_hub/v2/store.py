@@ -116,8 +116,12 @@ _SAFE_EVENT_FIELDS = frozenset(
         "run_disposition",
         "step_count",
         "witness_sha256",
+        "finish_reason",
+        "max_output_tokens",
     }
 )
+# Provider-controlled, so only the reasons the runtime understands are recorded.
+_FINISH_REASONS = frozenset({"stop", "max_tokens", "length", "incomplete", "tool_use"})
 _NON_NEGATIVE_EVENT_FIELDS = frozenset(
     {
         "elapsed_ms",
@@ -132,6 +136,7 @@ _NON_NEGATIVE_EVENT_FIELDS = frozenset(
         "wave_step_count",
         "prior_revision",
         "step_count",
+        "max_output_tokens",
     }
 )
 
@@ -218,6 +223,10 @@ def _safe_event_details(details: Mapping[str, Any] | None) -> dict[str, Any]:
         elif key in {"prompt_sha256", "result_sha256", "prior_sha256", "witness_sha256"}:
             text = str(value or "")
             if len(text) == 64 and all(char in "0123456789abcdef" for char in text):
+                safe[key] = text
+        elif key == "finish_reason":
+            text = str(value or "").strip().lower()
+            if text in _FINISH_REASONS:
                 safe[key] = text
         elif key == "prior_weight_fraction":
             if (

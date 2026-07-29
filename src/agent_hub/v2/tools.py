@@ -99,8 +99,21 @@ def _task_schema() -> dict[str, Any]:
                 "properties": {
                     "provider_allowlist": {"type": "array", "items": {"type": "string"}},
                     "max_input_tokens": {"type": "integer", "minimum": 0},
-                    "max_output_tokens": {"type": "integer", "minimum": 0},
-                    "max_total_tokens": {"type": "integer", "minimum": 0},
+                    "max_output_tokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "Per provider call, not per run. In a durable run "
+                            "every step gets this same cap, including the final "
+                            "one, and an answer that reaches it is cut off. "
+                            "Use max_total_tokens to bound what a run spends."
+                        ),
+                    },
+                    "max_total_tokens": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The whole run's budget. Exhausting it pauses the run.",
+                    },
                     "max_leaf_calls": {"type": "integer", "minimum": 0},
                     "max_tokens": {"type": "integer", "minimum": 0, "deprecated": True},
                     "timeout_seconds": {"type": "number", "minimum": 0.1},
