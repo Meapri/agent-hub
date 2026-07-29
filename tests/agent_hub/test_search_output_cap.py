@@ -27,7 +27,12 @@ from claude_codex import search as claude_search
 
 @pytest.fixture
 def sent(monkeypatch):
-    """Capture the request body instead of calling the provider."""
+    """Capture the request body instead of calling the provider.
+
+    Consent and credentials are stubbed as well. Without that these pass on a
+    machine that happens to be signed in and fail everywhere else, which is not
+    a test of anything.
+    """
 
     captured: dict = {}
 
@@ -41,6 +46,11 @@ def sent(monkeypatch):
 
     monkeypatch.setattr(claude_search.api, "messages_create", messages_create)
     monkeypatch.setattr(claude_search.security, "require_consent", lambda: None)
+    monkeypatch.setattr(
+        claude_search.auth,
+        "resolve_auth",
+        lambda: {"auth_mode": "test", "plan_type": "test"},
+    )
     return captured
 
 
