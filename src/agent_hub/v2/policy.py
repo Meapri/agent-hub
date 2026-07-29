@@ -37,8 +37,16 @@ DEFAULT_POLICY: dict[str, Any] = {
     "budgets": {
         "timeout_seconds": 1790,
         "max_leaf_calls": 100,
+        # One provider call's output.
         "max_output_tokens": 131072,
-        "max_total_tokens": 131072,
+        # The whole run. This used to carry the same number as the per-call cap,
+        # which conflated two different things and made the run budget far too
+        # small: measured on this machine, one web search step spent 247,203
+        # tokens, so a plan could not finish a single search inside it and every
+        # search-bearing run paused for a grant. A plan may hold MAX_PLAN_STEPS
+        # (12) steps, so this is sized for a full one at the largest step
+        # observed, with headroom. It is still a stop for a runaway loop.
+        "max_total_tokens": 4_000_000,
     },
     "artifact_retention": "durable_private",
     "workflow_locks": {},
