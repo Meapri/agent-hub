@@ -1922,6 +1922,12 @@ class HubService:
                     **dict(exc.safe_details or {}),
                     "spent_token_usage": token_usage,
                 }
+                if checkpoint.get("output_truncated"):
+                    # An answer cut off at the cap usually fails the verifier for
+                    # exactly that reason. Without this the step reports
+                    # deterministic_verification_failed and sends the caller
+                    # looking at the verifier rather than at their own limit.
+                    exc.safe_details["output_truncated"] = True
             raise
         # Store what the step actually produced. A generated image used to be
         # stored as the sentence "Generated image: <path>", which is a note about
@@ -2201,6 +2207,11 @@ class HubService:
                                     ),
                                     "retry_safe": failure_class == "retry_safe",
                                     "error_code": exc.code,
+                                    **(
+                                        {"output_truncated": True}
+                                        if (exc.safe_details or {}).get("output_truncated")
+                                        else {}
+                                    ),
                                 },
                                 # A failed step still spent whatever the provider billed.
                                 token_usage=spent if isinstance(spent, Mapping) else None,

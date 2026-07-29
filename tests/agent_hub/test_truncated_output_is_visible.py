@@ -342,3 +342,59 @@ def test_an_invalid_plan_still_reports_validation_rather_than_truncation(monkeyp
         )
 
     assert failed.value.safe_details["reason_code"] == "plan_validation_failed"
+
+
+# --- and the failure it causes points at the cap ----------------------------
+
+
+class _TruncatedThenUnverifiableWorker(_FakeWorker):
+    """Truncation usually shows up as a verifier failure, not as its own error."""
+
+    def request(self, method, params=None, timeout=30.0, request_id=None):
+        if method != "invoke":
+            return super().request(method, params=params, timeout=timeout)
+        return {
+            "success": True,
+            "text": "",
+            "model": f"{self.provider}-fixture",
+            "finish_reason": "max_tokens",
+            "warnings": ["incomplete_finish_reason:max_tokens"],
+            "usage": {"total_tokens": 1500, "output_tokens": 1500},
+        }
+
+
+def test_a_verifier_failure_caused_by_truncation_says_so(tmp_path):
+    """Otherwise the step reports deterministic_verification_failed and sends
+    the caller to the verifier rather than to their own output cap."""
+
+    service = _service(tmp_path, worker=_TruncatedThenUnverifiableWorker)
+    run_id = _run(service, tmp_path, _plan(max_output_tokens=1500))
+
+    step = service.dispatch("agent_hub_get", {"run_id": run_id})["data"]["steps"][0]
+
+    assert step["status"] == "failed"
+    assert step["checkpoint"]["error_code"] == "deterministic_verification_failed"
+    assert step["checkpoint"]["output_truncated"] is True
+    events = service.dispatch("agent_hub_events", {"run_id": run_id})["data"]["events"]
+    assert [event for event in events if event["type"] == "step_output_truncated"]
+
+
+def test_an_unverifiable_answer_that_was_not_cut_carries_no_such_claim(tmp_path):
+    class _EmptyWorker(_FakeWorker):
+        def request(self, method, params=None, timeout=30.0, request_id=None):
+            if method != "invoke":
+                return super().request(method, params=params, timeout=timeout)
+            return {
+                "success": True,
+                "text": "",
+                "model": f"{self.provider}-fixture",
+                "finish_reason": "stop",
+                "usage": {"total_tokens": 10},
+            }
+
+    service = _service(tmp_path, worker=_EmptyWorker)
+    run_id = _run(service, tmp_path, _plan())
+
+    step = service.dispatch("agent_hub_get", {"run_id": run_id})["data"]["steps"][0]
+    assert step["status"] == "failed"
+    assert "output_truncated" not in step["checkpoint"]
