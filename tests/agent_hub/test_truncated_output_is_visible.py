@@ -15,6 +15,7 @@ runs looked like they were losing output silently.
 
 from __future__ import annotations
 
+import json
 import secrets
 
 import pytest
@@ -42,6 +43,28 @@ class _TruncatingWorker(_FakeWorker):
             "warnings": ["incomplete_finish_reason:max_tokens"],
             "usage": {"total_tokens": 4000, "output_tokens": 4000},
         }
+
+
+def _plan_reply() -> str:
+    return json.dumps(
+        {
+            "schema": "agent_hub_plan_v1",
+            "goal": "Plan.",
+            "rationale": "fixture",
+            "steps": [
+                {
+                    "id": "answer",
+                    "capability": "chat",
+                    "provider": "claude",
+                    "depends_on": [],
+                    "fallback_providers": [],
+                    "instruction": "Answer.",
+                    "reasoning_effort": "medium",
+                    "final": True,
+                }
+            ],
+        }
+    )
 
 
 def _service(tmp_path, worker=_TruncatingWorker):
@@ -197,3 +220,125 @@ def test_the_schema_says_the_cap_is_per_call(tmp_path):
     assert "not per run" in described
     assert "every step" in described
     assert "max_total_tokens" in described
+
+
+# --- the planner is machinery, not an answer --------------------------------
+
+
+def _planner_chat(reply, *, finish_reason="stop", seen=None):
+    def chat(_provider, arguments):
+        if seen is not None:
+            seen.append(arguments.get("max_tokens"))
+        return {
+            "success": True,
+            "text": reply,
+            "finish_reason": finish_reason,
+            "model": "claude-fixture",
+        }
+
+    return chat
+
+
+def test_the_answer_cap_does_not_throttle_the_planner(monkeypatch):
+    """max_output_tokens=1500 made agent_hub_plan apply fail outright: the
+    planner could not finish the JSON, retried six times against the same
+    impossible cap, and reported plan_validation_failed."""
+
+    from agent_hub.v2 import provider_runtime
+
+    seen: list[int] = []
+    monkeypatch.setattr(
+        provider_runtime,
+        "chat",
+        _planner_chat(_plan_reply(), seen=seen),
+    )
+
+    provider_runtime.plan(
+        "claude",
+        prompt="Plan.",
+        model=None,
+        max_steps=8,
+        max_leaf_calls=8,
+        max_tokens=1500,
+        timeout_seconds=30,
+        approved_destinations=["claude"],
+    )
+
+    assert seen == [provider_runtime.PLANNER_MIN_OUTPUT_TOKENS]
+
+
+def test_a_caller_asking_for_more_than_the_floor_keeps_it(monkeypatch):
+    from agent_hub.v2 import provider_runtime
+
+    seen: list[int] = []
+    monkeypatch.setattr(provider_runtime, "chat", _planner_chat(_plan_reply(), seen=seen))
+
+    provider_runtime.plan(
+        "claude",
+        prompt="Plan.",
+        model=None,
+        max_steps=8,
+        max_leaf_calls=8,
+        max_tokens=60_000,
+        timeout_seconds=30,
+        approved_destinations=["claude"],
+    )
+
+    assert seen == [60_000]
+
+
+def test_a_planner_cut_short_says_that_rather_than_blaming_the_plan(monkeypatch):
+    from agent_hub.v2 import provider_runtime
+    from agent_hub.v2.errors import HubV2Error
+
+    monkeypatch.setattr(
+        provider_runtime,
+        "chat",
+        _planner_chat(
+            '{"schema":"agent_hub_plan_v1","goal":"g","steps":[{"id":"a","capab',
+            finish_reason="max_tokens",
+        ),
+    )
+
+    with pytest.raises(HubV2Error) as failed:
+        provider_runtime.plan(
+            "claude",
+            prompt="Plan.",
+            model=None,
+            max_steps=8,
+            max_leaf_calls=8,
+            max_tokens=1500,
+            timeout_seconds=30,
+            approved_destinations=["claude"],
+        )
+
+    details = failed.value.safe_details
+    assert details["reason_code"] == "planner_output_truncated"
+    assert details["planner_max_output_tokens"] == provider_runtime.PLANNER_MIN_OUTPUT_TOKENS
+
+
+def test_an_invalid_plan_still_reports_validation_rather_than_truncation(monkeypatch):
+    """The two failures need different answers, so they must stay distinct."""
+
+    from agent_hub.v2 import provider_runtime
+    from agent_hub.v2.errors import HubV2Error
+
+    monkeypatch.setattr(
+        provider_runtime,
+        "chat",
+        _planner_chat('{"schema":"agent_hub_plan_v1","goal":"g","steps":[]}'),
+    )
+
+    with pytest.raises(HubV2Error) as failed:
+        provider_runtime.plan(
+            "claude",
+            prompt="Plan.",
+            model=None,
+            max_steps=8,
+            max_leaf_calls=8,
+            max_tokens=60_000,
+            timeout_seconds=30,
+            approved_destinations=["claude"],
+        )
+
+    assert failed.value.safe_details["reason_code"] == "plan_validation_failed"
