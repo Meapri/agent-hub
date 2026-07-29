@@ -1,7 +1,7 @@
 {
   "name": "agent-hub",
   "displayName": "Agent Hub",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "Use the Agent Hub v2 local daemon for durable multi-model runs, policy-fenced context egress, encrypted artifacts, and Git handoff in Claude Code.",
   "author": { "name": "Meapri" },
   "license": "MIT",

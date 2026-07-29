@@ -169,12 +169,15 @@ def _normalize_policy(raw: Mapping[str, Any]) -> dict[str, Any]:
         if key in numeric_budgets:
             normalized_budgets[key] = numeric_budgets[key]
     if legacy_max_tokens is not None:
+        # max_tokens is a per-call number, and it only ever filled the run
+        # budget too because the two defaults used to be the same. Now that they
+        # are deliberately different magnitudes, carrying it into
+        # max_total_tokens pins a whole run to one call's worth of tokens: on
+        # this repository's own policy file that meant 131072, which one web
+        # search step exceeds on its own. A policy that wants a specific run
+        # budget says max_total_tokens.
         normalized_budgets["max_output_tokens"] = numeric_budgets.get(
             "max_output_tokens",
-            legacy_max_tokens,
-        )
-        normalized_budgets["max_total_tokens"] = numeric_budgets.get(
-            "max_total_tokens",
             legacy_max_tokens,
         )
     normalized = {

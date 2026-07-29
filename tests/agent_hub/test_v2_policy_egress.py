@@ -16,6 +16,7 @@ from agent_hub.v2.experimental import (
     ExperimentalRuntimeRegistry,
 )
 from agent_hub.v2.policy import (
+    DEFAULT_POLICY,
     apply_policy_update,
     load_policy,
     prepare_policy_update,
@@ -76,9 +77,38 @@ def test_policy_migrates_legacy_max_tokens_without_limiting_input_context(tmp_pa
     policy = load_policy(str(tmp_path)).policy
 
     assert policy["budgets"]["max_output_tokens"] == 4096
-    assert policy["budgets"]["max_total_tokens"] == 4096
+    # It must not reach the run budget. max_tokens is a per-call number, and it
+    # only ever filled both because the two defaults used to be the same value.
+    # Carrying it across pinned a whole run to one call's worth of tokens --
+    # this repository's own policy file said 131072, which a single web search
+    # step exceeds.
+    assert policy["budgets"]["max_total_tokens"] == DEFAULT_POLICY["budgets"]["max_total_tokens"]
+    assert policy["budgets"]["max_total_tokens"] > 4096
     assert "max_input_tokens" not in policy["budgets"]
     assert "max_tokens" not in policy["budgets"]
+
+
+def test_a_policy_that_wants_a_run_budget_says_max_total_tokens(tmp_path):
+    policy_dir = tmp_path / ".agent-hub"
+    policy_dir.mkdir()
+    (policy_dir / "project.toml").write_text(
+        "\n".join(
+            [
+                'schema = "agent_hub_project_policy_v2"',
+                "revision = 3",
+                "",
+                "[budgets]",
+                "max_tokens = 4096",
+                "max_total_tokens = 900000",
+            ]
+        )
+        + "\n"
+    )
+
+    budgets = load_policy(str(tmp_path)).policy["budgets"]
+
+    assert budgets["max_output_tokens"] == 4096
+    assert budgets["max_total_tokens"] == 900_000
 
 
 def test_experimental_runtime_requires_project_flag_and_tool_sandbox(tmp_path):
