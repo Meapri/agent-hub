@@ -9,7 +9,7 @@ security boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Tuple
+from typing import Any, Mapping, Tuple
 
 
 @dataclass(frozen=True)
@@ -178,16 +178,3 @@ def providers_supporting(capability: str, *, planner_only: bool = False) -> Tupl
         for provider in allowed
         if bool(MANIFESTS[provider].capabilities.get(capability, {}).get("supported"))
     )
-
-
-def provider_for_model(model: str, *, default: str = "gemini") -> str:
-    lowered = str(model or "").strip().lower()
-    for item in _MANIFESTS:
-        if any(lowered.startswith(prefix) for prefix in item.model_prefixes):
-            return item.id
-    return default
-
-
-def chat_tools(*, planner_only: bool = False) -> Tuple[str, ...]:
-    providers: Iterable[str] = PLANNER_PROVIDERS if planner_only else AVAILABLE_PROVIDERS
-    return tuple(MANIFESTS[provider].chat_tool for provider in providers)

@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 from .errors import HubV2Error
 
@@ -84,10 +84,6 @@ def canonical_json(value: Any) -> str:
 
 def digest_json(value: Any) -> str:
     return sha256(canonical_json(value).encode("utf-8")).hexdigest()
-
-
-def digest_text(value: str) -> str:
-    return sha256(value.encode("utf-8")).hexdigest()
 
 
 def require_object(value: Any, *, field: str) -> dict[str, Any]:
@@ -901,15 +897,3 @@ def normalize_token_usage(
         "total_tokens": total,
         "source": source,
     }
-
-
-def bounded_unique(values: Iterable[str], *, maximum: int) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        if value not in seen:
-            result.append(value)
-            seen.add(value)
-        if len(result) >= maximum:
-            break
-    return result

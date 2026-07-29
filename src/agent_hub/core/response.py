@@ -89,3 +89,47 @@ def failure_payload(
         "backend": backend,
         "warnings": [],
     }
+
+
+# A model that stopped because it ran out of room still answered. A model that
+# stopped to ask for a tool this runtime does not offer did not.
+TRUNCATED_FINISH_REASONS = frozenset({"max_tokens", "length", "incomplete"})
+
+
+def chat_outcome(
+    *,
+    text: Any,
+    finish_reason: Any = "stop",
+    unusable_finish_reasons: Iterable[str] = (),
+    warnings: Iterable[Any] = (),
+) -> Dict[str, Any]:
+    """What a chat response means, decided once for every provider.
+
+    Each adapter used to answer this for itself, and they disagreed. Three of
+    them independently marked a truncated answer as failed, which discarded the
+    text and -- carrying no error_type -- reached callers as
+    provider_unclassified_failure. Only one warned about an empty answer, so a
+    model that spent its whole budget on reasoning and emitted nothing looked
+    like an ordinary success.
+
+    Returns the finish reason normalized, the warnings to report, and whether
+    this counts as a success. Adapters supply what they extracted; the meaning
+    lives here.
+    """
+
+    reason = str(finish_reason or "stop").strip().lower() or "stop"
+    unusable = {str(item).strip().lower() for item in unusable_finish_reasons}
+    collected = [str(item) for item in warnings or []]
+
+    truncated = reason in TRUNCATED_FINISH_REASONS
+    unanswerable = reason in unusable
+    if truncated or unanswerable:
+        collected.append(f"incomplete_finish_reason:{reason}")
+    if not str(text or "").strip():
+        collected.append("empty_model_text")
+
+    return {
+        "finish_reason": reason,
+        "warnings": warning_list(collected),
+        "success": not unanswerable,
+    }

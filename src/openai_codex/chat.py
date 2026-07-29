@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 from agent_hub.core import limits
 
 from . import auth, client, models, response, security
+from agent_hub.core import response as shared_response
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
@@ -131,15 +132,18 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
             image_paths=image_paths,
             timeout=timeout,
         )
+    # The CLI reports no finish reason, so "stop" is the only honest value --
+    # but an empty answer still has to say so rather than passing as success.
+    outcome = shared_response.chat_outcome(text=result["text"])
     return {
         "text": result["text"],
-        "finish_reason": "stop",
+        "finish_reason": outcome["finish_reason"],
         **response.standard_fields(
             provider="gpt",
             backend="codex-exec-subscription",
             model=model,
             usage=result.get("usage") or {},
-            warnings=warnings,
+            warnings=[*warnings, *outcome["warnings"]],
             diagnostics={
                 "auth_mode": auth_state.get("auth_mode"),
                 "plan_type": auth_state.get("plan_type"),

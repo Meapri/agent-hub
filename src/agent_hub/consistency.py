@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -157,21 +156,6 @@ def validate_labels(values: Iterable[Any]) -> List[str]:
     return labels
 
 
-def decision_prompt(prompt: str, labels: Sequence[str]) -> str:
-    allowed = json.dumps(list(labels), ensure_ascii=False)
-    return (
-        f"{prompt.strip()}\n\n"
-        "Return exactly one JSON object and no markdown or trailing prose. "
-        "Prefer the minimal contract so the response cannot be cut off: "
-        '{"schema":"decision_v1","label":<one allowed label>,'
-        '"confidence":<number 0..1>}. '
-        "Optional allowed fields are rationale (short string), evidence (string array), and "
-        "uncertainties (string array); omit them unless they are necessary. "
-        f"Allowed labels (case-sensitive): {allowed}. "
-        "Do not create a new label. Keep rationale under 500 characters and each list at 8 items or fewer."
-    )
-
-
 def parse_decision(text: str, labels: Sequence[str]) -> Dict[str, Any]:
     body = str(text or "").strip()
     fenced = _FENCED_JSON_RE.fullmatch(body)
@@ -210,70 +194,3 @@ def parse_decision(text: str, labels: Sequence[str]) -> Dict[str, Any]:
         ):
             raise ValueError(f"{key} must be an array of at most 8 strings")
     return value
-
-
-def evaluate_decisions(
-    results: Sequence[Mapping[str, Any]],
-    *,
-    threshold: float = DEFAULT_DECISION_THRESHOLD,
-    require_all: bool = True,
-    min_responses: int = DEFAULT_MIN_RESPONSES,
-) -> Dict[str, Any]:
-    """Calculate a deterministic label vote without pretending to score open text."""
-
-    threshold_value = float(threshold)
-    if not 0.5 <= threshold_value <= 1.0:
-        raise ValueError("threshold must be between 0.5 and 1.0")
-    minimum = int(min_responses)
-    if minimum < 2:
-        raise ValueError("min_responses must be at least 2")
-
-    total = len(results)
-    valid = [item for item in results if isinstance(item.get("decision"), dict)]
-    provider_successes = sum(bool(item.get("success")) for item in results)
-    votes = Counter(str(item["decision"]["label"]) for item in valid)
-    ranked = votes.most_common()
-    top_count = ranked[0][1] if ranked else 0
-    tied = bool(len(ranked) > 1 and ranked[1][1] == top_count)
-    winner = ranked[0][0] if ranked and not tied else None
-    agreement = top_count / len(valid) if valid else 0.0
-    coverage = len(valid) / total if total else 0.0
-
-    reasons: List[str] = []
-    if provider_successes < total:
-        reasons.append("provider_failure")
-    if len(valid) < provider_successes:
-        reasons.append("invalid_contract")
-    if len(valid) < minimum:
-        reasons.append("insufficient_valid_responses")
-    if require_all and len(valid) < total:
-        reasons.append("require_all_not_met")
-    if tied or (valid and agreement < threshold_value):
-        reasons.append("decision_disagreement")
-
-    passed = bool(
-        winner
-        and len(valid) >= minimum
-        and agreement >= threshold_value
-        and (not require_all or len(valid) == total)
-    )
-    if not passed and not reasons:
-        reasons.append("no_consensus")
-    return {
-        "enabled": True,
-        "contract": "decision_v1",
-        "passed": passed,
-        "human_review": not passed,
-        "decision": winner if passed else None,
-        "candidate_decision": winner,
-        "agreement_score": round(agreement, 6),
-        "coverage": round(coverage, 6),
-        "threshold": threshold_value,
-        "require_all": bool(require_all),
-        "min_responses": minimum,
-        "requested_responses": total,
-        "provider_successes": provider_successes,
-        "valid_responses": len(valid),
-        "votes": dict(votes),
-        "review_reasons": reasons,
-    }

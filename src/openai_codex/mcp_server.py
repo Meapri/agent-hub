@@ -214,32 +214,6 @@ def _doctor(_args: Dict[str, Any]) -> Dict[str, Any]:
     return _provider_status({})
 
 
-def _safe_failure(exc: Exception) -> Dict[str, str]:
-    code = str(getattr(exc, "code", type(exc).__name__))
-    messages = {
-        "codex_unavailable": "Official Codex CLI is unavailable.",
-        "codex_timeout": "Official Codex generation timed out.",
-        "codex_process_error": "Official Codex generation process failed.",
-        "codex_protocol_error": "Official Codex returned an invalid protocol response.",
-        "codex_authentication_required": "Official Codex login is required.",
-        "codex_subscription_login_required": (
-            "Official Codex requires a ChatGPT subscription login."
-        ),
-        "codex_side_effect_refused": (
-            "GPT operation was refused by the read-only safety boundary."
-        ),
-    }
-    if "consent" in str(exc).lower():
-        return {
-            "code": "explicit_consent_required",
-            "message": "Explicit GPT consent is required.",
-        }
-    return {
-        "code": code,
-        "message": messages.get(code, "GPT provider operation failed."),
-    }
-
-
 def dispatch_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     table: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
         "openai_codex_consent_status": lambda _a: {

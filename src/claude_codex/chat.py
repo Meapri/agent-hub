@@ -14,6 +14,7 @@ from agent_hub.core import media
 from agent_hub.core import limits
 
 from . import api, auth, models, response, security
+from agent_hub.core import response as shared_response
 
 DEFAULT_MODEL = models.DEFAULT_MODEL
 DEFAULT_MAX_TOKENS = limits.CLAUDE_MAX_OUTPUT_TOKENS
@@ -307,11 +308,14 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         else "anthropic-messages"
     )
     stop_reason = str(payload.get("stop_reason") or "end_turn").lower()
-    truncated = stop_reason == "max_tokens"
     # tool_use is not truncation: the model stopped to ask for a tool this
     # runtime does not offer, so there is no answer to keep.
-    unusable = stop_reason == "tool_use"
-    warnings = [f"incomplete_finish_reason:{stop_reason}"] if truncated or unusable else []
+    outcome = shared_response.chat_outcome(
+        text=text,
+        finish_reason=stop_reason,
+        unusable_finish_reasons={"tool_use"},
+    )
+    warnings = list(outcome["warnings"])
     if requested_max_tokens > model_max_tokens:
         warnings.append(f"max_tokens_clamped_for_model:{requested_max_tokens}->{model_max_tokens}")
     if temperature_ignored:
@@ -330,7 +334,7 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         # names neither the cause nor the fix. Vision hit this constantly: an image
         # costs ~1000 prompt tokens and its answers are long.
         **response.standard_fields(
-            success=not unusable,
+            success=outcome["success"],
             provider="anthropic",
             backend=backend,
             model=str(payload.get("model") or model),

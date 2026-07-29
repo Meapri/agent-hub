@@ -168,19 +168,68 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
         (
             "agent_hub_plan",
-            "Prepare local egress or apply an approved proposal through a planner.",
+            (
+                "Two calls, in order. `prepare` reviews which local files would "
+                "be sent and returns a proposal; `apply` runs the planner on the "
+                "proposal you were given and returns a plan for agent_hub_start. "
+                "Nothing leaves the machine during prepare."
+            ),
             _object(
                 {
-                    "mode": {"enum": ["prepare", "apply"]},
+                    "mode": {
+                        "enum": ["prepare", "apply"],
+                        "description": (
+                            "prepare first. apply needs the proposal, "
+                            "proposal_sha256 and expected_policy_revision that "
+                            "prepare returned."
+                        ),
+                    },
                     "task": _task_schema(),
                     "project_root": project_root,
                     "provider": text,
                     "model": text,
-                    "source_paths": {"type": "array", "items": text},
-                    "proposal": {"type": "object"},
-                    "proposal_sha256": text,
-                    "expected_policy_revision": integer,
-                    "approval_request_id": text,
+                    "source_paths": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "type": "string",
+                            "description": (
+                                "Path relative to project_root. Absolute paths "
+                                "and '..' are rejected, as are credential-shaped "
+                                "names (.env*, *.pem, *.key, id_rsa)."
+                            ),
+                        },
+                        "description": (
+                            "prepare only. UTF-8 text files up to 2 MB each; a "
+                            "binary file is rejected as source_not_text."
+                        ),
+                    },
+                    "proposal": {
+                        "type": "object",
+                        "description": "apply only. The proposal object prepare returned, unchanged.",
+                    },
+                    "proposal_sha256": {
+                        "type": "string",
+                        "description": (
+                            "apply only. The digest prepare returned. It fences "
+                            "the proposal: editing it invalidates the digest."
+                        ),
+                    },
+                    "expected_policy_revision": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "apply only. The revision prepare saw. Refuses if "
+                            "project policy changed in between."
+                        ),
+                    },
+                    "approval_request_id": {
+                        "type": "string",
+                        "description": (
+                            "apply only, when prepare asked for one: policy can "
+                            "require a person to approve the egress first."
+                        ),
+                    },
                 },
                 required=["mode", "task", "project_root"],
             ),

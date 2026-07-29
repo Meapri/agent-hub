@@ -30,7 +30,6 @@ from google_antigravity_codex import oauth_login as google_oauth
 from google_antigravity_codex import profiles as google_profiles
 from google_antigravity_codex import provider as google_provider
 from google_antigravity_codex import security as google_security
-from google_antigravity_codex import session_prefs as google_session_prefs
 from google_antigravity_codex import writing as google_writing
 from grok_codex import auth as grok_auth
 from grok_codex import image as grok_image
@@ -818,14 +817,3 @@ def reset_default_model(provider: str, *, gemini_task: str | None = None) -> dic
         "provider": provider,
         "remaining": provider_settings.remove(provider, {"model"}),
     }
-
-
-def reset_all_settings(provider: str) -> dict[str, Any]:
-    if provider == "gemini":
-        changes = [
-            google_model_prefs.clear_prefs_tool({"all": True}),
-            google_session_prefs.clear_provider(),
-            google_profiles.use_profile_tool({"name": ""}),
-        ]
-        return {"success": all(item.get("success", True) for item in changes)}
-    return {"success": True, **provider_settings.reset(provider)}

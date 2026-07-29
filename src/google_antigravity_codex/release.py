@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
-import json
 from pathlib import Path
 import re
 import shlex
@@ -488,7 +487,3 @@ def release_draft(arguments: Dict[str, Any]) -> Dict[str, Any]:
             backend=str((polished or {}).get("backend") or "local-release"),
         ),
     }
-
-
-def snapshot_json(arguments: Dict[str, Any]) -> str:
-    return json.dumps(snapshot_to_dict(collect_snapshot(arguments)), ensure_ascii=False, indent=2)

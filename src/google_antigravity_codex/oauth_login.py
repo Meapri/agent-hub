@@ -957,19 +957,5 @@ def login_status() -> Dict[str, Any]:
     }
 
 
-def start_tool(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    args = _ if isinstance(_, dict) else {}
-    use_local = bool(args.get("use_local_redirect", True))
-    return start_login(use_local_redirect=use_local)
-
-
-def complete_tool(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    code = str(arguments.get("code_or_url") or arguments.get("code") or arguments.get("url") or "")
-    probe = arguments.get("probe")
-    if probe is None:
-        probe = True
-    return complete_login(code, probe=bool(probe))
-
-
 def status_tool(_: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return login_status()
