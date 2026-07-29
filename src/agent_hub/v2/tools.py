@@ -99,23 +99,26 @@ def _task_schema() -> dict[str, Any]:
                 "properties": {
                     "provider_allowlist": {"type": "array", "items": {"type": "string"}},
                     "max_input_tokens": {"type": "integer", "minimum": 0},
-                    "max_output_tokens": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": (
-                            "Per provider call, not per run. In a durable run "
-                            "every step gets this same cap, including the final "
-                            "one, and an answer that reaches it is cut off. "
-                            "Use max_total_tokens to bound what a run spends."
-                        ),
-                    },
+                    # max_output_tokens and its max_tokens alias are deliberately
+                    # absent from this surface. They cap a single provider call,
+                    # so the only thing a small value buys is a truncated answer
+                    # -- a shorter reply comes from asking for one, not from a
+                    # token ceiling. Callers were setting them anyway, because an
+                    # undescribed integer knob invites a guess, and every step in
+                    # the run then inherited the guess. The runtime still accepts
+                    # them for the one caller that genuinely wants a cheap cut-off
+                    # reply, the GUI connection probe, and project policy still
+                    # sets the ceiling for everyone else.
                     "max_total_tokens": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "The whole run's budget. Exhausting it pauses the run.",
+                        "description": (
+                            "The budget for this whole piece of work. Exhausting it "
+                            "pauses a run rather than cutting an answer short. This "
+                            "is the token limit to set."
+                        ),
                     },
                     "max_leaf_calls": {"type": "integer", "minimum": 0},
-                    "max_tokens": {"type": "integer", "minimum": 0, "deprecated": True},
                     "timeout_seconds": {"type": "number", "minimum": 0.1},
                 },
             },
