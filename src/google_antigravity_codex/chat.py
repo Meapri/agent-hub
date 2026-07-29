@@ -671,11 +671,3 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
             backend=backend,
         ),
     }
-
-
-def to_jsonable(value: Any) -> Any:
-    try:
-        json.dumps(value)
-        return value
-    except TypeError:
-        return str(value)

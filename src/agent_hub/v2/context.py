@@ -291,13 +291,3 @@ def collect_scoped_fact_pack(
         }
     )
     return fact_pack
-
-
-def require_index_results(result: dict[str, Any]) -> dict[str, Any]:
-    if result.get("indexed_count", 0) == 0:
-        raise HubV2Error(
-            "context_index_empty",
-            "No supported project text files were indexed.",
-            scope="context",
-        )
-    return result

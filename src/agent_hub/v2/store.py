@@ -4012,10 +4012,3 @@ class HubStore:
             "outcome_unknown_runs": unknown,
             "count": len(retryable) + len(unknown),
         }
-
-
-def disposable_store() -> HubStore:
-    """Convenience for manual diagnostics; tests should pass an explicit tmp path."""
-
-    root = Path(tempfile.mkdtemp(prefix="agent-hub-v2-store-"))
-    return HubStore(root / DEFAULT_DB_NAME)

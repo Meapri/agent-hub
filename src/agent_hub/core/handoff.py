@@ -144,12 +144,6 @@ class HandoffQualityError(HandoffError):
         super().__init__("handoff managed body failed quality checks: " + "; ".join(issues))
 
 
-class HandoffDrift(HandoffError):
-    def __init__(self, drift: Dict[str, Any]) -> None:
-        self.drift = dict(drift)
-        super().__init__("HANDOFF.md changed after the run snapshot was created")
-
-
 def _validated_project_root(project_root: str | Path) -> Path:
     return validate_project_root(project_root)
 
@@ -739,67 +733,6 @@ def render_context(snapshot: Dict[str, Any] | None) -> str:
         f"{quoted}\n"
         "END UNTRUSTED OPERATIONAL HANDOFF"
     )
-
-
-def check_drift(snapshot: Dict[str, Any] | None) -> Dict[str, Any]:
-    if not isinstance(snapshot, dict):
-        return {"drifted": False, "reason": None, "current_sha256": None}
-    if str(snapshot.get("mode") or "auto") == "off":
-        return {"drifted": False, "reason": None, "current_sha256": None}
-    project_root = str(snapshot.get("project_root") or "")
-    if not project_root:
-        return {
-            "drifted": True,
-            "reason": "invalid_snapshot",
-            "current_sha256": None,
-        }
-    requested_file = str(snapshot.get("requested_file") or "")
-    if not requested_file and snapshot.get("discovery") == "explicit":
-        requested_file = str(snapshot.get("source") or "")
-    try:
-        current = load_handoff(
-            project_root,
-            mode="auto",
-            search=str(snapshot.get("search") or "nearest"),
-            file=requested_file,
-            max_chars=int(snapshot.get("max_chars") or DEFAULT_MAX_CHARS),
-        )
-    except (HandoffError, OSError, ValueError):
-        return {
-            "drifted": True,
-            "reason": "unsafe_current_state",
-            "current_sha256": None,
-        }
-    expected_loaded = bool(snapshot.get("loaded"))
-    current_loaded = bool(current.get("loaded"))
-    if expected_loaded != current_loaded:
-        return {
-            "drifted": True,
-            "reason": "source_appeared" if current_loaded else "source_missing",
-            "current_sha256": current.get("file_sha256"),
-            "expected_sha256": snapshot.get("file_sha256"),
-            "current_source": current.get("source"),
-            "expected_source": snapshot.get("source"),
-        }
-    if not expected_loaded:
-        return {"drifted": False, "reason": None, "current_sha256": None}
-    if str(current.get("source") or "") != str(snapshot.get("source") or ""):
-        return {
-            "drifted": True,
-            "reason": "source_changed",
-            "current_sha256": current.get("file_sha256"),
-            "expected_sha256": snapshot.get("file_sha256"),
-            "current_source": current.get("source"),
-            "expected_source": snapshot.get("source"),
-        }
-    current_sha = str(current.get("file_sha256") or "")
-    expected_sha = str(snapshot.get("file_sha256") or "")
-    return {
-        "drifted": current_sha != expected_sha,
-        "reason": "content_changed" if current_sha != expected_sha else None,
-        "current_sha256": current_sha,
-        "expected_sha256": expected_sha,
-    }
 
 
 def _marker_block(body: str) -> str:

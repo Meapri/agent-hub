@@ -11,7 +11,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Iterator, Optional
 
 
 REPOSITORY_SKIP_PARTS = {
@@ -257,26 +257,6 @@ def read_repository_bytes(
         os.close(current_fd)
 
 
-def read_repository_text(
-    path: Path,
-    root: Path,
-    *,
-    root_fd: int,
-    max_bytes: int,
-) -> tuple[str, int, str]:
-    """Read one UTF-8 repository file through the canonical byte boundary."""
-
-    raw, size, reason = read_repository_bytes(
-        path,
-        root,
-        root_fd=root_fd,
-        max_bytes=max_bytes,
-    )
-    if reason:
-        return "", size, reason
-    return raw.decode("utf-8", errors="replace"), size, ""
-
-
 def repository_file_size(
     path: Path,
     root: Path,
@@ -309,66 +289,6 @@ def repository_file_size(
         if file_fd is not None:
             os.close(file_fd)
         os.close(current_fd)
-
-
-def repository_subdirectories(
-    relative_directory: Path,
-    root: Path,
-    *,
-    root_fd: int,
-    max_entries: int,
-) -> tuple[list[str], bool]:
-    """List immediate child directories through the anchored repository FD."""
-
-    if relative_directory.is_absolute() or is_sensitive_repository_path(relative_directory):
-        return [], False
-    if any(
-        part in REPOSITORY_SKIP_PARTS or part.endswith(".egg-info")
-        for part in relative_directory.parts
-    ):
-        return [], False
-    current_fd = os.dup(root_fd)
-    names: list[str] = []
-    truncated = False
-    try:
-        for part in relative_directory.parts:
-            next_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
-            os.close(current_fd)
-            current_fd = next_fd
-        try:
-            with os.scandir(current_fd) as entries:
-                for index, entry in enumerate(entries):
-                    if index >= max(0, int(max_entries)):
-                        truncated = True
-                        break
-                    if (
-                        not entry.name.startswith(".")
-                        and entry.is_dir(follow_symlinks=False)
-                        and not entry.is_symlink()
-                    ):
-                        names.append(entry.name)
-        except OSError:
-            return [], False
-    except OSError:
-        return [], False
-    finally:
-        os.close(current_fd)
-    return sorted(set(names)), truncated
-
-
-def repository_path_matches_fd(root: Path, root_fd: int) -> bool:
-    """Confirm the visible project path still names the anchored directory."""
-
-    try:
-        path_stat = os.stat(root, follow_symlinks=False)
-        fd_stat = os.fstat(root_fd)
-    except OSError:
-        return False
-    return (
-        stat.S_ISDIR(path_stat.st_mode)
-        and path_stat.st_dev == fd_stat.st_dev
-        and path_stat.st_ino == fd_stat.st_ino
-    )
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:
@@ -656,94 +576,6 @@ def filesystem_repository_files(
                 os.close(current_fd)
         pending.extend(reversed(directories))
     return sorted(set(paths)), False
-
-
-def collect_repository_manifest(
-    project_root: str | Path,
-    *,
-    max_files: int = 4_000,
-    max_chars: int = 80_000,
-    root_fd: int | None = None,
-) -> Dict[str, Any]:
-    """Return a bounded, deterministic manifest for durable fact checking.
-
-    Git-tracked and non-ignored untracked paths are preferred so documents can
-    describe new files in the current change without including ignored local
-    artifacts.  A filesystem fallback keeps the helper useful for non-Git
-    fixtures.
-    """
-
-    if root_fd is None:
-        root = Path(project_root).expanduser().resolve()
-        if not root.is_dir():
-            raise ValueError(f"project_root is not a directory: {root}")
-    else:
-        root = Path(project_root).expanduser()
-        if not root.is_absolute():
-            raise ValueError(f"project_root must be absolute when root_fd is set: {root}")
-        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
-            raise ValueError("root_fd is not a directory")
-    file_limit = min(10_000, max(1, int(max_files)))
-    char_limit = min(1_000_000, max(1_000, int(max_chars)))
-    input_entry_limit = min(40_000, max(1_000, file_limit * 4))
-    input_path_byte_limit = min(
-        4_000_000,
-        max(16_000, char_limit * 4),
-    )
-    git_candidates, input_truncated = git_repository_files(
-        root,
-        max_entries=input_entry_limit,
-        max_path_bytes=input_path_byte_limit,
-        root_fd=root_fd,
-    )
-    if git_candidates is None:
-        if _looks_like_git_checkout(root):
-            raise ValueError("Git repository file selection failed; refusing filesystem fallback")
-        candidates, input_truncated = filesystem_repository_files(
-            root,
-            max_entries=input_entry_limit,
-            max_path_bytes=input_path_byte_limit,
-            root_fd=root_fd,
-        )
-        manifest_source = "filesystem"
-    else:
-        candidates = git_candidates
-        manifest_source = "git"
-    selected: list[str] = []
-    char_count = 0
-    for path in candidates:
-        added = len(path) + 1
-        if len(selected) >= file_limit or char_count + added > char_limit:
-            break
-        selected.append(path)
-        char_count += added
-    complete = not input_truncated and len(selected) == len(candidates)
-    directory_names: set[str] = set()
-    directory_chars = 0
-    directories_truncated = False
-    for item in selected:
-        for parent in reversed(Path(item).parents):
-            name = parent.as_posix()
-            if name in {"", "."} or name in directory_names:
-                continue
-            added = len(name) + 1
-            if char_count + directory_chars + added > char_limit:
-                directories_truncated = True
-                break
-            directory_names.add(name)
-            directory_chars += added
-        if directories_truncated:
-            break
-    directories = sorted(directory_names)
-    return {
-        "repository_files": selected,
-        "repository_directories": directories,
-        "repository_directories_truncated": directories_truncated,
-        "repository_manifest_complete": complete,
-        "repository_manifest_total": len(candidates) + (1 if input_truncated else 0),
-        "repository_manifest_truncated": input_truncated,
-        "repository_manifest_source": manifest_source,
-    }
 
 
 def validate_project_root(project_root: str | Path) -> Path:

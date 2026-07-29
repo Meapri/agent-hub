@@ -37,11 +37,3 @@ def write_json_secure(path: Path, data: Dict[str, Any], *, mode: int = 0o600) ->
     except OSError:
         pass
     return path
-
-
-def read_json_object(path: Path) -> Dict[str, Any] | None:
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return None
-    return data if isinstance(data, dict) else None

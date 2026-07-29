@@ -151,12 +151,3 @@ def status() -> Dict[str, Any]:
         "prefer_subscription": prefer_subscription(),
         "hint": "claude auth login --claudeai  |  CLAUDE_CODEX_AUTH_MODE=subscription|api_key",
     }
-
-
-def logout_local_plugin_key() -> bool:
-    """Remove plugin-local API key file only (does not revoke Claude Code login)."""
-    path = api_key_path()
-    if path.is_file():
-        path.unlink()
-        return True
-    return False
