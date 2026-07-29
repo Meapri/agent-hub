@@ -17,6 +17,7 @@ import base64
 import pytest
 
 from agent_hub.v2 import provider_runtime
+from agent_hub.v2.policy import DEFAULT_POLICY
 
 pytestmark = pytest.mark.live
 
@@ -71,11 +72,24 @@ def test_vision_reads_an_image(provider, require_provider, canary_png_bytes):
 
 @pytest.mark.parametrize("provider", SEARCH_PROVIDERS)
 def test_search_answers(provider, require_provider):
+    """Sends the budget a real run sends, not a small convenient one.
+
+    This canary used to pass max_tokens=2048 and so never exercised the value
+    the runtime actually uses. With the project default of 131072, claude
+    refused the whole request -- 131072 > 128000 for the model -- and every
+    search step in every plan failed. A canary that picks its own comfortable
+    numbers is testing a path production does not take.
+    """
+
     require_provider(provider)
 
     result = provider_runtime.search(
         provider,
-        {"query": "What is the capital of France?", "max_tokens": 2048, "timeout_sec": 180},
+        {
+            "query": "What is the capital of France?",
+            "max_tokens": DEFAULT_POLICY["budgets"]["max_output_tokens"],
+            "timeout_sec": 180,
+        },
     )
 
     _usable_text(result)

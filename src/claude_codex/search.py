@@ -58,9 +58,16 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
         tool["allowed_domains"] = [str(item) for item in allowed_domains[:20]]
     elif isinstance(blocked_domains, list) and blocked_domains:
         tool["blocked_domains"] = [str(item) for item in blocked_domains[:20]]
+    # The same clamp chat applies. Without it the API refuses the whole request
+    # -- "max_tokens: 131072 > 128000" -- rather than returning a shorter
+    # answer, so every search failed once the runtime stopped being handed a
+    # smaller per-call cap by its callers.
+    requested_max_tokens = int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS)
+    model_max_tokens = chat.max_output_tokens_for_model(model)
+    max_tokens = min(max(1, requested_max_tokens), model_max_tokens)
     body = {
         "model": model,
-        "max_tokens": max(1, int(arguments.get("max_tokens") or chat.DEFAULT_MAX_TOKENS)),
+        "max_tokens": max_tokens,
         "messages": [
             {
                 "role": "user",
@@ -80,6 +87,8 @@ def run_search(arguments: Dict[str, Any]) -> Dict[str, Any]:
     sources = _sources(payload)[:max_sources]
     stop_reason = str(payload.get("stop_reason") or "end_turn")
     warnings = [] if sources else ["no_search_citations_returned"]
+    if requested_max_tokens > model_max_tokens:
+        warnings.append(f"max_tokens_clamped_for_model:{requested_max_tokens}->{model_max_tokens}")
     auth_ctx = auth.resolve_auth()
     return {
         "text": text,
