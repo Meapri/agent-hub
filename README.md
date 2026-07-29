@@ -7,7 +7,7 @@ macOS용 멀티 모델 실행 환경입니다.
 인계 기록을 로컬에서 함께 관리합니다. Codex나 Claude Code가 종료되어도 실행 상태가 남기
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
-- 현재 버전: `3.0.7`
+- 현재 버전: `3.1.0`
 - Python: 3.11 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -422,6 +422,23 @@ slot에 보관합니다. 전환이나 복구가 완전히 끝나지 않으면 �
 ./.venv/bin/python scripts/check_release_version.py
 ./.venv/bin/python -m build
 ```
+
+### 실제 provider를 부르는 canary
+
+위 `pytest`는 네트워크를 타지 않습니다. provider까지 실제로 닿는지 확인하려면
+따로 실행합니다.
+
+```bash
+AGENT_HUB_LIVE=1 ./.venv/bin/python -m pytest -m live -v
+```
+
+provider마다 capability별로 한 번씩 부르고, 사람이 실제로 쓰는 경로(이미지 읽기,
+이미지 생성 후 artifact 회수, 연결 테스트)도 끝에서 끝까지 확인합니다. 모델이 무슨
+말을 했는지가 아니라 **쓸 수 있는 응답이 왔는지**만 봅니다. 로그인이 만료된 provider는
+실패가 아니라 건너뛰고 이유를 남깁니다.
+
+돈이 들고 자격증명이 필요해서 기본으로는 꺼져 있습니다. provider 쪽을 건드렸거나
+릴리스 전이라면 돌려 보세요.
 
 사용자 문서는 다음 검사도 함께 실행합니다.
 
