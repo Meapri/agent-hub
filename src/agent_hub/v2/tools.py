@@ -401,7 +401,60 @@ def tool_definitions() -> list[dict[str, Any]]:
                         "description": "history and diff are read-only. diff without target_sequence compares a snapshot against the working file, which reveals edits made outside Agent Hub.",
                     },
                     "project_root": project_root,
-                    "arguments": {"type": "object"},
+                    "arguments": _object(
+                        {
+                            "body": {
+                                "type": "string",
+                                "description": "prepare_update only, and required there. The managed sections alone, without the marker comments; Agent Hub adds them. Must cover every section the quality check requires, and next_step must be one concrete action.",
+                            },
+                            "file": {
+                                "type": "string",
+                                "description": "Required for apply_update: pass the target that prepare_update returned. Optional elsewhere to name a HANDOFF file other than the one search finds.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "apply_update only, and required there. The whole file that prepare_update returned in content, markers included. Sending the body here is rejected.",
+                            },
+                            "expected_sha256": {
+                                "type": "string",
+                                "description": "apply_update only, and required there. The whole-file expected_sha256 that prepare_update returned, not the managed one. A mismatch means the file changed since prepare and returns handoff_revision_conflict.",
+                            },
+                            "base_managed_sha256": {
+                                "type": "string",
+                                "description": "prepare_update only. Fences the managed block alone, so an edit elsewhere in the file does not conflict. Re-prepare with this value after a whole-file conflict.",
+                            },
+                            "search": {
+                                "enum": ["project-only", "nearest"],
+                                "description": "project-only stays in this project. nearest may walk up to a parent inside the same git repository. prepare_update defaults to project-only; the read actions default to nearest.",
+                            },
+                            "mode": {
+                                "enum": ["off", "auto", "required"],
+                                "description": "get only. required fails when no handoff is found instead of returning loaded=false.",
+                            },
+                            "max_chars": {"type": "integer", "minimum": 1},
+                            "include_diff": {
+                                "type": "boolean",
+                                "description": "prepare_update only. Adds the section-level diff this update would write.",
+                            },
+                            "include_text": boolean,
+                            "max_lines": {"type": "integer", "minimum": 1},
+                            "limit": {"type": "integer", "minimum": 1},
+                            "include_body": {
+                                "type": "boolean",
+                                "description": "history only. Returns each snapshot body, which is larger and secret-redacted.",
+                            },
+                            "base_sequence": {"type": "integer", "minimum": 1},
+                            "target_sequence": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "diff only. Omit to compare the base snapshot against the working file.",
+                            },
+                            "run_id": {
+                                "type": "string",
+                                "description": "takeover only, and required there.",
+                            },
+                        }
+                    ),
                 },
                 required=["action", "project_root"],
             ),
