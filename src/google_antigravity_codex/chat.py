@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 from agent_hub.core import limits
 
 from . import model_prefs, provider, response as response_schema
+from agent_hub.core import response as shared_response
 
 DEFAULT_MODEL = "gemini-3.5-flash"
 DEFAULT_MAX_TOKENS = limits.GEMINI_MAX_OUTPUT_TOKENS
@@ -626,16 +627,17 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
             "max_tokens_clamped_for_model:"
             f"{requested_max_tokens}->{limits.GEMINI_MAX_OUTPUT_TOKENS}"
         )
-    if not (extracted["text"] or extracted.get("tool_calls")):
-        warnings.append("empty_model_text")
     if diagnostics.get("capacity_fallback"):
         used = diagnostics.get("used_model") or model
         requested = diagnostics.get("requested_model") or model
         warnings.append(f"capacity_fallback:{requested}->{used}")
-    finish_reason = str(extracted.get("finish_reason") or "stop").lower()
-    truncated = finish_reason in {"max_tokens", "length"}
-    if truncated:
-        warnings.append(f"incomplete_finish_reason:{finish_reason}")
+    outcome = shared_response.chat_outcome(
+        text=extracted["text"],
+        finish_reason=extracted.get("finish_reason"),
+        warnings=warnings,
+    )
+    finish_reason = outcome["finish_reason"]
+    warnings = list(outcome["warnings"])
     text_out = extracted["text"]
     if diagnostics.get("capacity_fallback") and text_out:
         used = diagnostics.get("used_model") or model
@@ -661,7 +663,7 @@ def run_chat(arguments: Dict[str, Any], *, progress: ProgressCallback = None) ->
         # names neither the cause nor the fix. Vision hit this constantly: an image
         # costs ~1000 prompt tokens and its answers are long.
         **response_schema.standard_fields(
-            success=True,
+            success=outcome["success"],
             model=model,
             usage=extracted.get("usage", {}),
             warnings=warnings,
