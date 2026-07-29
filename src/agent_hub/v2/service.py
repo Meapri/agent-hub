@@ -786,10 +786,19 @@ class HubService:
     def _tool_execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
         task = validate_task(arguments.get("task"))
         if task["retention"] != "ephemeral" or arguments.get("record") is True:
+            # Name the argument that asked for durability. "Recorded work must
+            # use agent_hub_start" is true but leaves the caller guessing which
+            # of the two they set, and a caller who only wanted an inline answer
+            # can drop it instead of switching tools.
+            field = "record" if arguments.get("record") is True else "task.retention"
             raise HubV2Error(
                 "durable_run_required",
-                "Recorded work must use agent_hub_start.",
+                (
+                    f"{field} asks for recorded work, which agent_hub_execute does not do. "
+                    "Use agent_hub_start, or drop it for an inline answer."
+                ),
                 scope="run",
+                safe_details={"field": field},
                 next_action={"type": "call_tool", "tool": "agent_hub_start"},
             )
         if task["capability"] == "image":
@@ -1048,15 +1057,25 @@ class HubService:
         if not isinstance(proposal, Mapping):
             raise HubV2Error(
                 "invalid_egress_proposal",
-                "An egress proposal is required.",
+                "proposal is required: pass the whole object prepare returned, unmodified.",
                 scope="planner",
+                safe_details={"field": "proposal"},
+                next_action={"type": "call_tool", "tool": "agent_hub_plan", "action": "prepare"},
             )
         proposal_sha = str(arguments.get("proposal_sha256") or "")
         if proposal.get("proposal_sha256") != proposal_sha:
+            # The two disagree because one of them was rebuilt. Say so, rather
+            # than leaving the caller to re-run prepare and hit it again.
             raise HubV2Error(
                 "proposal_digest_conflict",
-                "The planner proposal digest does not match.",
+                (
+                    "proposal_sha256 does not match the digest inside proposal. "
+                    "Send both exactly as prepare returned them; do not recompute "
+                    "either one or edit the proposal."
+                ),
                 scope="planner",
+                safe_details={"field": "proposal_sha256"},
+                next_action={"type": "call_tool", "tool": "agent_hub_plan", "action": "prepare"},
             )
         expected_proposal_sha = sha256(
             canonical_json(
@@ -1118,6 +1137,11 @@ class HubService:
                 "task": task,
                 "planner_prompt": planner_prompt,
                 "model": model,
+                # The planner is judged against this set below, so it has to be
+                # the set the planner is given. It used to be told the static
+                # capability table instead, which is wider, and then lost the
+                # whole plan for using a provider that table endorsed.
+                "approved_destinations": sorted(approved_destinations),
             },
             timeout=1790.0,
         )

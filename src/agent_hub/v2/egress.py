@@ -335,11 +335,23 @@ def verify_egress_approval(
 ) -> dict[str, Any]:
     manifest = proposal.get("manifest")
     fact_pack = proposal.get("fact_pack")
-    if not isinstance(manifest, Mapping) or not isinstance(fact_pack, Mapping):
+    missing = [
+        name
+        for name, value in (("manifest", manifest), ("fact_pack", fact_pack))
+        if not isinstance(value, Mapping)
+    ]
+    if missing:
+        # A proposal arrives here trimmed when the caller forwards only the
+        # digest, or rebuilds the object from the fields they cared about.
+        # Naming the missing keys is the difference between one retry and none.
         raise HubV2Error(
             "invalid_egress_proposal",
-            "The egress proposal is incomplete.",
+            (
+                f"proposal is missing {' and '.join(missing)}; pass the whole object "
+                "prepare returned, unmodified."
+            ),
             scope="egress",
+            safe_details={"missing": missing},
         )
     if manifest.get("manifest_sha256") != approved_manifest_sha256:
         raise HubV2Error(

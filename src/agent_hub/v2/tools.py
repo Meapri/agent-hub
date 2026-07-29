@@ -107,7 +107,13 @@ def _task_schema() -> dict[str, Any]:
                 },
             },
             "output_contract": {"type": "object"},
-            "retention": {"enum": ["ephemeral", "durable_private", "exportable"]},
+            "retention": {
+                "enum": ["ephemeral", "durable_private", "exportable"],
+                "description": (
+                    "Defaults to ephemeral. Anything else is recorded work, "
+                    "which agent_hub_execute refuses -- use agent_hub_start."
+                ),
+            },
         },
     }
 
@@ -160,7 +166,14 @@ def tool_definitions() -> list[dict[str, Any]]:
                     "task": _task_schema(),
                     "provider": text,
                     "model": text,
-                    "record": boolean,
+                    "record": {
+                        "type": "boolean",
+                        "description": (
+                            "Leave this off. Setting it true asks for a recorded "
+                            "run, which this tool refuses; call agent_hub_start "
+                            "instead."
+                        ),
+                    },
                     "project_root": project_root,
                 },
                 required=["task", "project_root"],

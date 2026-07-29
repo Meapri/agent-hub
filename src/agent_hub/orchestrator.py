@@ -63,16 +63,30 @@ INVESTIGATION_DEPTHS = ("shallow", "standard", "deep")
 def capability_manifest(
     *,
     allowed_capabilities: Sequence[str] | None = None,
+    allowed_providers: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
+    """What the planner may choose from.
+
+    `allowed_providers` is the run's approved egress destinations. The static
+    table says which providers *can* serve a capability; the caller's approval
+    says which ones this run *may* reach. Telling the planner the wider set and
+    then judging it against the narrower one is how a plan gets thrown away for
+    obeying its own instructions.
+    """
+
     allowed = set(allowed_capabilities or CAPABILITY_PROVIDERS)
-    return {
-        name: {
-            "providers": list(providers),
-            "parallel_safe": name not in {"verify"},
-        }
-        for name, providers in CAPABILITY_PROVIDERS.items()
-        if name in allowed
-    }
+    approved = {str(item) for item in allowed_providers} if allowed_providers else None
+    manifest: Dict[str, Any] = {}
+    for name, providers in CAPABILITY_PROVIDERS.items():
+        if name not in allowed:
+            continue
+        usable = [item for item in providers if approved is None or item in approved]
+        if not usable:
+            # No approved provider can serve this capability, so offering it
+            # would only invite a step the runtime has to reject.
+            continue
+        manifest[name] = {"providers": usable, "parallel_safe": name not in {"verify"}}
+    return manifest
 
 
 def planner_prompt(
@@ -81,10 +95,14 @@ def planner_prompt(
     facts: str = "",
     max_steps: int = MAX_PLAN_STEPS,
     allowed_capabilities: Sequence[str] | None = None,
+    allowed_providers: Sequence[str] | None = None,
 ) -> str:
     allowed = set(allowed_capabilities or CAPABILITY_PROVIDERS)
     manifest = json.dumps(
-        capability_manifest(allowed_capabilities=tuple(allowed)),
+        capability_manifest(
+            allowed_capabilities=tuple(allowed),
+            allowed_providers=allowed_providers,
+        ),
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -135,6 +153,9 @@ Contract:
 Rules:
 - Create at most {max_steps} steps, usually 2-6. Do not add ceremonial steps.
 - Do not invent capabilities, providers, tools, files, or facts.
+- Every provider and every fallback_providers entry must appear under that step's capability in
+  the manifest above. No other provider is reachable for this run, and one unreachable name makes
+  the whole plan invalid. When a capability lists a single provider, leave fallback_providers empty.
 - Use inspect_codebase for local repository understanding. Use search only for external/web facts.
 - Use review_text to review a generated draft or another dependency output.
 {review_diff_rule.rstrip()}
@@ -201,8 +222,15 @@ def validate_plan(
     max_steps: int = MAX_PLAN_STEPS,
     max_calls: int = 24,
     allowed_capabilities: Sequence[str] | None = None,
+    allowed_providers: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
-    """Validate an LLM plan as untrusted input and return a normalized copy."""
+    """Validate an LLM plan as untrusted input and return a normalized copy.
+
+    `allowed_providers` is checked here rather than only at the runtime fence so
+    that a plan naming an unapproved destination is a local validation failure,
+    which the planner repair loop can feed back and correct. The fence in the
+    service stays as the authority; this only stops the plan earlier.
+    """
 
     if set(plan) - _PLAN_KEYS:
         raise ValueError(f"plan contains unsupported fields: {sorted(set(plan) - _PLAN_KEYS)}")
@@ -219,6 +247,7 @@ def validate_plan(
         raise ValueError(f"plan has too many steps: {len(raw_steps)} > {limit}")
 
     allowed = set(allowed_capabilities or CAPABILITY_PROVIDERS)
+    approved_providers = {str(item) for item in allowed_providers} if allowed_providers else None
     normalized_steps: List[Dict[str, Any]] = []
     ids: List[str] = []
     for index, raw in enumerate(raw_steps):
@@ -239,6 +268,11 @@ def validate_plan(
             raise ValueError(f"unsupported capability: {capability}")
         if not _provider_supported(capability, provider):
             raise ValueError(f"provider {provider!r} does not support capability {capability!r}")
+        if approved_providers is not None and provider not in approved_providers:
+            raise ValueError(
+                f"{step_id}.provider {provider!r} is not an approved destination for this run; "
+                f"choose one of: {', '.join(sorted(approved_providers))}"
+            )
         dependencies = _unique_strings(raw.get("depends_on", []), field=f"{step_id}.depends_on")
         fallbacks = _unique_strings(
             raw.get("fallback_providers", []), field=f"{step_id}.fallback_providers"
@@ -247,6 +281,11 @@ def validate_plan(
             raise ValueError(f"{step_id}.fallback_providers repeats the primary provider")
         if any(not _provider_supported(capability, item) for item in fallbacks):
             raise ValueError(f"{step_id} has an incompatible fallback provider")
+        if approved_providers is not None and not set(fallbacks).issubset(approved_providers):
+            raise ValueError(
+                f"{step_id}.fallback_providers names a destination this run has not approved; "
+                f"approved destinations are: {', '.join(sorted(approved_providers))}"
+            )
         instruction = str(raw.get("instruction") or "").strip()
         if not instruction or len(instruction) > MAX_INSTRUCTION_CHARS:
             raise ValueError(f"{step_id}.instruction must be 1..{MAX_INSTRUCTION_CHARS} chars")

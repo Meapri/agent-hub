@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from agent_hub import capabilities, consistency, orchestrator, provider_settings
 from agent_hub.core import limits, media
@@ -703,14 +703,21 @@ def plan(
     max_leaf_calls: int,
     max_tokens: int,
     timeout_seconds: float,
+    approved_destinations: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """Generate and locally validate the provider-independent planner DAG."""
+    """Generate and locally validate the provider-independent planner DAG.
+
+    The planner is told the run's approved destinations and validated against
+    the same set, so a plan that reaches for an unapproved provider is repaired
+    here instead of being thrown away by the service fence.
+    """
 
     initial = orchestrator.planner_prompt(
         prompt,
         facts="",
         max_steps=max_steps,
         allowed_capabilities=RUNTIME_PLANNER_CAPABILITIES,
+        allowed_providers=approved_destinations,
     )
     previous = ""
     validation_error = ""
@@ -746,6 +753,7 @@ def plan(
                 max_steps=max_steps,
                 max_calls=max_leaf_calls,
                 allowed_capabilities=RUNTIME_PLANNER_CAPABILITIES,
+                allowed_providers=approved_destinations,
             )
         except ValueError as exc:
             validation_error = str(exc)[:200]
