@@ -269,12 +269,19 @@ def _plan(provider: str, params: Mapping[str, Any]) -> dict[str, Any]:
     prompt = str(params.get("planner_prompt") or task["intent"])
     model = params.get("model")
     constraints = task.get("constraints")
+    raw_destinations = params.get("approved_destinations")
+    approved_destinations = (
+        [str(item) for item in raw_destinations if str(item)]
+        if isinstance(raw_destinations, (list, tuple))
+        else None
+    )
     try:
         result = _payload(
             provider_runtime.plan(
                 provider,
                 prompt=prompt,
                 model=(ensure_public_model_id(model) if model is not None else None),
+                approved_destinations=approved_destinations,
                 max_steps=16,
                 max_leaf_calls=int(
                     constraints.get("max_leaf_calls") or 100
