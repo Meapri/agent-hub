@@ -371,7 +371,9 @@ def output_token_limit(
 def total_token_limit(
     constraints: Mapping[str, Any],
     *,
-    default: int = 131_072,
+    # A whole run, not one call. Kept equal to the project policy default so a
+    # task without constraints is budgeted the same either way.
+    default: int = 4_000_000,
 ) -> int:
     value = constraints.get("max_total_tokens", constraints.get("max_tokens", default))
     return int(value)
