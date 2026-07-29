@@ -10,6 +10,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import tempfile
 import threading
@@ -19,6 +20,7 @@ from typing import Any, Callable, Mapping, NoReturn
 
 from agent_hub import __version__
 from agent_hub.core import handoff as handoff_state
+from agent_hub.core import response as shared_response
 from agent_hub.doctor import run_doctor
 
 from .context import collect_scoped_fact_pack, index_project, search_fact_pack
@@ -34,6 +36,7 @@ from .contracts import (
     estimate_tokens_from_text,
     input_token_limit,
     normalize_token_usage,
+    output_token_limit,
     require_non_negative_int,
     safe_usage,
     total_token_limit,
@@ -180,6 +183,41 @@ def _structured_text(result: Mapping[str, Any]) -> str:
     # non-empty, so verification accepted it and the step completed on text the
     # provider never wrote. Returning nothing lets the verifier reject it.
     return ""
+
+
+_SAFE_WARNING_RE = re.compile(r"\A[a-z0-9_]{1,48}(?::[a-z0-9_.-]{1,40})?\Z")
+MAX_STEP_WARNINGS = 8
+
+
+def _completion_state(result: Mapping[str, Any]) -> dict[str, Any]:
+    """How the provider says the answer ended, kept for the step record.
+
+    The adapters decide this once, in response.chat_outcome, and the envelope
+    carries `finish_reason` and `warnings` all the way here -- but the durable
+    run path read neither, so a reply cut off at max_tokens was stored as an
+    ordinary success. The caller saw a truncated answer and nothing saying why.
+    agent_hub_execute already returns the whole envelope, which is why only
+    multi-step runs looked like they were silently losing output.
+
+    Warnings are provider-adjacent, so only the authored code shape survives:
+    a bounded number of `snake_case` or `snake_case:detail` tokens.
+    """
+
+    reason = str(result.get("finish_reason") or "").strip().lower()
+    raw = result.get("warnings")
+    warnings = [
+        item
+        for item in (str(entry).strip() for entry in raw or [])
+        if _SAFE_WARNING_RE.fullmatch(item)
+    ][:MAX_STEP_WARNINGS]
+    state: dict[str, Any] = {}
+    if reason:
+        state["finish_reason"] = reason
+    if warnings:
+        state["provider_warnings"] = warnings
+    if reason in shared_response.TRUNCATED_FINISH_REASONS:
+        state["output_truncated"] = True
+    return state
 
 
 def _resumable(run: Mapping[str, Any]) -> bool:
@@ -1841,6 +1879,28 @@ class HubService:
                 "context_model_max_input_tokens": context_budget["model_max_input_tokens"],
                 "context_effective_input_limit": context_budget["effective_input_limit"],
             }
+            completion = _completion_state(result)
+            checkpoint.update(completion)
+            if completion.get("output_truncated"):
+                # The step still succeeded -- a truncated answer is an answer --
+                # but the caller has to be able to see that this one stopped at
+                # the cap rather than at the end of what it had to say, and
+                # which cap did it.
+                self.store.record_runtime_event(
+                    run_id,
+                    event_type="step_output_truncated",
+                    details={
+                        "step_id": str(step["id"]),
+                        "provider": provider,
+                        "finish_reason": completion["finish_reason"],
+                        "max_output_tokens": output_token_limit(
+                            plan["task"]["constraints"],
+                            default=0,
+                        )
+                        or None,
+                        "reason_code": "output_token_limit_reached",
+                    },
+                )
         aad = f"agent-hub-v2-step:{step['id']}".encode("utf-8")
         if provider != "local":
             # Settle the token spend before anything downstream can raise. The
