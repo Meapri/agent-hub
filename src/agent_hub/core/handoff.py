@@ -118,6 +118,21 @@ class HandoffUnsafePath(HandoffError):
     pass
 
 
+class HandoffArgumentError(HandoffError):
+    """A caller sent the wrong argument shape, and can fix it from the message.
+
+    The message must be a literal authored here so the runtime can hand it back
+    to the caller verbatim without auditing it for caller data. A bare
+    ``ValueError`` here reaches the caller as ``internal_error``, which tells
+    them nothing about which field to correct.
+    """
+
+    def __init__(self, message: str, *, field: str, limit: int | None = None) -> None:
+        self.field = field
+        self.limit = limit
+        super().__init__(message)
+
+
 class HandoffRevisionConflict(HandoffError):
     def __init__(self, *, expected: str | None, current: str | None) -> None:
         self.expected = expected
@@ -151,21 +166,31 @@ def _validated_project_root(project_root: str | Path) -> Path:
 def _normalize_mode(value: Any) -> str:
     mode = str(value or "auto").strip().lower()
     if mode not in {"off", "auto", "required"}:
-        raise ValueError("handoff mode must be off, auto, or required")
+        raise HandoffArgumentError(
+            "mode must be off, auto, or required.",
+            field="mode",
+        )
     return mode
 
 
 def _normalize_search(value: Any) -> str:
     search = str(value or "nearest").strip().lower()
     if search not in {"project-only", "nearest"}:
-        raise ValueError("handoff search must be project-only or nearest")
+        raise HandoffArgumentError(
+            "search must be project-only or nearest.",
+            field="search",
+        )
     return search
 
 
 def _normalize_max_chars(value: Any) -> int:
     limit = int(value or DEFAULT_MAX_CHARS)
     if not 1 <= limit <= MAX_HANDOFF_CHARS:
-        raise ValueError(f"max_handoff_chars must be between 1 and {MAX_HANDOFF_CHARS}")
+        raise HandoffArgumentError(
+            "max_handoff_chars must be between 1 and the maximum reported in limit.",
+            field="max_handoff_chars",
+            limit=MAX_HANDOFF_CHARS,
+        )
     return limit
 
 
@@ -738,11 +763,21 @@ def render_context(snapshot: Dict[str, Any] | None) -> str:
 def _marker_block(body: str) -> str:
     normalized = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
-        raise ValueError("handoff update body must not be empty")
+        raise HandoffArgumentError(
+            "body must not be empty.",
+            field="body",
+        )
     if len(normalized) > MAX_UPDATE_BODY_CHARS:
-        raise ValueError("handoff update body is too large")
+        raise HandoffArgumentError(
+            "body is longer than the maximum characters reported in limit.",
+            field="body",
+            limit=MAX_UPDATE_BODY_CHARS,
+        )
     if START_MARKER in normalized or END_MARKER in normalized:
-        raise ValueError("handoff update body must not contain managed markers")
+        raise HandoffArgumentError(
+            "body must contain only the managed sections; Agent Hub adds the markers.",
+            field="body",
+        )
     return f"{START_MARKER}\n{normalized}\n{END_MARKER}\n"
 
 
@@ -872,8 +907,9 @@ def prepare_handoff_update(
             not isinstance(base_managed_sha256, str)
             or _SHA256_RE.fullmatch(base_managed_sha256) is None
         ):
-            raise ValueError(
-                "base_managed_sha256 must be omitted, null, or 64 lowercase hex characters"
+            raise HandoffArgumentError(
+                "base_managed_sha256 must be omitted, null, or 64 lowercase hex characters.",
+                field="base_managed_sha256",
             )
         if current_managed_sha256 != base_managed_sha256:
             raise HandoffManagedRevisionConflict(
@@ -888,7 +924,11 @@ def prepare_handoff_update(
     content = _replace_managed_block(existing, block)
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_HANDOFF_FILE_BYTES:
-        raise ValueError("prepared handoff file exceeds the maximum size")
+        raise HandoffArgumentError(
+            "the prepared file would exceed the maximum bytes reported in limit; shorten body.",
+            field="body",
+            limit=MAX_HANDOFF_FILE_BYTES,
+        )
     return {
         "target": str(target),
         "project_root": str(root),
@@ -1009,18 +1049,33 @@ def apply_handoff_update(
     """Apply a prepared whole-file update with SHA fencing and atomic replace."""
 
     if not str(file or "").strip():
-        raise ValueError("file is required; apply the exact target returned by prepare")
+        raise HandoffArgumentError(
+            "file is required; pass the target that prepare_update returned.",
+            field="file",
+        )
     if expected_sha256 is not None and _SHA256_RE.fullmatch(expected_sha256) is None:
-        raise ValueError("expected_sha256 must be null or 64 lowercase hex characters")
+        raise HandoffArgumentError(
+            "expected_sha256 must be null or 64 lowercase hex characters; "
+            "pass the expected_sha256 that prepare_update returned.",
+            field="expected_sha256",
+        )
     encoded = content.encode("utf-8")
     if len(encoded) > MAX_HANDOFF_FILE_BYTES:
-        raise ValueError("handoff content exceeds the maximum size")
+        raise HandoffArgumentError(
+            "content is longer than the maximum bytes reported in limit.",
+            field="content",
+            limit=MAX_HANDOFF_FILE_BYTES,
+        )
 
     root = _validated_project_root(project_root)
     target, scope, git_root = _update_target(root, file=file, search="nearest")
     managed = _parse_managed_block(content)
     if managed is None:
-        raise ValueError("handoff content must contain exactly one managed marker block")
+        raise HandoffArgumentError(
+            "content must be the whole file that prepare_update returned, markers included; "
+            "do not send the body here.",
+            field="content",
+        )
     quality = validate_managed_body(managed.body)
     relative = target.relative_to(scope)
     temp_name = f".{target.name}.{secrets.token_hex(8)}.tmp"

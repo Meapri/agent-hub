@@ -372,6 +372,18 @@ class HubService:
                 "No project HANDOFF.md could be found.",
                 scope="handoff",
             )
+        if isinstance(error, handoff_state.HandoffArgumentError):
+            # The message is a literal authored in handoff.py, so it carries no
+            # caller data and can name the field the caller has to correct.
+            details: dict[str, Any] = {"field": error.field}
+            if error.limit is not None:
+                details["limit"] = error.limit
+            return HubV2Error(
+                "invalid_request",
+                str(error),
+                scope="handoff",
+                safe_details=details,
+            )
         return HubV2Error(
             "invalid_request",
             "The HANDOFF.md request is invalid.",
