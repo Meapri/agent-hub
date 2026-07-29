@@ -312,6 +312,11 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
     # runtime does not offer, so there is no answer to keep.
     unusable = stop_reason == "tool_use"
     warnings = [f"incomplete_finish_reason:{stop_reason}"] if truncated or unusable else []
+    # An answer with no text is not an answer, however the provider labelled it.
+    # claude with extended thinking spends its whole output budget reasoning and
+    # returns nothing at all, which reached callers as a plain success.
+    if not str(text or "").strip():
+        warnings.append("empty_model_text")
     if requested_max_tokens > model_max_tokens:
         warnings.append(f"max_tokens_clamped_for_model:{requested_max_tokens}->{model_max_tokens}")
     if temperature_ignored:

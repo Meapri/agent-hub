@@ -243,6 +243,11 @@ def run_chat(arguments: Dict[str, Any]) -> Dict[str, Any]:
         finish_reason = str(first.get("finish_reason") or "stop").lower()
         truncated = finish_reason == "length"
     warnings = [f"incomplete_finish_reason:{finish_reason}"] if truncated else []
+    # An answer with no text is not an answer, however the provider labelled it.
+    # claude with extended thinking spends its whole output budget reasoning and
+    # returns nothing at all, which reached callers as a plain success.
+    if not str(text or "").strip():
+        warnings.append("empty_model_text")
     return {
         "text": text,
         "finish_reason": finish_reason,

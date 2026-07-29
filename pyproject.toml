@@ -49,7 +49,12 @@ include = [
 testpaths = ["tests"]
 pythonpath = [".", "src"]
 # importlib mode: lets same-named test files (test_core.py) coexist across tests/<pkg>/ dirs.
-addopts = "--import-mode=importlib --strict-markers"
+addopts = "--import-mode=importlib --strict-markers -m 'not live'"
+markers = [
+    # Real provider calls. Off by default because they cost money and need
+    # credentials; run with AGENT_HUB_LIVE=1 pytest -m live.
+    "live: calls a provider over the network",
+]
 
 [tool.ruff]
 line-length = 100
