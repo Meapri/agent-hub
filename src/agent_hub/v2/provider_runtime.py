@@ -50,6 +50,12 @@ from .provider_manifests import manifest_for
 
 PROVIDERS = ("claude", "grok", "gemini", "gpt")
 PLANNER_REPAIR_LIMIT = limits.MAX_PLANNER_REPAIRS
+# The plan is machinery, not an answer, so the caller's answer cap must not
+# throttle it. max_output_tokens=1500 left the planner unable to finish the JSON
+# for a 12-step DAG: it retried six times against the same impossible cap and
+# reported plan_validation_failed, which names neither the cap nor the truncation.
+# What a run may spend is still bounded by max_total_tokens.
+PLANNER_MIN_OUTPUT_TOKENS = 8192
 RUNTIME_PLANNER_CAPABILITIES = (
     "chat",
     "inspect_codebase",
@@ -721,6 +727,8 @@ def plan(
     )
     previous = ""
     validation_error = ""
+    truncated = False
+    planner_tokens = max(int(max_tokens), PLANNER_MIN_OUTPUT_TOKENS)
     attempts: list[dict[str, Any]] = []
     for attempt in range(PLANNER_REPAIR_LIMIT + 1):
         planner_input = initial
@@ -736,11 +744,15 @@ def plan(
                 "prompt": planner_input,
                 "model": model,
                 "temperature": 0.1,
-                "max_tokens": max_tokens,
+                "max_tokens": planner_tokens,
                 "timeout_sec": timeout_seconds,
             },
         )
         previous = str(response.get("text") or "")
+        truncated = (
+            str(response.get("finish_reason") or "").strip().lower()
+            in shared_response.TRUNCATED_FINISH_REASONS
+        )
         if not response.get("success"):
             validation_error = "provider_call_failed"
             attempts.append({"attempt": attempt + 1, "success": False})
@@ -773,6 +785,20 @@ def plan(
                 },
             },
             provider=provider,
+        )
+    if truncated:
+        # Retrying an answer that ran out of room just spends the same tokens
+        # again. Say which limit stopped it, because "plan_validation_failed"
+        # sends the caller looking at the plan rather than at the budget.
+        raise HubV2Error(
+            "planner_execution_failed",
+            "The planner ran out of output tokens before finishing the plan.",
+            scope="planner",
+            retryable=True,
+            safe_details={
+                "reason_code": "planner_output_truncated",
+                "planner_max_output_tokens": planner_tokens,
+            },
         )
     raise HubV2Error(
         "planner_execution_failed",
