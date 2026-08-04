@@ -257,9 +257,28 @@ def _raise_pinned_unavailable(
                 "max_input_tokens": pinned_candidate["max_input_tokens"],
             },
         )
+    if pinned_candidate and pinned_candidate.get("login_command"):
+        # Asking for one provider by name is exactly when the answer has to be
+        # about that provider. "Not eligible for this task" reads like a
+        # capability or policy problem when the state is that its owner is
+        # signed out.
+        raise HubV2Error(
+            "provider_login_required",
+            (f"{planner_provider} is signed out -- run: {pinned_candidate['login_command']}"),
+            scope="provider",
+            retryable=False,
+            safe_details={
+                "provider": planner_provider,
+                "command": str(pinned_candidate["login_command"]),
+            },
+        )
     raise HubV2Error(
         "pinned_provider_unavailable",
         "The pinned provider is not eligible for this task.",
         scope="routing",
         retryable=True,
+        safe_details={
+            "provider": planner_provider,
+            "reason_code": str((pinned_candidate or {}).get("excluded_reason") or "unknown"),
+        },
     )

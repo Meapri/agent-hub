@@ -269,3 +269,36 @@ def test_every_capability_checks_auth_before_calling_out(monkeypatch, capability
     provider_runtime.invoke("grok", capability, {})
 
     assert checked == ["grok"]
+
+
+# --- asking for one provider by name deserves an answer about it ------------
+
+
+def test_a_pinned_signed_out_provider_says_what_to_run():
+    """The path a user takes when they say "ask GPT". The unpinned fix missed
+    it: the live daemon still answered "The pinned provider is not eligible for
+    this task." with empty details."""
+
+    with pytest.raises(HubV2Error) as refused:
+        # The live shape: the others are signed in, the pinned one is not.
+        _selection(
+            pinned=True,
+            readiness={"gpt": False, "claude": True, "grok": True, "gemini": True},
+            login_commands={"gpt": "codex login"},
+        )
+
+    assert refused.value.code == "provider_login_required"
+    assert refused.value.safe_details["provider"] == "gpt"
+    assert refused.value.safe_details["command"] == "codex login"
+
+
+def test_a_pinned_provider_blocked_for_another_reason_names_that_reason():
+    with pytest.raises(HubV2Error) as refused:
+        _selection(
+            pinned=True,
+            provider_allowlist=["claude"],
+            readiness={"gpt": True, "claude": True, "grok": True, "gemini": True},
+        )
+
+    assert refused.value.code == "pinned_provider_unavailable"
+    assert refused.value.safe_details["reason_code"] == "not_allowed"
