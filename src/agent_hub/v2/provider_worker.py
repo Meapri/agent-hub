@@ -338,6 +338,8 @@ def handle_request(provider: str, request: Mapping[str, Any]) -> dict[str, Any]:
             data = _status(provider, params)
         elif method == "catalog":
             data = _catalog(provider, params)
+        elif method == "renew":
+            data = provider_runtime.renew_auth(provider)
         elif method == "invoke":
             data = _invoke(provider, params)
         elif method == "plan":

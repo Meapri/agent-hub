@@ -20,6 +20,7 @@ from claude_codex import models as claude_models
 from claude_codex import search as claude_search
 from claude_codex import chat as claude_chat
 from claude_codex import security as claude_security
+from google_antigravity_codex import agy_auth as google_agy_auth
 from google_antigravity_codex import model_prefs as google_model_prefs
 from google_antigravity_codex import chat as google_chat
 from google_antigravity_codex import grounding as google_grounding
@@ -32,6 +33,7 @@ from google_antigravity_codex import provider as google_provider
 from google_antigravity_codex import security as google_security
 from google_antigravity_codex import writing as google_writing
 from grok_codex import auth as grok_auth
+from grok_codex import oauth_login as grok_oauth
 from grok_codex import image as grok_image
 from grok_codex import paths as grok_paths
 from grok_codex import models as grok_models
@@ -102,6 +104,82 @@ def may_auto_refresh(provider: str, state: Mapping[str, Any]) -> bool:
         and state.get("configured")
         and state.get("refreshable")
     )
+
+
+# How a caller gets a credential Agent Hub does not own back into working order.
+# Nothing here can do it for them, so the least we owe them is the owner's name
+# and the command.
+FOREIGN_CREDENTIAL_OWNERS = {
+    "claude-code": {
+        "owner": "Claude Code",
+        "command": "claude auth login --claudeai",
+    },
+    "codex": {
+        "owner": "Codex",
+        "command": "codex login",
+    },
+}
+
+
+def login_instruction(provider: str) -> dict[str, str] | None:
+    """Who owns this provider's credential, when it is not Agent Hub."""
+
+    return FOREIGN_CREDENTIAL_OWNERS.get(str(manifest_for(provider)["auth_owner"]))
+
+
+def renew_auth(provider: str) -> dict[str, Any]:
+    """Mint a fresh access token for a credential Agent Hub owns.
+
+    One entry point, because two callers need it and they must not drift: the
+    daemon renews ahead of expiry, and an invoke that finds a stale-but-
+    refreshable provider renews before giving up. Refresh used to happen only as
+    a side effect of a call landing inside a narrow window before expiry, which
+    left a trap -- an expired provider is excluded from routing, so it is never
+    called, so it never refreshes, so it stays excluded.
+    """
+
+    owner = str(manifest_for(provider)["auth_owner"])
+    if owner != "agent-hub":
+        instruction = FOREIGN_CREDENTIAL_OWNERS.get(owner, {})
+        raise HubV2Error(
+            "provider_login_required",
+            (
+                f"{provider} signs in through {instruction.get('owner', owner)}, "
+                "which Agent Hub cannot refresh on its behalf."
+            ),
+            scope="provider",
+            safe_details={
+                "provider": provider,
+                "auth_owner": owner,
+                **({"command": instruction["command"]} if instruction.get("command") else {}),
+            },
+        )
+    try:
+        if provider == "grok":
+            grok_oauth.force_refresh_access_token()
+        elif provider == "gemini":
+            google_agy_auth.force_refresh_credentials()
+        else:  # pragma: no cover - the manifest owns the mapping
+            raise HubV2Error(
+                "unknown_provider",
+                "The provider does not support Agent Hub managed refresh.",
+                scope="provider",
+                safe_details={"provider": provider},
+            )
+    except HubV2Error:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the provider's words never reach the caller
+        raise HubV2Error(
+            "provider_refresh_failed",
+            "The stored credential could not be refreshed; sign in again.",
+            scope="provider",
+            retryable=False,
+            safe_details={
+                "provider": provider,
+                "reason_code": str(getattr(exc, "code", "") or type(exc).__name__),
+            },
+        ) from None
+    return status(provider)
 
 
 def _envelope(
@@ -691,11 +769,45 @@ def generate_image(provider: str, arguments: Mapping[str, Any]) -> dict[str, Any
     return _envelope("generate_image", raw, provider=provider)
 
 
+def ensure_usable_auth(provider: str) -> None:
+    """Renew an owned credential that has gone stale, before the call needs it.
+
+    Routing lets a refreshable provider through on the strength of
+    `invocation_ready`, so something has to make good on that promise here. It
+    did not: the call went out with the expired token and came back as a bare
+    RuntimeError. A credential Agent Hub does not own is reported with its
+    owner's name instead, because no amount of retrying will fix it.
+    """
+
+    state = (status(provider).get("data") or {}).get("providers", {}).get(provider, {})
+    if state.get("ready"):
+        return
+    if may_auto_refresh(provider, state):
+        renew_auth(provider)
+        return
+    instruction = login_instruction(provider)
+    if instruction and not state.get("logged_in"):
+        raise HubV2Error(
+            "provider_login_required",
+            (
+                f"{provider} is signed out. Its credential belongs to "
+                f"{instruction['owner']}; run: {instruction['command']}"
+            ),
+            scope="provider",
+            safe_details={
+                "provider": provider,
+                "auth_owner": str(manifest_for(provider)["auth_owner"]),
+                "command": instruction["command"],
+            },
+        )
+
+
 def invoke(
     provider: str,
     capability: str,
     arguments: Mapping[str, Any],
 ) -> dict[str, Any]:
+    ensure_usable_auth(provider)
     # vision is chat with the image as the subject. _prepare_multimodal turns
     # the data URLs into whatever message shape this provider wants.
     if capability in {"chat", "review", "decide", "vision"}:

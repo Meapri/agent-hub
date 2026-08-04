@@ -81,6 +81,10 @@ def select_provider(
     models: Mapping[str, str] | None = None,
     model_limits: Mapping[str, Mapping[str, Any]] | None = None,
     estimated_input_tokens: int | None = None,
+    # Which excluded providers are only excluded because their owner is signed
+    # out, and the command that fixes each. Supplied by the caller so this stays
+    # a pure function of its arguments.
+    login_commands: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Pick the provider and the fallback order for one step.
 
@@ -119,6 +123,7 @@ def select_provider(
                 "excluded_reason": reason,
                 "max_input_tokens": input_limit["max_input_tokens"],
                 "context_limit_source": input_limit["source"],
+                "login_command": (login_commands or {}).get(provider),
             }
         )
 
@@ -187,10 +192,45 @@ def _raise_nothing_eligible(
                 "blocked_provider_count": len(context_blocked),
             },
         )
+    _raise_signed_out(candidates)
     raise HubV2Error(
         "no_eligible_provider",
         "No ready provider satisfies the task policy.",
         scope="routing",
+    )
+
+
+def _raise_signed_out(candidates: Sequence[Mapping[str, Any]]) -> None:
+    """Say which sign-in is missing, when that is the only thing wrong.
+
+    "No ready provider satisfies the task policy" is true and useless: it reads
+    like a policy problem when the actual state is that Codex is logged out and
+    one command fixes it. Only raised when every excluded candidate is excluded
+    for that reason, so a genuine policy or capability exclusion still reports
+    itself.
+    """
+
+    # Providers outside the allowlist were never in the running, so they say
+    # nothing about why the ones that were are unavailable.
+    considered = [item for item in candidates if item["excluded_reason"] != "not_allowed"]
+    blocked = [item for item in considered if item["excluded_reason"] == "not_ready"]
+    if not blocked or len(blocked) != len(considered):
+        return
+    signed_out = [item for item in blocked if item.get("login_command")]
+    if len(signed_out) != len(blocked):
+        return
+    raise HubV2Error(
+        "provider_login_required",
+        "; ".join(
+            f"{item['provider']} is signed out -- run: {item['login_command']}"
+            for item in signed_out
+        ),
+        scope="provider",
+        retryable=False,
+        safe_details={
+            "providers": [str(item["provider"]) for item in signed_out],
+            "commands": [str(item["login_command"]) for item in signed_out],
+        },
     )
 
 
