@@ -19,6 +19,9 @@ from .tools import tool_definitions
 
 DEFAULT_SOCKET_PATH = DEFAULT_STATE_DIR / "run" / "agent-hub.sock"
 MAX_DAEMON_REQUEST_BYTES = 8 * 1024 * 1024
+# Shorter than the shortest credential Agent Hub owns -- gemini's is an hour --
+# so a token cannot expire between two passes.
+CREDENTIAL_RENEWAL_INTERVAL_SECONDS = 600.0
 
 
 def _safe_socket_parent(path: Path) -> Path:
@@ -115,6 +118,7 @@ class HubDaemon:
         self.service = HubService(store)
         self._closing = threading.Event()
         self._recovery_thread: threading.Thread | None = None
+        self._renewal_thread: threading.Thread | None = None
         target = _prepare_socket(self.socket_path)
         self._server = _ThreadingUnixServer(str(target), _Handler)
         self._server.dispatch = self.dispatch  # type: ignore[attr-defined]
@@ -245,6 +249,25 @@ class HubDaemon:
             except HubV2Error:
                 continue
 
+    def _renew_credentials_once(self) -> dict[str, str]:
+        """Renew the credentials Agent Hub owns before they expire.
+
+        Without this, a token is only refreshed as a side effect of a call
+        landing near its expiry, and an expired provider is excluded from
+        routing -- so it is never called, so it never refreshes, so it stays
+        excluded. Renewing on a clock rather than on demand is what breaks that
+        loop. Credentials owned by Claude Code or Codex are left alone.
+        """
+
+        return self.service.renew_owned_credentials()
+
+    def _renewal_loop(self) -> None:
+        while not self._closing.wait(CREDENTIAL_RENEWAL_INTERVAL_SECONDS):
+            try:
+                self._renew_credentials_once()
+            except Exception:  # noqa: BLE001 - a bad renewal must not stop the daemon
+                continue
+
     def serve_forever(self) -> None:
         self._recover_once()
         self._recovery_thread = threading.Thread(
@@ -253,6 +276,12 @@ class HubDaemon:
             name="agent-hub-v2-lease-recovery",
         )
         self._recovery_thread.start()
+        self._renewal_thread = threading.Thread(
+            target=self._renewal_loop,
+            daemon=True,
+            name="agent-hub-v2-credential-renewal",
+        )
+        self._renewal_thread.start()
         self._server.serve_forever(poll_interval=0.2)
 
     def serve_in_thread(self) -> threading.Thread:
@@ -266,6 +295,8 @@ class HubDaemon:
         self._server.server_close()
         if self._recovery_thread is not None:
             self._recovery_thread.join(timeout=3.0)
+        if self._renewal_thread is not None:
+            self._renewal_thread.join(timeout=3.0)
         try:
             self.socket_path.unlink()
         except FileNotFoundError:

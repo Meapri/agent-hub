@@ -61,6 +61,7 @@ from .policy import (
 from .provider_client import ProviderWorkerClient
 from .provider_selection import select_provider
 from .provider_manifests import builtin_provider_manifests, manifest_for, model_input_limit
+from .provider_runtime import login_instruction, may_auto_refresh
 from .store import HubStore
 from .tools import TOOL_NAMES, tool_definitions
 from .verifier import verify_output
@@ -431,6 +432,56 @@ class HubService:
     def _worker(self, provider: str) -> ProviderWorkerClient:
         manifest_for(provider)
         return self._worker_factory(provider)
+
+    @staticmethod
+    def _login_commands(states: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
+        """The sign-in command for each provider whose owner is signed out.
+
+        Only for a credential Agent Hub does not own and cannot renew. A
+        provider that is merely stale is left out, because the renewal path
+        fixes that one without the user doing anything.
+        """
+
+        commands: dict[str, str] = {}
+        for provider, state in states.items():
+            if state.get("ready") or state.get("logged_in"):
+                continue
+            instruction = login_instruction(provider)
+            if instruction:
+                commands[provider] = instruction["command"]
+        return commands
+
+    def renew_owned_credentials(self) -> dict[str, str]:
+        """Refresh every credential Agent Hub owns that is close to expiring.
+
+        Returns one outcome per provider considered, so the caller can log what
+        happened without reading provider state itself. A provider whose
+        credential belongs to Claude Code or Codex is skipped rather than
+        attempted: nothing here can renew it, and trying would only produce a
+        failure the user cannot act on differently.
+        """
+
+        outcomes: dict[str, str] = {}
+        for provider in (item["provider_id"] for item in builtin_provider_manifests()):
+            if manifest_for(provider)["auth_owner"] != "agent-hub":
+                continue
+            try:
+                state = self._provider_state(
+                    self._worker(provider).request("status", {}, timeout=30.0),
+                    provider,
+                )
+                if not may_auto_refresh(provider, state):
+                    outcomes[provider] = "not_due" if state.get("ready") else "not_refreshable"
+                    continue
+                self._worker(provider).request("renew", {}, timeout=60.0)
+                self._invalidate_provider_state(provider)
+                outcomes[provider] = "renewed"
+                self.store.record_provider_outcome(provider=provider, success=True)
+            except HubV2Error as exc:
+                outcomes[provider] = exc.code
+            except Exception:  # noqa: BLE001 - one bad provider must not stop the rest
+                outcomes[provider] = "renewal_error"
+        return outcomes
 
     @staticmethod
     def _safe_provider_error(
@@ -927,6 +978,7 @@ class HubService:
             models=models,
             model_limits=self._routing_model_limits(models),
             estimated_input_tokens=base_context_budget["estimated_input_tokens"],
+            login_commands=self._login_commands(states),
         )
         provider = decision["selected_provider"]
         selected_model = models.get(provider) or None
@@ -1730,6 +1782,7 @@ class HubService:
                 models=models,
                 model_limits=self._routing_model_limits(models),
                 estimated_input_tokens=base_context_budget["estimated_input_tokens"],
+                login_commands=self._login_commands(states),
             )
             eligible = {
                 str(item["provider"]) for item in decision["candidates"] if item["eligible"]

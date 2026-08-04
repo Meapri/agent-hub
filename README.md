@@ -7,7 +7,7 @@ macOS용 멀티 모델 실행 환경입니다.
 인계 기록을 로컬에서 함께 관리합니다. Codex나 Claude Code가 종료되어도 실행 상태가 남기
 때문에 긴 작업을 다시 이어갈 수 있습니다.
 
-- 현재 버전: `3.3.1`
+- 현재 버전: `3.4.0`
 - Python: 3.11 이상
 - 지원 환경: macOS 단일 사용자
 - 라이선스: MIT
@@ -150,6 +150,21 @@ flowchart LR
 | Grok | chat, search, vision, image, write, review, decide | Agent Hub |
 | Gemini | chat, search, vision, image, write, review, decide | Agent Hub |
 | GPT | chat, vision, write, review, decide | Codex |
+
+### 로그인이 유지되는 방식
+
+인증을 관리하는 곳이 다르면 만료됐을 때 벌어지는 일도 다릅니다.
+
+Grok과 Gemini는 Agent Hub가 자격 정보를 가지고 있어서, daemon이 주기적으로 만료 전에 토큰을
+새로 발급합니다. 호출이 없는 동안에도 갱신되므로 오래 쓰지 않다가 돌아와도 그대로 씁니다.
+
+Claude와 GPT의 자격 정보는 각각 Claude Code와 Codex의 것입니다. Agent Hub는 그 세션을 대신
+갱신하지 않습니다. 다른 프로그램이 관리하는 로그인을 몰래 건드리지 않기 위해서입니다. 이쪽이
+로그아웃되면 어느 프로그램에서 무슨 명령으로 다시 로그인해야 하는지 오류에 함께 알려줍니다.
+
+```
+gpt is signed out. Its credential belongs to Codex; run: codex login
+```
 
 ### 이미지 다루기
 

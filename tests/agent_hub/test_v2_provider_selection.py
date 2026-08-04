@@ -173,6 +173,9 @@ def test_selection_reads_no_history_and_writes_nothing():
         "models",
         "model_limits",
         "estimated_input_tokens",
+        # Data the caller hands in, not a source this function reads for
+        # itself. Same arguments still give the same answer.
+        "login_commands",
     }
 
 
